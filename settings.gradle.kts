@@ -1,0 +1,29 @@
+pluginManagement {
+    repositories {
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // The LiveKit Android SDK pulls audioswitch from JitPack, which is where that
+        // library publishes; no other dependency here uses it.
+        maven("https://jitpack.io") {
+            content { includeGroupByRegex("com\\.github\\.davidliu.*") }
+        }
+    }
+}
+
+rootProject.name = "Brapmony"
+include(":app")

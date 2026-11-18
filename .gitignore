@@ -1,0 +1,28 @@
+# Gradle and the Android build
+.gradle/
+.kotlin/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing keys and their passwords: CI writes these from secrets, never the tree
+*.keystore
+*.jks
+keystore.properties
+test-keystore.properties
+
+# The release tooling's dependencies
+node_modules/
+
+# An instance's throwaway accounts and anon key: local, never committed
+e2e/fixture.json
+e2e/stack.env
+e2e/idp/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+*.iml
+*.swp

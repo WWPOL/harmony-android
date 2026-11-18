@@ -1,0 +1,64 @@
+Brapmony - a native Android client for Harmony instances
+=======================================================
+
+Copyright (C) 2024-present the WWPOL contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+details.
+
+You should have received a copy of the GNU General Public License along with
+this program.  If not, see <https://www.gnu.org/licenses/>.
+
+The full text of the license is in LICENSE, beside this file. LICENSE and this
+notice are also packaged into the APK under `app/src/main/assets/legal/`, so a
+copy of the app carries its own license.
+
+--------------------------------------------------------------------------------
+
+Everything in this repository is this project's own work: the Kotlin and Compose
+sources, the resources, the Gradle build, the emulator journey scripts and the
+release tooling. It is a client: it talks to a Harmony instance over that
+instance's HTTP API, and it ships none of the server.
+
+Third-party components
+
+The app links against libraries that are not part of this repository; the Gradle
+build resolves them at build time rather than vendoring them here. Each is under
+its own license:
+
+  - AndroidX, Jetpack Compose, Material 3   Apache License 2.0
+    androidx.*, com.google.android.material
+    https://cs.android.com/androidx/platform/frameworks/support
+
+  - Kotlin standard library, kotlinx.serialization,
+    kotlinx.coroutines                       Apache License 2.0
+    https://github.com/JetBrains/kotlin
+
+  - OkHttp                                  Apache License 2.0
+    https://github.com/square/okhttp
+
+  - Coil                                    Apache License 2.0
+    https://github.com/coil-kt/coil
+
+  - LiveKit Android SDK                     Apache License 2.0
+    https://github.com/livekit/client-sdk-android
+
+  - Gradle wrapper (`gradlew`, `gradlew.bat`,
+    `gradle/wrapper/`)                       Apache License 2.0
+    https://github.com/gradle/gradle
+
+The fuzzing harness under `e2e/fuzz/` imports Hypothesis, which is installed
+separately and is not distributed here (Mozilla Public License 2.0).
+
+--------------------------------------------------------------------------------
+
+Contributors are listed in the git commit history. Substantial contributions are
+gratefully acknowledged; by submitting a pull request you agree that your
+contribution is licensed under the same terms as this project (GPL v3 or later).

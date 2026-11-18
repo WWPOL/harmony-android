@@ -1,0 +1,17 @@
+{
+  "name": "brapmony",
+  "version": "1.9.6",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "description": "A native Android client for Harmony instances",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test scripts/*.test.mjs && node scripts/check-links.mjs"
+  },
+  "devDependencies": {
+    "yaml": "^2.8.1"
+  }
+}
