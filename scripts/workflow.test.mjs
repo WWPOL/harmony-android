@@ -6,7 +6,9 @@
 // the release for that tag instead of creating a second one.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
@@ -343,4 +345,86 @@ test('the README describes the app, not a server', () => {
                        'Tauri', 'Supabase project', 'docker compose', 'ActivityPub']) {
     assert.ok(!new RegExp(claim, 'i').test(readme), `the README must not claim a \${claim}`);
   }
+});
+
+// `name-artifact.sh` exits 2 on a profile it does not know, and android.yml called it as
+// `name-artifact.sh Android debug <apk>` after the restructure. Every push to every branch
+// therefore died at that step with exit 2, and every step after it -- the digest check, the
+// artifact upload -- was skipped, so no APK artifact and no rolling prerelease was ever
+// produced. The tests above passed throughout, because they only looked for the script's
+// name. This one runs the namer with the arguments each workflow actually passes and
+// asserts the file it produces, so a call the script refuses fails here instead of on a
+// runner.
+test('the APK namer is called with arguments it accepts, and names the file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'namer-'));
+  const apk = join(dir, 'app-debug.apk');
+  writeFileSync(apk, 'not a real apk, only a file to be renamed');
+  const env = {
+    ...process.env,
+    GITHUB_REF_NAME: 'main',
+    GITHUB_SHA: 'c214e8e5b731df3db9ac1062510ff5391d7f573a',
+    GITHUB_OUTPUT: join(dir, 'github-output'),
+  };
+  writeFileSync(env.GITHUB_OUTPUT, '');
+
+  // The branch build: a debug APK, named after its version, ref and commit.
+  const branch = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', apk], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(branch.status, 0, `the branch build's namer call failed: ${branch.stderr}`);
+  const named = branch.stdout.trim();
+  assert.match(
+    named,
+    /Brapmony_Android_V\d+\.\d+\.\d+_debug-main-c214e8e\.apk$/,
+    'the branch APK is named after its version, ref and commit',
+  );
+  assert.ok(existsSync(named), 'the APK really was renamed to that name');
+  assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /^path=/m, 'the path is written to GITHUB_OUTPUT');
+
+  // The tag build: `--release`, with the profile as the signing state.
+  for (const profile of ['release', 'debug']) {
+    const file = join(dir, `app-release-${profile}.apk`);
+    writeFileSync(file, 'a file to be renamed');
+    const tagged = spawnSync('bash', ['scripts/name-artifact.sh', '--release', profile, file], {
+      cwd: root, env, encoding: 'utf8',
+    });
+    assert.equal(tagged.status, 0, `the tag build's namer call failed for ${profile}: ${tagged.stderr}`);
+    const expected = profile === 'release' ? /Brapmony_Android_V\d+\.\d+\.\d+\.apk$/ : /Brapmony_Android_V\d+\.\d+\.\d+_debug\.apk$/;
+    assert.match(tagged.stdout.trim(), expected, `a ${profile}-profile tag build is named for its signing`);
+  }
+
+  // And the exact string each workflow passes, taken from the workflow itself, is one the
+  // namer accepts: the check above would still pass if a workflow passed `Android`.
+  const android = parse(ANDROID);
+  const call = android.jobs.build.steps.find((s) => String(s.run || '').includes('name-artifact.sh'));
+  assert.ok(call, 'the branch build names its APK with the script');
+  const args = /name-artifact\.sh\s+([^\n]+)/.exec(call.run)[1];
+  assert.ok(!/\bAndroid\b/.test(args), `the namer takes a profile (release|debug), not a platform: ${args}`);
+  assert.match(args, /^(--release )?(release|debug)\b/, `the namer call starts with a profile it knows: ${args}`);
+});
+
+// GitHub runs every `run:` step with `bash -eo pipefail`, so a command whose output is
+// piped into `head` fails the step with SIGPIPE (exit 141) as soon as it writes past the
+// first line. The publish job read the published APK's badging that way, which failed
+// every single time it was reached. The build job's digest step already writes to a file
+// for this reason; the rule is that anything that can write more than one line is not put
+// on the left of a pipe that stops reading.
+test('no step pipes a command that keeps writing into head', () => {
+  const offenders = [];
+  for (const file of WORKFLOWS) {
+    const doc = parse(file);
+    for (const [job, spec] of Object.entries(doc.jobs || {})) {
+      for (const step of spec.steps || []) {
+        if (!step.run) continue;
+        for (const line of step.run.split('\n')) {
+          // `aapt2 dump badging` and `apksigner verify` both print several lines; neither
+          // may be the left side of a pipe into head. `sed -n ...p` over a file is fine.
+          if (!/\|/.test(line) || !/\bhead\b/.test(line)) continue;
+          const left = line.slice(0, line.indexOf('|'));
+          if (/\baapt2\b|\bapksigner\b/.test(left)) {
+            offenders.push(`${file} ${job} ${step.name || step.uses}: ${line.trim()}`);
+          }
+        }
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `these pipe a multi-line command into head, which fails under pipefail:\n${offenders.join('\n')}`);
 });

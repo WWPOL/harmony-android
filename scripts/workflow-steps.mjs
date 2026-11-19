@@ -71,11 +71,36 @@ let ran = 0;
 values.GITHUB_OUTPUT = outputs;
 values.GITHUB_STEP_SUMMARY = summary;
 
+// The job's own `env:` applies to every step, as it does on a runner. Without this a step
+// guarded by `if: env.HAS_TEST_KEYSTORE == 'true'` skipped here while running in CI, and a
+// local check of the signing path proved nothing.
+for (const [k, v] of Object.entries(spec.env || {})) {
+  if (values[k] === undefined) values[k] = expand(String(v));
+}
+
+// A step's `if:` is not an expression engine here; the forms these workflows use are a
+// comparison of one variable, which is evaluated so the right steps run. A form this does
+// not understand stops the run rather than quietly skipping a step.
+function stepRuns(when) {
+  if (when === undefined) return true;
+  const m = /^\s*env\.(\w+)\s*(==|!=)\s*'([^']*)'\s*$/.exec(String(when));
+  if (!m) {
+    console.error(`workflow-steps: cannot evaluate if: ${when}`);
+    process.exit(2);
+  }
+  const actual = values[m[1]] ?? '';
+  return m[2] === '==' ? actual === m[3] : actual !== m[3];
+}
+
 for (const step of spec.steps || []) {
   const name = step.name || step.uses || 'run';
   if (only && name !== only) continue;
   if (!step.run) {
     console.log(`skip  ${name} (uses: ${step.uses})`);
+    continue;
+  }
+  if (!stepRuns(step.if)) {
+    console.log(`skip  ${name} (if: ${step.if})`);
     continue;
   }
   index += 1;

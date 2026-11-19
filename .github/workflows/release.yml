@@ -194,9 +194,17 @@ jobs:
             echo '::error::the release keystore is configured, but the APK carries the test key'
             exit 1
           fi
-          if [ "$HAS_KEYSTORE" != 'true' ] && [ "$HAS_TEST_KEYSTORE" = 'true' ] && [ -n "$test_key" ] && [ "$fingerprint" != "$test_key" ]; then
-            echo '::error::the stable test key is configured, but the APK carries a different certificate'
-            exit 1
+          if [ "$HAS_KEYSTORE" != 'true' ] && [ "$HAS_TEST_KEYSTORE" = 'true' ]; then
+            # A test key without its fingerprint variable cannot be proved to be the one
+            # that signed the APK, and a comparison against nothing passes anything.
+            if [ -z "$test_key" ]; then
+              echo '::error::ANDROID_TEST_KEYSTORE_BASE64 is configured but ANDROID_TEST_KEY_SHA256 is not, so the APK cannot be proved to carry the stable test key. Set the repository variable to the certificate fingerprint (keytool -list -v, SHA256).'
+              exit 1
+            fi
+            if [ "$fingerprint" != "$test_key" ]; then
+              echo '::error::the stable test key is configured, but the APK carries a different certificate'
+              exit 1
+            fi
           fi
           ( cd "$(dirname "$apk")" && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256" )
           cat "$apk.sha256"
