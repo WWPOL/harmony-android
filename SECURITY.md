@@ -16,9 +16,6 @@ Please include:
 - the app version and commit, and the Android version and device;
 - any mitigation you can suggest.
 
-Expect an initial acknowledgement within **72 hours** and a fix or mitigation within **14 days**
-for anything serious.
-
 ## What is in scope
 
 - The app: `app/src/main/java/lol/mony/harmony/`, its manifest, resources and Gradle build.
@@ -69,8 +66,7 @@ Stated plainly so a report is not spent on it:
 
 ## Disclosure
 
-We follow a **90-day coordinated disclosure** window by default. If a vulnerability is being
-exploited in the wild we may disclose and patch sooner. Reporters who follow this policy are
+Please coordinate disclosure through the private vulnerability report. Reporters who follow this policy are
 credited in the advisory and in the commit that fixes it, unless they prefer to stay anonymous.
 
 ## Licence
