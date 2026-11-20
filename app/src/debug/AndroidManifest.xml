@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      The design preview is a debug-only screen: it draws the redesigned frame with fixture rows
+      so the layout can be seen on a device without a Harmony instance. It is merged into the
+      debug build only, so a release APK neither contains it nor can start it.
+    -->
+    <application>
+        <activity
+            android:name=".ui.DesignPreviewActivity"
+            android:exported="true"
+            android:label="Design preview"
+            android:theme="@style/Theme.Harmony" />
+    </application>
+</manifest>

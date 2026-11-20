@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Done
 import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.MarkEmailRead
 import androidx.compose.material.icons.outlined.MarkEmailUnread
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -42,10 +44,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,12 +77,14 @@ import lol.mony.harmony.data.repo.NotificationRepository
 import lol.mony.harmony.data.session.AuthState
 import lol.mony.harmony.ui.AppState
 import lol.mony.harmony.ui.components.Avatar
+import lol.mony.harmony.ui.theme.HarmonySize
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * Standalone parent integration entrypoint. Callbacks route real post/profile ids when supplied;
  * without shell routing the screen loads its own real, RLS-protected target previews.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NotificationsScreen(
     state: AppState,
@@ -118,6 +125,10 @@ fun NotificationsScreen(
     var previewTarget by remember(profileId, signedIn.endpoint) { mutableStateOf<NotificationTarget?>(null) }
     var detail by remember(profileId, signedIn.endpoint) { mutableStateOf<Notification?>(null) }
     val working = ui.loading || ui.loadingMore || ui.busy
+    // The bar's supporting line: what is waiting, counted from the rows already loaded rather
+    // than from a second request. It is a summary of what is on screen, which is what a person
+    // reading the title wants.
+    val unreadCount = ui.items.count { !it.isRead }
 
     LaunchedEffect(inbox) { inbox.load() }
     LaunchedEffect(inbox, ui.notice) {
@@ -156,38 +167,80 @@ fun NotificationsScreen(
     Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize()) {
-                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Notifications", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    IconButton(onClick = { scope.launch { inbox.load() } }, enabled = !working) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = "Refresh notifications")
-                    }
-                    Box {
-                        IconButton(onClick = { menuOpen = true }, enabled = !working) {
-                            Icon(Icons.Outlined.MoreVert, contentDescription = "Notification actions")
-                        }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Mark all as read") },
-                                leadingIcon = { Icon(Icons.Outlined.DoneAll, contentDescription = null) },
-                                onClick = { menuOpen = false; scope.launch { inbox.markAllRead() } },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Delete all notifications", color = MaterialTheme.colorScheme.error) },
-                                leadingIcon = { Icon(Icons.Outlined.DeleteOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                                onClick = { menuOpen = false; deleteRequest = NotificationDeleteRequest.All },
+                // One app bar instead of a bare heading row. The actions are the same, but the
+                // title is a title: it is the screen's name, at the size the rest of the app
+                // gives a screen's name, and it carries the unread count as its supporting line
+                // so a person knows what is waiting without counting rows.
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("Notifications", style = MaterialTheme.typography.titleLarge,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                when {
+                                    ui.items.isEmpty() -> "Nothing waiting"
+                                    unreadCount > 0 -> "$unreadCount unread"
+                                    else -> "All caught up"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                    },
+                    actions = {
+                        IconButton(onClick = { scope.launch { inbox.load() } }, enabled = !working) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = "Refresh notifications")
+                        }
+                        Box {
+                            IconButton(onClick = { menuOpen = true }, enabled = !working) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "Notification actions")
+                            }
+                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Mark all as read") },
+                                    leadingIcon = { Icon(Icons.Outlined.DoneAll, contentDescription = null) },
+                                    onClick = { menuOpen = false; scope.launch { inbox.markAllRead() } },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Delete all notifications", color = MaterialTheme.colorScheme.error) },
+                                    leadingIcon = { Icon(Icons.Outlined.DeleteOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                    onClick = { menuOpen = false; deleteRequest = NotificationDeleteRequest.All },
+                                )
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                )
+                // The filter was a `TabRow` with a `FilterChip` floating under it, which made two
+                // controls out of one decision. A segmented control is one control, and it reads
+                // as a filter because the unread toggle sits beside it in the same row.
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = HarmonySize.gutter, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    SingleChoiceSegmentedButtonRow(Modifier.weight(1f)) {
+                        NotificationInboxFilter.entries.forEachIndexed { index, item ->
+                            SegmentedButton(
+                                selected = filter == item,
+                                onClick = { filter = item },
+                                enabled = !ui.busy,
+                                shape = SegmentedButtonDefaults.itemShape(index, NotificationInboxFilter.entries.size),
+                                label = { Text(item.label, maxLines = 1) },
+                            )
+                        }
                     }
-                }
-                TabRow(selectedTabIndex = filter.ordinal) {
-                    NotificationInboxFilter.entries.forEach { item ->
-                        Tab(selected = filter == item, onClick = { filter = item }, enabled = !ui.busy, text = { Text(item.label) })
-                    }
-                }
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    FilterChip(selected = unreadOnly, onClick = { unreadOnly = !unreadOnly }, enabled = !ui.busy, label = { Text("Unread only") })
-                    Spacer(Modifier.weight(1f))
-                    if (ui.items.isNotEmpty()) Text("${ui.items.size} loaded", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FilterChip(
+                        selected = unreadOnly,
+                        onClick = { unreadOnly = !unreadOnly },
+                        enabled = !ui.busy,
+                        label = { Text("Unread") },
+                        leadingIcon = if (unreadOnly) {
+                            { Icon(Icons.Outlined.Done, contentDescription = null, Modifier.size(18.dp)) }
+                        } else null,
+                    )
                 }
                 NotificationPermissionNotice()
                 if (working && ui.items.isNotEmpty()) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -333,7 +386,15 @@ private fun NotificationRow(
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(copy.title, style = MaterialTheme.typography.bodyLarge, fontWeight = if (notification.isRead) FontWeight.Normal else FontWeight.SemiBold)
-                actor?.handle?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                // The handle under the title says who acted, for a title that is about an event
+                // rather than a person. Some types already put the handle in the preview -- a
+                // follow's preview *is* the handle, a request's says it sent the request -- and
+                // printing it twice reads as a rendering fault, so it is dropped when the preview
+                // already carries it.
+                val handle = actor?.handle
+                if (handle != null && copy.preview?.contains(handle) != true) {
+                    Text(handle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 copy.preview?.let { Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis) }
                 copy.context?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 Text(

@@ -145,6 +145,22 @@ class SessionStore(private val context: Context, private val sealer: SessionSeal
         val key = accountKey("appearance.$profileId")
         context.sessionData.edit { it[key] = json.toString() }
     }
+
+    /**
+     * Whether this device takes its colours from the wallpaper instead of from the account.
+     *
+     * It is a *device* preference on purpose. `profiles.appearance_settings` is a contract this
+     * app shares with the web client, and a native-only key written into it would be either
+     * dropped by the other client or preserved forever as a mystery field. A Material You choice
+     * belongs to the device that has the wallpaper, so it is stored where the other device
+     * preferences are, keyed by the same account.
+     */
+    val dynamicColorFlow: Flow<Boolean> = context.sessionData.data.map { it[accountKey("dynamic-color")] == "on" }
+
+    suspend fun setDynamicColor(enabled: Boolean) {
+        val key = accountKey("dynamic-color")
+        context.sessionData.edit { if (enabled) it[key] = "on" else it.remove(key) }
+    }
     suspend fun draft(room: String): String {
         val key = accountKey("draft.$room")
         return context.sessionData.data.first()[key].orEmpty()

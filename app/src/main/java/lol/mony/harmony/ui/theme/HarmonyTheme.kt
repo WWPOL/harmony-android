@@ -2,11 +2,15 @@ package lol.mony.harmony.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.CornerBasedShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -14,22 +18,34 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * Harmony's look, expressed as Material 3.
+ * Harmony's look, expressed as Material 3 Expressive.
  *
- * The app never invents a palette: [buildColorScheme] derives every Material role from the
- * person's own appearance settings, in OKLCH, the way the web client derives its CSS variables
- * (`generateThemePalette` in `src/utils/colorUtils.ts`). That is what keeps a theme chosen on
- * the web recognisable here, and Android's Material 3 components - ripples, elevation tints,
- * the app bar - keep working because every role is filled.
+ * There are two sources of colour, and the person chooses between them:
+ *
+ * - **The account's look.** [buildColorScheme] derives every Material role from the account's
+ *   own appearance settings in OKLCH, the way the web client derives its CSS variables
+ *   (`generateThemePalette` in `src/utils/colorUtils.ts`). That is what keeps a theme chosen on
+ *   the web recognisable here. It is the default, and it is what an explicit theme choice
+ *   always uses: the app never puts wallpaper colours over a look somebody picked.
+ * - **The wallpaper.** On Android 12 and later, [HarmonyTheme]'s `dynamicColor` asks the
+ *   platform for its own tonal palettes, which is Material You: the app takes the device's
+ *   colours and keeps its own layout, type and shapes. It is offered as an explicit choice,
+ *   not applied silently, and the branded palette is what it falls back to.
+ *
+ * Either way every Material role is filled, so ripples, elevation tints, containers and
+ * `surfaceContainer*` tiers keep working, and [HarmonyColors] carries the tokens Material has
+ * no slot for (the chat surface, the sidebar, presence, badges).
  */
 
 /** Harmony's non-Material tokens, the ones Material has no slot for. */
@@ -62,14 +78,42 @@ data class HarmonyColors(
     val onBrand: Color,
     /** True when the theme is a light one; components that draw their own surfaces read it. */
     val isLight: Boolean,
+    /** True when the palette came from the wallpaper rather than from the account. */
+    val isDynamic: Boolean = false,
 )
 
 val LocalHarmonyColors = staticCompositionLocalOf { buildHarmonyColors(HarmonyPresets.dark, isLight = false) }
 
-/** Motion policy: Harmony's "reduce motion" and the system animation scale, in one place. */
+/**
+ * Motion policy: Harmony's "reduce motion" and the system animation scale, in one place.
+ *
+ * Two independent switches decide this, and both have to be respected: the account's own
+ * `reduceMotion` preference (which the web client stores in `profiles.appearance_settings`) and
+ * the system's animator duration scale, which Android's own "Remove animations" setting writes.
+ * [still] is the single question a screen asks; if it is true, nothing slides, overshoots or
+ * waits on a spring to settle.
+ */
 @Immutable
-data class MotionPreferences(val reduceMotion: Boolean) {
-    fun <T> animation(enabled: T, disabled: T): T = if (reduceMotion) disabled else enabled
+data class MotionPreferences(
+    val reduceMotion: Boolean,
+    /** The system's animator duration scale; 0 means animations are switched off system-wide. */
+    val systemScale: Float = 1f,
+) {
+    /** True when nothing may move: either switch is enough. */
+    val still: Boolean get() = reduceMotion || systemScale == 0f
+
+    fun <T> animation(enabled: T, disabled: T): T = if (still) disabled else enabled
+
+    /** A duration in milliseconds, collapsed to none when motion is reduced. */
+    fun duration(millis: Int): Int = if (still) 0 else millis
+
+    /** The spec for something that enters, leaves or travels. */
+    fun spatial(millis: Int): androidx.compose.animation.core.AnimationSpec<Float> =
+        androidx.compose.animation.core.tween(durationMillis = duration(millis))
+
+    /** The spec for a fade or a colour change: still a fade, never zero frames of state. */
+    fun effects(millis: Int): androidx.compose.animation.core.AnimationSpec<Float> =
+        androidx.compose.animation.core.tween(durationMillis = duration(millis))
 }
 
 val LocalMotion = staticCompositionLocalOf { MotionPreferences(false) }
@@ -100,27 +144,53 @@ private val LocalBaseDensity = staticCompositionLocalOf<Density?> { null }
 
 val LocalAccessibility = staticCompositionLocalOf { AccessibilityPreferences(false, false) }
 
+/** True when the platform can supply wallpaper-derived palettes (Android 12 / API 31). */
+val dynamicColorSupported: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+
+/**
+ * Installs the app's look.
+ *
+ * [dynamicColor] is only honoured on Android 12+; on anything older the branded scheme is used
+ * and the appearance panel says why the switch is unavailable rather than offering a control
+ * that would do nothing.
+ */
 @Composable
 fun HarmonyTheme(
     settings: VisualThemeSettings,
+    dynamicColor: Boolean = false,
     systemInDarkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
     val resolved = remember(settings, systemInDarkTheme) { resolveAppearance(settings, systemInDarkTheme) }
-    val colorScheme = remember(resolved) { buildColorScheme(resolved) }
-    val harmony = remember(resolved) { buildHarmonyColors(resolved.preset, resolved.light) }
+    val context = LocalContext.current
+    val useDynamic = dynamicColor && dynamicColorSupported
+    val colorScheme = remember(resolved, useDynamic) {
+        if (useDynamic) {
+            runCatching {
+                if (resolved.light) dynamicLightColorScheme(context) else dynamicDarkColorScheme(context)
+            }.getOrElse { buildColorScheme(resolved) }
+        } else buildColorScheme(resolved)
+    }
+    val harmony = remember(resolved, colorScheme, useDynamic) {
+        if (useDynamic) buildHarmonyColorsFromScheme(colorScheme, resolved.light)
+        else buildHarmonyColors(resolved.preset, resolved.light)
+    }
+    val motion = rememberMotionPreferences(resolved.reduceMotion)
     val baseDensity = LocalBaseDensity.current ?: LocalDensity.current
+    val typography = remember(resolved.fontSize, resolved.zoomLevel) {
+        harmonyTypography(resolved.fontSize, resolved.zoomLevel)
+    }
     CompositionLocalProvider(
         LocalBaseDensity provides baseDensity,
         LocalDensity provides Density(baseDensity.density * resolved.zoomLevel / 100f, baseDensity.fontScale),
         LocalHarmonyColors provides harmony,
-        LocalMotion provides MotionPreferences(resolved.reduceMotion),
+        LocalMotion provides motion,
         LocalSizes provides SizePreferences(resolved.fontSize, resolved.zoomLevel, resolved.compact),
         LocalAccessibility provides AccessibilityPreferences(resolved.highContrast, resolved.screenReaderSupport),
     ) {
         MaterialTheme(
             colorScheme = colorScheme,
-            typography = harmonyTypography(resolved.fontFamily),
+            typography = typography,
             shapes = harmonyShapes,
             content = content,
         )
@@ -349,50 +419,46 @@ fun buildHarmonyColors(preset: ThemePreset, isLight: Boolean): HarmonyColors {
     )
 }
 
-private fun Oklch.shift(delta: Double): Oklch = copy(l = (l + delta).coerceIn(0.03, 0.99))
-
-private fun Oklch.shiftChroma(deltaC: Double): Oklch = copy(c = (c + deltaC).coerceIn(0.0, 0.37))
-
-private fun Oklch.shiftHue(delta: Double): Oklch = copy(h = ((h + delta) % 360.0 + 360.0) % 360.0)
-
 /**
- * The device's own typeface, at the person's sizes.
+ * The same tokens, taken from a palette the app did not derive.
  *
- * The account can also name a face the instance stores (the web client offers a pixel face
- * of its own). This app ships no third-party typeface, so a name it does not carry falls
- * back to the system face rather than to a font that is not in the APK.
+ * This is what makes wallpaper colour coherent rather than a Material scheme bolted under
+ * Harmony's own hard-coded surfaces: the chat tier, the sidebar, hairlines and the brand all
+ * come from the same tonal palette the platform supplied, so a Material You device looks like
+ * one app instead of two.
  */
-fun harmonyTypography(fontFamily: String): Typography {
-    val family = FontFamily.Default
-    fun style(size: Int, weight: FontWeight = FontWeight.Normal, lineHeight: Int = (size * 1.4).toInt()) =
-        TextStyle(fontFamily = family, fontSize = size.sp, fontWeight = weight, lineHeight = lineHeight.sp)
-    return Typography(
-        displayLarge = style(57, FontWeight.Medium),
-        displayMedium = style(45, FontWeight.Medium),
-        displaySmall = style(36, FontWeight.Medium),
-        headlineLarge = style(32, FontWeight.SemiBold),
-        headlineMedium = style(28, FontWeight.SemiBold),
-        headlineSmall = style(24, FontWeight.SemiBold),
-        titleLarge = style(22, FontWeight.SemiBold),
-        titleMedium = style(16, FontWeight.SemiBold, 24),
-        titleSmall = style(14, FontWeight.SemiBold, 20),
-        bodyLarge = style(16),
-        bodyMedium = style(14),
-        bodySmall = style(12),
-        labelLarge = style(14, FontWeight.Medium, 20),
-        labelMedium = style(12, FontWeight.Medium, 16),
-        labelSmall = style(11, FontWeight.Medium, 16),
-    )
-}
-
-/** Android-shaped: generous corners, a 48dp touch target floor. */
-val harmonyShapes = Shapes(
-    extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
-    small = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-    medium = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
-    large = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-    extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(28.dp),
+fun buildHarmonyColorsFromScheme(scheme: ColorScheme, isLight: Boolean): HarmonyColors = HarmonyColors(
+    surfaceChat = scheme.surfaceContainer,
+    surfaceSidebar = scheme.surfaceContainerLow,
+    surfaceRaised = scheme.surfaceContainerHigh,
+    border = scheme.outlineVariant,
+    borderStrong = scheme.outline,
+    badge = scheme.error,
+    onBadge = scheme.onError,
+    textLink = scheme.primary,
+    textSuccess = scheme.tertiary,
+    textDanger = scheme.error,
+    brand = scheme.primary,
+    onBrand = scheme.onPrimary,
+    isLight = isLight,
+    isDynamic = true,
 )
+
+internal fun Oklch.shift(delta: Double): Oklch = copy(l = (l + delta).coerceIn(0.03, 0.99))
+
+internal fun Oklch.shiftChroma(deltaC: Double): Oklch = copy(c = (c + deltaC).coerceIn(0.0, 0.37))
+
+internal fun Oklch.shiftHue(delta: Double): Oklch = copy(h = ((h + delta) % 360.0 + 360.0) % 360.0)
+
+/** The app's type scale, at the account's message size and zoom. */
+fun harmonyTypography(messageSize: Int = HarmonyType.BASE_MESSAGE_SP, zoomLevel: Int = 100): Typography =
+    HarmonyType.typography(
+        family = FontFamily.Default,
+        multiplier = HarmonyType.scale(messageSize, zoomLevel),
+    )
+
+/** The app's shape scale, as `MaterialTheme` wants it. */
+val harmonyShapes = HarmonyShape.shapes
 
 /** True when the platform blurs behind surfaces well enough to use Harmony's glass effects. */
 fun supportsBlur(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S

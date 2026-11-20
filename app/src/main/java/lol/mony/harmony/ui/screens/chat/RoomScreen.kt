@@ -95,6 +95,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     var pins by remember { mutableStateOf<List<Message>?>(null) }
     var threads by remember { mutableStateOf<List<Thread>?>(null) }
     var searchOpen by remember { mutableStateOf(false) }
+    var roomMenu by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var searchRows by remember { mutableStateOf<List<Message>?>(null) }
     val people by state.people.collectAsState()
@@ -339,23 +340,51 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     val reactions = room.reactions
 
     Column(Modifier.fillMaxSize().imePadding()) {
-        TopAppBar(title = { Column {
-            Text(thread?.name ?: title, maxLines = 1, style = MaterialTheme.typography.titleMedium)
-            Text(if (thread != null) "Thread in " + title else if (direct) "Direct message" else "Text channel",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } }, navigationIcon = {
-            IconButton(onClick = { if (thread != null) thread = null else onBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-        }, actions = {
-            IconButton(onClick = { action { load() } }) { Icon(Icons.Default.Refresh, "Refresh") }
-            IconButton(onClick = { searchOpen = true }) { Icon(Icons.Default.Search, "Search") }
-            if (!direct) {
-                IconButton(onClick = { action { val token = state.auth.freshToken() ?: return@action
-                    pins = state.chats.pinned(session.endpoint, token, roomId).getOrThrow() } }) { Icon(Icons.Default.PushPin, "Pinned") }
-                IconButton(onClick = { action { val token = state.auth.freshToken() ?: return@action
-                    threads = state.chats.threads(session.endpoint, token, roomId).getOrThrow()
-                    state.rememberThreads(roomId, threads.orEmpty()) } }) { Icon(Icons.Default.Forum, "Threads") }
-            }
-        })
+        // One app bar, with the title and its kind stacked, and the two actions a person uses
+        // while reading kept: search and the overflow. Refresh, pins and threads are in the
+        // overflow rather than four icons competing with the channel's name, which is what the
+        // old bar did on a phone.
+        TopAppBar(
+            title = {
+                Column {
+                    Text(thread?.name ?: title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        if (thread != null) "Thread in " + title
+                        else if (direct) "Direct message" else "Channel",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            navigationIcon = {
+                IconButton(onClick = { if (thread != null) thread = null else onBack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                }
+            },
+            actions = {
+                IconButton(onClick = { searchOpen = true }) { Icon(Icons.Default.Search, "Search") }
+                Box {
+                    IconButton(onClick = { roomMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
+                    DropdownMenu(expanded = roomMenu, onDismissRequest = { roomMenu = false }) {
+                        DropdownMenuItem(text = { Text("Refresh") },
+                            leadingIcon = { Icon(Icons.Default.Refresh, null) },
+                            onClick = { roomMenu = false; action { load() } })
+                        if (!direct) {
+                            DropdownMenuItem(text = { Text("Pinned messages") },
+                                leadingIcon = { Icon(Icons.Default.PushPin, null) },
+                                onClick = { roomMenu = false; action { val token = state.auth.freshToken() ?: return@action
+                                    pins = state.chats.pinned(session.endpoint, token, roomId).getOrThrow() } })
+                            DropdownMenuItem(text = { Text("Threads") },
+                                leadingIcon = { Icon(Icons.Default.Forum, null) },
+                                onClick = { roomMenu = false; action { val token = state.auth.freshToken() ?: return@action
+                                    threads = state.chats.threads(session.endpoint, token, roomId).getOrThrow()
+                                    state.rememberThreads(roomId, threads.orEmpty()) } })
+                        }
+                    }
+                }
+            },
+        )
         // The connection banner is drawn only while the instance cannot be reached. A healthy
         // connection says nothing: an always-on label is noise that hides a real outage.
         ConnectionBanner(live) { action { load() } }
@@ -399,62 +428,115 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 IconButton(onClick = { reply = null }) { Icon(Icons.Default.Close, "Cancel reply") }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
-            // A long message is not truncated as it is typed: pasting one keeps every
-            // character, the counter turns red, and Send waits. Swallowing the keystrokes
-            // instead would look like a broken keyboard, and the instance would refuse the
-            // message in a trigger anyway -- which reads as a network failure.
-            OutlinedTextField(draft, { draft = it },
-                placeholder = { Text("Message " + (if (direct) title else "#" + title)) },
-                modifier = Modifier.weight(1f).testTag("message-composer"), maxLines = 5,
-                shape = MaterialTheme.shapes.large,
-                supportingText = if (draft.length > ChatRepository.DEFAULT_MAX_LENGTH - 200) ({
-                    Text(draft.length.toString() + " / " + ChatRepository.DEFAULT_MAX_LENGTH,
-                        Modifier.testTag("message-length"))
-                }) else null,
-                isError = draft.length > ChatRepository.DEFAULT_MAX_LENGTH)
-            // The send button never turns into a spinner: the row in the list is the progress,
-            // and keeping the button usable is what lets a second message be written.
-            IconButton(enabled = draft.isNotBlank() && draft.length <= ChatRepository.DEFAULT_MAX_LENGTH,
-                modifier = Modifier.testTag("message-send"), onClick = {
-                val text = draft
-                val parent = reply?.id
-                draft = ""; reply = null
-                scope.launch { state.sessionStore.saveDraft(draftKey, "") }
-                send(text, parent, UUID.randomUUID().toString(), null)
-                scope.launch { if (rows.isNotEmpty()) list.animateScrollToItem(rows.lastIndex) }
-            }) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
+        // The composer is a docked surface, not a text field with a button beside it: the field
+        // and its send action share one rounded container, which is what makes it read as a
+        // single thing at the bottom of the screen instead of two controls that happen to be
+        // adjacent. The container takes the top corners only, because its bottom edge is the
+        // screen's own.
+        Surface(
+            color = LocalHarmonyColors.current.surfaceRaised,
+            shape = HarmonyShape.sheet,
+            tonalElevation = 3.dp,
+            modifier = Modifier.fillMaxWidth().testTag("composer-surface"),
+        ) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                // A long message is not truncated as it is typed: pasting one keeps every
+                // character, the counter turns red, and Send waits. Swallowing the keystrokes
+                // instead would look like a broken keyboard, and the instance would refuse the
+                // message in a trigger anyway -- which reads as a network failure.
+                OutlinedTextField(
+                    draft, { draft = it },
+                    placeholder = { Text("Message " + (if (direct) title else "#" + title)) },
+                    modifier = Modifier.weight(1f).testTag("message-composer"), maxLines = 5,
+                    shape = HarmonyShape.large,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    ),
+                    supportingText = if (draft.length > ChatRepository.DEFAULT_MAX_LENGTH - 200) ({
+                        Text(draft.length.toString() + " / " + ChatRepository.DEFAULT_MAX_LENGTH,
+                            Modifier.testTag("message-length"))
+                    }) else null,
+                    isError = draft.length > ChatRepository.DEFAULT_MAX_LENGTH,
+                )
+                // The send action is a filled circle: the one thing at the bottom of a channel
+                // that must be unmissable. It never turns into a spinner, because the row in the
+                // list is the progress and keeping the button usable is what lets a second
+                // message be written.
+                Spacer(Modifier.width(8.dp))
+                FilledIconButton(
+                    enabled = draft.isNotBlank() && draft.length <= ChatRepository.DEFAULT_MAX_LENGTH,
+                    onClick = {
+                        val text = draft
+                        val parent = reply?.id
+                        draft = ""; reply = null
+                        scope.launch { state.sessionStore.saveDraft(draftKey, "") }
+                        send(text, parent, UUID.randomUUID().toString(), null)
+                        scope.launch { if (rows.isNotEmpty()) list.animateScrollToItem(rows.lastIndex) }
+                    },
+                    modifier = Modifier.size(52.dp).testTag("message-send"),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, "Send")
+                }
+            }
         }
     }
     // The message-actions sheet. `message` is captured once, so a click that closes the sheet
     // cannot leave the body reading a cleared state.
     if (openSelected != null) {
         val message = openSelected
+        val author = message.author(people, bots).name
         ModalBottomSheet(onDismissRequest = { selected = null }) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            // The quick reactions stay a row of faces above the list: a reaction is the one
+            // action a person takes without reading anything, so it does not belong in the
+            // list of verbs below it.
+            Row(Modifier.fillMaxWidth().padding(horizontal = HarmonySize.gutter), horizontalArrangement = Arrangement.SpaceEvenly) {
                 listOf("👍", "❤️", "😂", "🎉", "👀").forEach { emoji ->
                     TextButton(onClick = { selected = null; action { react(message, emoji) } }) { Text(emoji, fontSize = 24.sp) }
                 }
             }
-            TextButton(onClick = { reply = message; selected = null }, Modifier.fillMaxWidth()) { Text("Reply") }
-            TextButton(onClick = { clipboard.setText(AnnotatedString(message.plainText)); selected = null }, Modifier.fillMaxWidth()) { Text("Copy") }
-            if (!direct) {
-                TextButton(onClick = { selected = null; action {
-                    val token = state.auth.freshToken() ?: error("Sign in again.")
-                    thread = state.chats.createThread(session.endpoint, token, roomId, message.id, "Discussion").getOrThrow()
-                } }, Modifier.fillMaxWidth()) { Text("Start thread") }
-                TextButton(onClick = { selected = null; action {
-                    val token = state.auth.freshToken() ?: error("Sign in again.")
-                    state.chats.pin(session.endpoint, token, message.id, !message.isPinned).getOrThrow(); load()
-                } }, Modifier.fillMaxWidth()) { Text(if (message.isPinned) "Unpin" else "Pin") }
-            }
-            if (message.userId == myId) {
-                if (message.isEditable) {
-                    TextButton(onClick = { edit = message; editText = message.plainText; selected = null }, Modifier.fillMaxWidth()) { Text("Edit") }
-                }
-                TextButton(onClick = { delete = message; selected = null }, Modifier.fillMaxWidth()) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            }
-            Spacer(Modifier.height(24.dp))
+            HorizontalDivider(Modifier.padding(horizontal = HarmonySize.gutterLarge))
+            ActionSheetContent(
+                title = "Message from $author",
+                actions = buildList {
+                    add(ActionItem("Reply", Icons.AutoMirrored.Filled.Reply, onClick = { reply = message; selected = null }))
+                    add(ActionItem("Copy text", Icons.Default.ContentCopy, onClick = {
+                        clipboard.setText(AnnotatedString(message.plainText)); selected = null
+                    }))
+                    if (!direct) {
+                        add(ActionItem("Start thread", Icons.Default.Forum,
+                            detail = "Replies collect away from the channel",
+                            onClick = {
+                                selected = null
+                                action {
+                                    val token = state.auth.freshToken() ?: error("Sign in again.")
+                                    thread = state.chats.createThread(session.endpoint, token, roomId, message.id, "Discussion").getOrThrow()
+                                }
+                            }))
+                        add(ActionItem(
+                            if (message.isPinned) "Unpin from this channel" else "Pin to this channel",
+                            Icons.Default.PushPin,
+                            onClick = {
+                                selected = null
+                                action {
+                                    val token = state.auth.freshToken() ?: error("Sign in again.")
+                                    state.chats.pin(session.endpoint, token, message.id, !message.isPinned).getOrThrow(); load()
+                                }
+                            },
+                        ))
+                    }
+                    if (message.userId == myId) {
+                        if (message.isEditable) {
+                            add(ActionItem("Edit", Icons.Default.Edit, onClick = { edit = message; editText = message.plainText; selected = null }))
+                        }
+                        add(ActionItem("Delete", Icons.Default.Delete, detail = "This cannot be undone", destructive = true,
+                            onClick = { delete = message; selected = null }))
+                    }
+                },
+            )
         }
     }
     if (openEdit != null) {

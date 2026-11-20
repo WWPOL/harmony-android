@@ -59,7 +59,7 @@ fun ChatWorkspace(state: AppState, appearance: VisualThemeSettings) {
 }
 
 @Composable
-private fun ChannelList(state: AppState, serverId: String, modifier: Modifier) {
+internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) {
     var tree by remember(serverId) { mutableStateOf<ServerTree?>(null) }
     var failure by remember(serverId) { mutableStateOf<String?>(null) }
     var retry by remember { mutableIntStateOf(0) }
@@ -164,7 +164,7 @@ private fun ChannelList(state: AppState, serverId: String, modifier: Modifier) {
 
 /** The direct-message list: the conversations this account is part of. */
 @Composable
-private fun DirectMessages(state: AppState, modifier: Modifier) {
+internal fun DirectMessages(state: AppState, modifier: Modifier) {
     var rows by remember { mutableStateOf<List<DirectConversation>?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var retry by remember { mutableIntStateOf(0) }
@@ -203,7 +203,13 @@ private fun DirectMessages(state: AppState, modifier: Modifier) {
         if (openFailure != null) ErrorBanner(openFailure) { failure = null }
         when {
             rows == null && failure == null -> LoadingState("Loading conversations")
-            rows.isNullOrEmpty() -> EmptyState("Your conversations", "Start a conversation with someone on your instance.", "New message") { start = true }
+            rows.isNullOrEmpty() -> EmptyState(
+                title = "Your conversations",
+                description = "Start a conversation with someone on your instance.",
+                icon = Icons.Filled.Chat,
+                action = "New message",
+                onAction = { start = true },
+            )
             // The list is drawn after this body returns, so it closes over the rows it was
             // given rather than re-reading the nullable state they came from.
             else -> LazyColumn(Modifier.fillMaxSize().testTag("conversation-list")) {

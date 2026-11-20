@@ -35,7 +35,11 @@ import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.VideoFile
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -53,6 +57,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -68,6 +74,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -112,6 +119,7 @@ import lol.mony.harmony.data.repo.driveDownloadName
 import lol.mony.harmony.data.repo.driveLinkUrl
 import lol.mony.harmony.data.session.AuthState
 import lol.mony.harmony.ui.AppState
+import lol.mony.harmony.ui.theme.HarmonySize
 
 /**
  * Native Drive browser/owner management, not a placeholder for uploads or complete media parity.
@@ -296,30 +304,50 @@ private fun DriveBrowser(
     }
     BackHandler(onBack = ::back)
 
-    Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+        topBar = {
+            @OptIn(ExperimentalMaterial3Api::class)
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
+                },
+                title = {
+                    Column {
+                        Text("Files", style = MaterialTheme.typography.titleLarge, maxLines = 1)
+                        Text(
+                            snapshot?.let { "${driveSize(it.usage.usedBytes)} of ${driveSize(it.usage.quotaBytes)} used" }
+                                ?: "Files you keep and share in Harmony",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { revision++ }, enabled = !loading && !busy) {
+                        Icon(Icons.Outlined.Refresh, "Refresh Drive")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                ),
+            )
+        },
+    ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
-                Column(Modifier.weight(1f).padding(vertical = 12.dp)) {
-                    Text("Files", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
-                    Text("Files you keep and share in Harmony", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                IconButton(onClick = { revision++ }, enabled = !loading && !busy) { Icon(Icons.Outlined.Refresh, "Refresh Drive") }
-            }
             val data = snapshot
             if (data != null && !data.usage.enabled) {
                 DriveNotice("Files are turned off on this instance.", "Your existing attachments remain governed by the instance's upload and room rules.")
                 return@Column
             }
             if (data != null) {
-                Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
-                    val used = data.usage.usedBytes
-                    val quota = data.usage.quotaBytes
-                    Text("${driveSize(used)} of ${driveSize(quota)} used", style = MaterialTheme.typography.bodySmall)
-                    LinearProgressIndicator(progress = { if (quota <= 0) 0f else (used.toDouble() / quota).toFloat().coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                }
+                // The quota is one line of the bar now; the bar it drew is the progress bar
+                // below it, which is the only part that needs the width.
+                LinearProgressIndicator(
+                    progress = { if (data.usage.quotaBytes <= 0) 0f else (data.usage.usedBytes.toDouble() / data.usage.quotaBytes).toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 DriveLocationPicker(query, contextName, data?.contexts ?: DriveContextTree(), ::go)
@@ -355,10 +383,50 @@ private fun DriveBrowser(
                 leadingIcon = { Icon(Icons.Outlined.Search, null) }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { focus.clearFocus(); query = query.copy(search = search) }))
-            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = query.kind == null, onClick = { query = query.copy(kind = null) }, label = { Text("All types") })
-                DriveKind.entries.forEach { kind ->
-                    FilterChip(selected = query.kind == kind, onClick = { query = query.copy(kind = kind) }, label = { Text(kind.label) })
+            // One filter row. The kind used to be six `FilterChip`s in a horizontally scrolling
+            // strip, which on a phone meant "Audio" and "Video" were off-screen and the row read
+            // as an unordered set of tags. A type menu states the current choice in one control
+            // and leaves the row to the things that are not a single choice.
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = HarmonySize.gutter, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                var kindOpen by remember { mutableStateOf(false) }
+                Box {
+                    AssistChip(
+                        onClick = { kindOpen = true },
+                        label = { Text(query.kind?.label ?: "All types") },
+                        leadingIcon = { Icon(Icons.Outlined.FilterList, contentDescription = null, Modifier.size(18.dp)) },
+                        trailingIcon = { Icon(Icons.Outlined.ArrowDropDown, contentDescription = null) },
+                        modifier = Modifier.testTag("drive-kind"),
+                    )
+                    DropdownMenu(expanded = kindOpen, onDismissRequest = { kindOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("All types") },
+                            onClick = { kindOpen = false; query = query.copy(kind = null) },
+                            trailingIcon = if (query.kind == null) {
+                                { Icon(Icons.Outlined.Check, contentDescription = null) }
+                            } else null,
+                        )
+                        DriveKind.entries.forEach { kind ->
+                            DropdownMenuItem(
+                                text = { Text(kind.label) },
+                                onClick = { kindOpen = false; query = query.copy(kind = kind) },
+                                trailingIcon = if (query.kind == kind) {
+                                    { Icon(Icons.Outlined.Check, contentDescription = null) }
+                                } else null,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                if (data != null) {
+                    Text(
+                        "${data.page.entries.size} shown",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             if (query.view == DriveView.Temporary) Text("Temporary files expire after ${data?.usage?.ephemeralDays ?: "the instance's configured"} days. Deleting one is permanent.",

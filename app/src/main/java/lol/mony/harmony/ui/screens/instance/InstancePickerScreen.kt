@@ -1,7 +1,9 @@
 package lol.mony.harmony.ui.screens.instance
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,13 +12,17 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -31,7 +37,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -41,6 +48,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import lol.mony.harmony.data.api.Endpoint
 import lol.mony.harmony.ui.components.HarmonyWordmark
+import lol.mony.harmony.ui.theme.HarmonyShape
+import lol.mony.harmony.ui.theme.HarmonySize
 import okhttp3.Request
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import lol.mony.harmony.data.api.Http
@@ -52,6 +61,13 @@ import lol.mony.harmony.data.api.Http
  * instances serve both at `/api/federation/instance-info` - the same file the web client's build reads - so a
  * person types a domain and the app discovers the key. A bare host gets `https://`; anything
  * already carrying a scheme is used as given.
+ *
+ * This is the signed-out page's sibling, and it is deliberately the same page: a tinted band
+ * carrying the wordmark and the question, the input inside the app's reading column, a refusal on
+ * an `errorContainer` surface rather than as red text under the field, and one filled button. A
+ * person who has just installed the app meets this screen before any other, so it is the one that
+ * sets the app's shape in their mind; it used to be a centred column of a wordmark, a heading, a
+ * paragraph, a field and a button, with the paragraph doing the work a page's structure should.
  */
 @Composable
 fun InstancePickerScreen(
@@ -84,85 +100,174 @@ fun InstancePickerScreen(
         }
     }
 
+    InstancePickerPage(
+        url = url,
+        busy = busy,
+        error = error,
+        onUrlChange = { url = it; error = null },
+        onConnect = { discoverThenUse(url.trim()) },
+        onCancel = onCancel,
+    )
+}
+
+/**
+ * The page itself, without the discovery.
+ *
+ * The state is the caller's so a render test can draw the refused state: a capture of a screen
+ * that can only be reached by typing a bad address into a network call is a capture nobody can
+ * take. What is left here is layout, which is exactly what the evidence is for.
+ */
+@Composable
+internal fun InstancePickerPage(
+    url: String,
+    busy: Boolean,
+    error: String?,
+    onUrlChange: (String) -> Unit,
+    onConnect: () -> Unit,
+    onCancel: (() -> Unit)?,
+) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .systemBarsPadding()
                 .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 28.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .verticalScroll(rememberScrollState()),
         ) {
-            HarmonyWordmark()
-            Spacer(Modifier.height(28.dp))
-            Text(
-                text = "Choose an instance",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                text = "Harmony is federated. Enter the address of the instance you use - for " +
-                    "example har.mony.lol - and sign in there.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
+            // The band carries the one thing this page is about. It is edge to edge and its
+            // contents are not, which is the same rule the sign-in band follows, so the two
+            // signed-out pages line up when a person moves between them.
+            Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                    Column(
+                        Modifier
+                            .widthIn(max = HarmonySize.readingMaxWidth)
+                            .fillMaxWidth()
+                            .padding(start = 28.dp, end = 28.dp, top = 40.dp, bottom = 32.dp),
+                    ) {
+                        HarmonyWordmark()
+                        Spacer(Modifier.height(20.dp))
+                        Text(
+                            text = "Choose an instance",
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.semantics { heading() },
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 4.dp),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Public,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            Spacer(Modifier.size(6.dp))
+                            Text(
+                                text = "Harmony is federated",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
+                    }
+                }
+            }
+
+            // The form keeps the reading column the band's contents use, so a field is never a
+            // thousand pixels wide on a tablet.
+            Column(
+                Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .widthIn(max = HarmonySize.readingMaxWidth)
                     .fillMaxWidth()
-                    .padding(top = 6.dp, bottom = 20.dp),
-            )
-            OutlinedTextField(
-                value = url,
-                onValueChange = { url = it; error = null },
-                label = { Text("Instance address") },
-                placeholder = { Text("har.mony.lol") },
-                singleLine = true,
-                enabled = !busy,
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Uri,
-                    imeAction = ImeAction.Go,
-                ),
-                keyboardActions = KeyboardActions(onGo = { discoverThenUse(url.trim()) }),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("instance-url"),
-            )
-            if (error != null) {
+                    .padding(horizontal = 28.dp),
+            ) {
+                Spacer(Modifier.height(28.dp))
                 Text(
-                    text = error!!,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
+                    text = "Which server do you use?",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.semantics { heading() },
+                )
+                Text(
+                    text = "Enter the address of the instance you use - for example har.mony.lol - " +
+                        "and sign in there. The app reads its address and key from the instance itself.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 20.dp),
+                )
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = onUrlChange,
+                    label = { Text("Instance address") },
+                    placeholder = { Text("har.mony.lol") },
+                    singleLine = true,
+                    enabled = !busy,
+                    shape = HarmonyShape.large,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Uri,
+                        imeAction = ImeAction.Go,
+                    ),
+                    keyboardActions = KeyboardActions(onGo = { onConnect() }),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 12.dp)
-                        .testTag("instance-error"),
+                        .testTag("instance-url"),
                 )
-            }
-            Spacer(Modifier.height(20.dp))
-            Button(
-                onClick = { discoverThenUse(url.trim()) },
-                enabled = !busy && url.isNotBlank(),
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-                    .testTag("instance-connect"),
-            ) {
-                if (busy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                } else {
-                    Text("Connect", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+
+                // The refusal is a surface, not a line of red text: under a field, red text reads
+                // as that field's supporting text, and this message is about the address as a
+                // whole (wrong host, no Harmony there, not HTTPS) as often as about its syntax.
+                val refusal = error
+                if (refusal != null) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = HarmonyShape.medium,
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Icon(Icons.Outlined.ErrorOutline, null, Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onErrorContainer)
+                            Text(
+                                text = refusal,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f).testTag("instance-error"),
+                            )
+                        }
+                    }
                 }
-            }
-            if (onCancel != null) {
-                TextButton(onClick = onCancel, modifier = Modifier.padding(top = 8.dp)) {
-                    Text("Cancel")
+
+                Spacer(Modifier.height(20.dp))
+                Button(
+                    onClick = onConnect,
+                    enabled = !busy && url.isNotBlank(),
+                    shape = HarmonyShape.pill,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .testTag("instance-connect"),
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    } else {
+                        Text("Connect", fontSize = 16.sp)
+                    }
                 }
+                if (onCancel != null) {
+                    TextButton(
+                        onClick = onCancel,
+                        modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 4.dp),
+                    ) { Text("Cancel") }
+                }
+                Spacer(Modifier.height(28.dp))
             }
         }
     }

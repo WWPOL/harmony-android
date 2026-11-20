@@ -1,6 +1,8 @@
 package lol.mony.harmony.ui.screens.signin
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -20,10 +23,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +48,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -52,6 +61,8 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import lol.mony.harmony.data.api.AuthApi
 import lol.mony.harmony.ui.components.HarmonyWordmark
+import lol.mony.harmony.ui.theme.HarmonyShape
+import lol.mony.harmony.ui.theme.HarmonySize
 
 /** Which form the auth screens show: signing in, creating an account, or resetting a password. */
 enum class AuthFormMode { SignIn, Register, ForgotPassword }
@@ -98,34 +109,6 @@ fun AuthFormScreen(
 }
 
 @Composable
-private fun InstanceHeader(instanceName: String?, instanceDomain: String?, modifier: Modifier = Modifier) {
-    Column(modifier = modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        HarmonyWordmark(modifier = Modifier.padding(bottom = 8.dp))
-        Text(
-            text = instanceName ?: "Harmony",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (instanceDomain != null) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-                Icon(
-                    Icons.Outlined.Dns,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = instanceDomain,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun SignInForm(
     instanceName: String?,
     instanceDomain: String?,
@@ -160,120 +143,202 @@ private fun SignInForm(
             .fillMaxSize()
             .systemBarsPadding()
             .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .verticalScroll(rememberScrollState()),
     ) {
-        InstanceHeader(instanceName, instanceDomain)
-
-        Spacer(Modifier.height(36.dp))
-        Text(
-            text = "Welcome back",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text(
-            text = "Sign in to this instance",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 4.dp, bottom = 20.dp),
-        )
-
-        OutlinedTextField(
-            value = email,
-            onValueChange = { email = it; error = null },
-            label = { Text("Email") },
-            singleLine = true,
-            enabled = !busy,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("signin-email"),
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = password,
-            onValueChange = { password = it; error = null },
-            label = { Text("Password") },
-            singleLine = true,
-            enabled = !busy,
-            visualTransformation = if (reveal) VisualTransformation.None else PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Go),
-            keyboardActions = KeyboardActions(onGo = { submit() }),
-            trailingIcon = {
-                IconButton(onClick = { reveal = !reveal }) {
-                    Icon(
-                        imageVector = if (reveal) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                        contentDescription = if (reveal) "Hide password" else "Show password",
+        // A tinted band carries the instance: this screen is the one place in the app where
+        // "which server am I joining" is the question, so the answer is the largest thing on it
+        // rather than a line of grey text under the wordmark. Its colour is the branded fallback
+        // role, so a server that has not set an accent still gets a considered surface.
+        Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
+            // The band is edge to edge; its contents are not. A Box does the centring, because
+            // Surface's content is not a scope that reads `align` -- a modifier that silently
+            // does nothing is how the first wide capture of this page came out left-aligned
+            // while the form below it was centred.
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                Column(
+                    Modifier
+                        .widthIn(max = HarmonySize.readingMaxWidth)
+                        .fillMaxWidth()
+                        .padding(start = 28.dp, end = 28.dp, top = 40.dp, bottom = 32.dp),
+                ) {
+                    HarmonyWordmark()
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        text = instanceName ?: "Harmony",
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.semantics { heading() },
                     )
+                    if (instanceDomain != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                            Icon(
+                                Icons.Outlined.Dns,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = instanceDomain,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
+                    }
+                    // Changing instance is a rare, deliberate act, so it sits on the band that
+                    // names the instance instead of being the last of six links at the bottom.
+                    // Its colour is the band's own content role: a primary-coloured label on a
+                    // primary-container band is the same hue on the same hue, which reads as
+                    // greyed-out text rather than as something to press.
+                    TextButton(
+                        onClick = onChangeInstance,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onPrimaryContainer),
+                        modifier = Modifier.padding(top = 8.dp),
+                    ) {
+                        Text("Use another instance", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("signin-password"),
-        )
-
-        if (error != null) {
-            Text(
-                text = error!!,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 12.dp)
-                    .testTag("signin-error"),
-            )
-        }
-
-        Spacer(Modifier.height(20.dp))
-        Button(
-            onClick = { submit() },
-            enabled = !busy && email.isNotBlank() && password.isNotBlank(),
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .testTag("signin-submit"),
-        ) {
-            if (busy) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
-            } else {
-                Text("Sign in", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             }
         }
 
-        TextButton(onClick = onForgotPassword, modifier = Modifier.padding(top = 4.dp)) {
-            Text("Forgot your password?")
-        }
-        Spacer(Modifier.height(20.dp))
-        Text(
-            text = "New to Harmony?",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        TextButton(onClick = onRegister) { Text("Create an account") }
-
-        Spacer(Modifier.height(16.dp))
-        TextButton(onClick = onChangeInstance) {
+        // A field a thousand pixels wide is a field nobody wants to type into, so the form keeps
+        // the same readable column every other page uses while the band above stays edge to edge.
+        Column(
+            Modifier
+                .align(Alignment.CenterHorizontally)
+                .widthIn(max = HarmonySize.readingMaxWidth)
+                .fillMaxWidth()
+                .padding(horizontal = 28.dp),
+        ) {
+            Spacer(Modifier.height(28.dp))
             Text(
-                text = "Change instance",
-                style = MaterialTheme.typography.labelMedium,
+                text = "Sign in",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.semantics { heading() },
+            )
+            Text(
+                text = "with the account you use on this instance",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, bottom = 20.dp),
+            )
+
+            OutlinedTextField(
+                value = email,
+                onValueChange = { email = it; error = null },
+                label = { Text("Email") },
+                singleLine = true,
+                enabled = !busy,
+                shape = HarmonyShape.large,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("signin-email"),
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it; error = null },
+                label = { Text("Password") },
+                singleLine = true,
+                enabled = !busy,
+                shape = HarmonyShape.large,
+                visualTransformation = if (reveal) VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { submit() }),
+                trailingIcon = {
+                    IconButton(onClick = { reveal = !reveal }) {
+                        Icon(
+                            imageVector = if (reveal) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (reveal) "Hide password" else "Show password",
+                        )
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("signin-password"),
+            )
+
+            // The failure is a surface rather than a line of red text, so it cannot be mistaken
+            // for the supporting text of the field above it.
+            if (error != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = HarmonyShape.medium,
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(Icons.Outlined.ErrorOutline, null, Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onErrorContainer)
+                        Text(
+                            text = error!!,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f).testTag("signin-error"),
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+            Button(
+                onClick = { submit() },
+                enabled = !busy && email.isNotBlank() && password.isNotBlank(),
+                shape = HarmonyShape.pill,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .testTag("signin-submit"),
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    Text("Sign in", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            TextButton(onClick = onForgotPassword, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                Text("Forgot your password?")
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            // "New to Harmony" and the licence are two different kinds of statement -- one is
+            // the next step, the other is a legal notice -- so they are not two links in the
+            // same stack any more.
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("New here?", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Create an account on this instance",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                FilledTonalButton(onClick = onRegister, shape = HarmonyShape.pill) { Text("Join") }
+            }
+            HorizontalDivider()
+            // The app's own project, not the instance's: this is the client's source, and the
+            // GPL asks that it be reachable from the interface.
+            Text(
+                text = "Brapmony, under the GPL v3",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp, bottom = 24.dp)
+                    .clickable { uri.openUri("https://github.com/WWPOL/harmony-android") },
             )
-        }
-        // The app's own project, not the instance's: this is the client's source, and the GPL
-        // asks that it be reachable from the interface.
-        TextButton(onClick = { uri.openUri("https://github.com/WWPOL/harmony-android") }) {
-            Text("Brapmony, under the GPL v3")
         }
     }
 }

@@ -16,6 +16,20 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Group
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Tag
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -26,10 +40,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -51,6 +63,8 @@ import kotlinx.coroutines.launch
 import lol.mony.harmony.data.model.*
 import lol.mony.harmony.data.repo.ServerManagementRepository
 import lol.mony.harmony.ui.AppState
+import lol.mony.harmony.ui.components.HarmonyDivider
+import lol.mony.harmony.ui.theme.HarmonySize
 import lol.mony.harmony.ui.theme.LocalHarmonyColors
 
 /** Independently embeddable native server area; the parent shell owns navigation and container. */
@@ -62,7 +76,8 @@ fun ServerManagementScreen(state: AppState, serverId: String, onBack: () -> Unit
     var error by remember(state, serverId) { mutableStateOf<String?>(null) }
     var loading by remember(state, serverId) { mutableStateOf(true) }
     var revision by remember(serverId) { mutableIntStateOf(0) }
-    var section by rememberSaveable(serverId) { mutableIntStateOf(0) }
+    // No section open: the server's own list of things to manage, not a tab.
+    var section by rememberSaveable(serverId) { mutableIntStateOf(NO_SECTION) }
     LaunchedEffect(state, serverId, revision) {
         loading = true; error = null
         try {
@@ -76,11 +91,30 @@ fun ServerManagementScreen(state: AppState, serverId: String, onBack: () -> Unit
 
     Surface(color = LocalHarmonyColors.current.surfaceChat, modifier = Modifier.fillMaxSize()) {
         Column {
-            TopAppBar(title = { Column {
-                Text(overview?.server?.name ?: "Server", maxLines = 1)
-                Text("Server management", style = MaterialTheme.typography.labelMedium)
-            } }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
-                actions = { IconButton(onClick = { revision += 1 }, enabled = !loading) { Icon(Icons.Default.Refresh, "Refresh server") } })
+            val sections = ServerSection.entries
+            val open = sections.getOrNull(section)
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            open?.title ?: (overview?.server?.name ?: "Server"),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            if (open == null) "Server management" else overview?.server?.name.orEmpty(),
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = { if (section != NO_SECTION) section = NO_SECTION else onBack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, if (section == NO_SECTION) "Back" else "Back to server settings")
+                    }
+                },
+                actions = { IconButton(onClick = { revision += 1 }, enabled = !loading) { Icon(Icons.Default.Refresh, "Refresh server") } },
+            )
             val data = overview
             if (data == null) {
                 Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
@@ -90,25 +124,96 @@ fun ServerManagementScreen(state: AppState, serverId: String, onBack: () -> Unit
             } else {
                 if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 error?.let { Box(Modifier.padding(16.dp)) { ServerManagementError(it) } }
-                val sections = listOf("Overview", "Channels", "Members", "Roles", "Invites", "Bans")
-                ScrollableTabRow(selectedTabIndex = section, edgePadding = 8.dp) {
-                    sections.forEachIndexed { index, label -> Tab(selected = section == index,
-                        onClick = { section = index }, text = { Text(label) }) }
-                }
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
                     Box(Modifier.widthIn(max = 840.dp).fillMaxWidth()) {
-                        when (section) {
-                            0 -> ServerManagementOverviewPage(state, repository, data, revision, ::changed, onBack)
-                            1 -> ServerManagementChannelsPage(state, repository, data, revision, ::changed)
-                            2 -> ServerManagementMembersPage(state, repository, data, revision, ::changed)
-                            3 -> ServerManagementRolesPage(state, repository, data, revision, ::changed)
-                            4 -> ServerManagementInvitesPage(state, repository, data, revision, ::changed)
-                            5 -> ServerManagementBansPage(state, repository, data, revision, ::changed)
+                        // Six tabs do not fit a phone, and the last two sat off-screen with
+                        // nothing to say they existed. A list of sections says what there is,
+                        // what each one holds, and opens one at a time.
+                        if (section == NO_SECTION) {
+                            ServerSectionList(data) { section = it }
+                        } else when (open) {
+                            ServerSection.Overview -> ServerManagementOverviewPage(state, repository, data, revision, ::changed, onBack)
+                            ServerSection.Channels -> ServerManagementChannelsPage(state, repository, data, revision, ::changed)
+                            ServerSection.Members -> ServerManagementMembersPage(state, repository, data, revision, ::changed)
+                            ServerSection.Roles -> ServerManagementRolesPage(state, repository, data, revision, ::changed)
+                            ServerSection.Invites -> ServerManagementInvitesPage(state, repository, data, revision, ::changed)
+                            ServerSection.Bans -> ServerManagementBansPage(state, repository, data, revision, ::changed)
+                            null -> Unit
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/** No section open: the server's own list of things to manage. */
+private const val NO_SECTION = -1
+
+/**
+ * The six things a server owner can change, with a line saying what each holds.
+ *
+ * The counts come from the overview the screen already loaded, so a row says "4 channels"
+ * rather than making a person open it to find out.
+ */
+private enum class ServerSection(val title: String, val summary: String, val icon: ImageVector, val tag: String) {
+    Overview("Overview", "Name, description, rules and leaving", Icons.Outlined.Info, "server-overview"),
+    Channels("Channels", "Create, rename, reorder and delete", Icons.Outlined.Tag, "server-channels"),
+    Members("Members", "People, their roles and removals", Icons.Outlined.Group, "server-members"),
+    Roles("Roles", "Permissions and their colours", Icons.Outlined.Shield, "server-roles"),
+    Invites("Invites", "Links that let people in", Icons.Outlined.Link, "server-invites"),
+    Bans("Bans", "People who cannot return", Icons.Outlined.Block, "server-bans"),
+}
+
+@Composable
+private fun ServerSectionList(
+    overview: ServerManagementOverview,
+    onOpen: (Int) -> Unit,
+) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("server-sections")) {
+        Text(
+            "${overview.server.memberCount} members" +
+                if (overview.isOwner) " · You own this server" else "",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = HarmonySize.gutterLarge, end = HarmonySize.gutterLarge, top = 12.dp, bottom = 4.dp),
+        )
+        ServerSection.entries.forEach { item ->
+            Surface(
+                onClick = { onOpen(item.ordinal) },
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth().testTag(item.tag),
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = HarmonySize.gutterLarge, end = HarmonySize.gutter, top = 14.dp, bottom = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                            Icon(item.icon, contentDescription = null, modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                        Text(
+                            item.summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Icon(Icons.Outlined.ChevronRight, contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                }
+            }
+            HarmonyDivider(Modifier.padding(start = HarmonySize.gutterLarge + 56.dp))
+        }
+        Spacer(Modifier.height(HarmonySize.gutterLarge))
     }
 }
 

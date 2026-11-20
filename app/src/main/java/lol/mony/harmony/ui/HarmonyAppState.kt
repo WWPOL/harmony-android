@@ -70,6 +70,29 @@ class AppState(
     /** Bumped when the server list changes shape, so the rail reloads. */
     val serversRevision = MutableStateFlow(0)
 
+    /**
+     * The servers this account is a member of, filled once by [loadServers] and read by every
+     * place that needs the list: the space switcher, the channel list's header, the create-server
+     * sheet. One read, one place, so two lists cannot disagree about which servers exist.
+     */
+    private val _serversByMembership = MutableStateFlow<List<lol.mony.harmony.data.model.ServerWithMembership>>(emptyList())
+    val serversByMembership: StateFlow<List<lol.mony.harmony.data.model.ServerWithMembership>> =
+        _serversByMembership.asStateFlow()
+
+    /**
+     * Reads the server list, keeping the previous one on failure so a network blip does not
+     * empty the switcher. The result says whether the read succeeded, so a caller can tell a
+     * real empty list from a failed one.
+     */
+    suspend fun loadServers(): Boolean {
+        val session = auth.state.value as? AuthState.SignedIn ?: return false
+        val token = auth.freshToken() ?: return false
+        val authUserId = session.profile?.id ?: return false
+        return servers.servers(session.endpoint, token, authUserId)
+            .onSuccess { _serversByMembership.value = it }
+            .isSuccess
+    }
+
     /** Channels per server, filled by the channel column and read by the rail's badges. */
     val channelsByServer = MutableStateFlow<Map<String, List<Channel>>>(emptyMap())
 
