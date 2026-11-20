@@ -36,31 +36,54 @@ client. Do not treat a green build as a claim of parity.
 
 # Download
 
-Every push to `main` publishes an installable APK to that branch's rolling prerelease. The
-stable link always names the newest build of `main`:
+Every push to `main` publishes an installable APK as **the repository's release**, and the
+same file as a **package**. Either route downloads the newest build of `main`:
 
-**[Download the latest APK](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony_Android_latest.apk)**
+**[Download the latest APK](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony-latest.apk)**
+· **[the release](https://github.com/WWPOL/harmony-android/releases/latest)**
+· **[the package](https://github.com/WWPOL/harmony-android/pkgs/container/harmony-android)**
 
 1. Open that link on the Android device and tap the downloaded file, or run
-   `adb install -r Brapmony_Android_latest.apk`.
+   `adb install -r Brapmony-latest.apk`.
 2. Allow installing from the browser or file manager when Android asks. The APK is
    **test-signed**, not store-signed, so it installs over a build that was signed with the same
    test key and not over one that was not; if Android refuses with a signature mismatch, uninstall
    the older copy once and install again.
 3. The build needs Android 8.0 (API 26) or newer.
 
-Each build is also kept under its own name next to `Brapmony_Android_latest.apk` on the
-[releases page](https://github.com/WWPOL/harmony-android/releases), with a `.sha256` beside it,
-so a particular build stays downloadable after later pushes. Version releases (`vX.Y.Z`) are cut
-from tags and appear as full releases. [docs/builds.md](docs/builds.md) describes exactly what
-is published where and which build installs over which.
+The file names say what the file is:
 
-> The rolling prerelease is a window on `main`, not an archive: it keeps the newest ten builds
+| Name | What it is |
+| --- | --- |
+| `Brapmony-latest.apk` | The newest build of `main`. The stable name to bookmark. |
+| `Brapmony-1.9.6-606ab10-debug.apk` | One build: the version, the commit, and `-debug` for the test key it is signed with. |
+| `Brapmony-1.9.6.apk` | A version-tag release, signed with the release key. `-debug` when it is test-signed instead. |
+
+Each build is kept under its own name beside `Brapmony-latest.apk`, with a `.sha256` beside
+it, so a particular build stays downloadable after later pushes. Version releases (`vX.Y.Z`)
+are cut from tags and appear as full releases. A build of any other branch is a prerelease
+and is not offered as the repository's release. [docs/builds.md](docs/builds.md) describes
+exactly what is published where and which build installs over which.
+
+> The rolling release is a window on `main`, not an archive: it keeps the newest ten builds
 > of the branch and drops older ones. The version release of a tag is the archive.
 
-The APK is **not** on GitHub Packages. GitHub Packages hosts npm, Maven, Gradle, NuGet,
-RubyGems and container images, and has no registry for an APK; GitHub Releases is the
-download surface for a file like this, and it needs no token or client to fetch.
+**As a package.** GitHub Packages serves npm, Maven, Gradle, NuGet, RubyGems and container
+images, and has no APK registry, so the APK is published to the container registry as an OCI
+artifact: a file with metadata, not a container image. It appears under the repository's
+Packages, tagged with the branch, the version and the commit:
+
+```sh
+oras pull ghcr.io/wwpol/harmony-android:latest
+```
+
+GitHub creates a package **private** the first time it is published, whatever the
+repository's visibility is, and only a package admin can make it public — there is no API
+for it. The run says which it is and links the settings page when it is private, so the
+package is never described as a public download until it is one. Pulling a private package
+needs `GITHUB_TOKEN` or a token with `read:packages`. The release is the route that always
+works for a person installing the app; the package is the one a script can pull and pin to
+a commit.
 
 # Development
 ## Build
@@ -142,6 +165,7 @@ See [docs/builds.md](docs/builds.md#signing) for what each signing configuration
 | Screen-by-screen parity matrix | [docs/parity-matrix.md](docs/parity-matrix.md) |
 | Message body decoding and drawing | [docs/message-content.md](docs/message-content.md) |
 | Captured screens and logs | [docs/evidence/](docs/evidence/) |
+| What the published release and package look like | [docs/evidence/release/](docs/evidence/release/) |
 | How the repository was restructured to hold the app alone | [docs/restructure.md](docs/restructure.md) |
 
 ## Contributing

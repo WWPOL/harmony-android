@@ -21,7 +21,7 @@ val appVersionCode: Int = run {
 
 // Production signing is configured outside Git: keystore.properties (gitignored, in this
 // directory) names the store and its passwords, and CI writes it from secrets. Without it a release build is test-signed and its published
-// file name carries _debug, so a test-signed APK is never passed off as a production one.
+// file name carries -debug, so a test-signed APK is never passed off as a production one.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.isFile) keystorePropertiesFile.inputStream().use { load(it) }
@@ -34,7 +34,7 @@ val hasReleaseSigning = keystorePropertiesFile.isFile &&
 // different key, and Android refuses to install one over the other. A CI secret can
 // supply one stable test key instead (test-keystore.properties, written by the workflow
 // from ANDROID_TEST_KEYSTORE_BASE64). It is a test key either way: it
-// is never a release key, and an APK it signs is still named _debug.
+// is never a release key, and an APK it signs is still named -debug.
 val testKeystorePropertiesFile = rootProject.file("test-keystore.properties")
 val testKeystoreProperties = Properties().apply {
     if (testKeystorePropertiesFile.isFile) testKeystorePropertiesFile.inputStream().use { load(it) }
@@ -60,7 +60,7 @@ android {
 
     // A test key, never a release key: the stable one when the build has it, otherwise
     // the conventional debug key generated into ignored project state. Either way an APK
-    // it signs is named _debug.
+    // it signs is named -debug.
     signingConfigs.getByName("debug") {
         if (hasTestSigning) {
             storeFile = rootProject.file(testKeystoreProperties.getProperty("storeFile"))
@@ -90,7 +90,7 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Falls back to the test key rather than leaving the APK unsigned: an
             // unsigned release APK cannot be installed at all, and a file that cannot be
-            // installed is not a build anybody can try. The name carries _debug.
+            // installed is not a build anybody can try. The name carries -debug.
             signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release")
                             else signingConfigs.getByName("debug")
         }

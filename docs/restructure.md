@@ -155,8 +155,8 @@ more than a rename:
   are `app/src/main/...`. The audit's substance -- 166 frozen rows, 26 journeys, every one of
   them `U` -- is unchanged, because the gaps are unchanged.
 - **`docs/builds.md`** described two Android apps shipping from one release and named assets by
-  the other one's scheme. It now describes one app: `Brapmony_Android_*`, a rolling prerelease
-  per branch, and the APK on each version tag.
+  the other one's scheme. It now describes one app: a rolling release of the default branch, a
+  prerelease of any other, and the APK on each version tag.
 
 ## The workflows
 
@@ -165,9 +165,10 @@ Two, where there were six.
 **`android.yml`** builds the app on every push to every branch and on pull requests that touch
 it, runs the unit tests and lint, names the APK, checks the package, version and signing
 certificate against the file itself, uploads it as an immutable per-run artifact, and publishes
-the newest build of each branch to a rolling prerelease. The trust split is unchanged and is
-what the tests assert: the build job holds no write permission, and the publishing job has
-`contents: write` and runs only on a push to this repository.
+the newest build of each branch -- as the repository's release for the default branch, as a
+prerelease for any other, and as a package on GitHub Packages. The trust split is unchanged and
+is what the tests assert: the build job holds no write permission, and the publishing job has
+`contents: write` and `packages: write` and runs only on a push to this repository.
 
 **`release.yml`** runs on a `v*` tag. It stamps `VERSION` from the tag, builds the release
 variant, names the APK for the signing state it actually carries, checks the package, version

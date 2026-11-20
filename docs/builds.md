@@ -1,8 +1,32 @@
 # Builds
 
-How the app is built and where its APKs are published: every-push artifacts, a rolling
-prerelease per branch, the APK on each version tag, what is signed with what, and which build
-updates which.
+How the app is built and where its APKs are published: every-push artifacts, a release of
+the default branch and a prerelease of any other, the APK on each version tag, the same APK
+as a package, what is signed with what, and which build updates which.
+
+## Names
+
+One scheme, everywhere: `<app>-<version>[-<commit>][-<signing>].apk`. The signing state is
+last, the way Gradle names a variant, and `-debug` is a signing statement rather than only a
+build type: it says the APK carries the repository's test key.
+
+| Build | Name |
+| --- | --- |
+| Push to a branch | `Brapmony-1.9.6-606ab10-debug.apk` |
+| Version tag, release-signed | `Brapmony-1.9.6.apk` |
+| Version tag, test-signed | `Brapmony-1.9.6-debug.apk` |
+| The stable name to bookmark | `Brapmony-latest.apk` (and `.sha256`) |
+| Actions artifact | The APK's own name, `-attempt-<n>` on a re-run |
+
+The branch is not in the file name: it is in the tag of the release the file is published to
+(`android-rolling-<branch>`), which is where a downloader looks for it, and a branch name can
+carry characters and a length a file name should not. `scripts/name-artifact.sh` is the one
+place that builds a name, so a workflow cannot invent its own.
+
+An earlier version of this workflow published `Brapmony_Android_V1.9.6_debug-<branch>-<sha7>.apk`
+and `Brapmony_Android_latest.apk`. Those names are retired on the first publish that runs
+here: the assets are deleted if they carry this workflow's ownership label, so a download does
+not stay under a name nothing updates. A file somebody attached by hand is never touched.
 
 ## What each push publishes
 
@@ -14,31 +38,80 @@ rather than leave an older one standing.
 
 | Where | What | Lifetime |
 | --- | --- | --- |
-| Actions artifact `android-apk-<run id>-<attempt>` | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 90 days, never overwritten |
-| Prerelease `android-rolling-<branch>` | This run's APK under its own name, plus `Brapmony_Android_latest.apk` and that file's `.sha256` | The release stays; builds older than the newest ten of that branch are pruned |
-| The run's summary | Links to both | With the run |
+| Actions artifact `Brapmony-<version>-<sha7>-debug` | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 90 days, never overwritten |
+| Release `android-rolling-main` (the default branch) | This run's APK under its own name, plus `Brapmony-latest.apk` and that file's `.sha256` | The release stays; builds older than the newest ten of that branch are pruned |
+| Prerelease `android-rolling-<other branch>` | The same, for a branch that is not the default | The same |
+| Package `ghcr.io/<owner>/<repo>` | The same APK as an OCI artifact, tagged `<sha7>`, `<branch>`, and `latest` on the default branch | The newest tags move; the `<sha7>` tag never does |
+| The run's summary | Links to all of it | With the run |
 
-Each run's APK is also named after its version and commit
-(`Brapmony_Android_V1.9.6_debug-<branch>-<sha7>.apk`), so a link to a particular build keeps
-working after later pushes. `Brapmony_Android_latest.apk` is the stable name to bookmark: it
-is replaced on every push to that branch, from the same bytes as that run's own APK.
+Each run's APK is named after its version and commit (`Brapmony-1.9.6-606ab10-debug.apk`),
+so a link to a particular build keeps working after later pushes. `Brapmony-latest.apk` is the
+stable name to bookmark: it is replaced on every push to that branch, from the same bytes as
+that run's own APK.
 
-A rolling release is a **prerelease**, so `releases/latest` skips it. A branch build is never
-offered to anybody as a release.
+**The default branch's build is a release.** It is what the repository's Releases box and
+`/releases/latest` offer, so somebody who finds the repository finds a downloadable app
+rather than nothing. Its release is named `Brapmony <version>`, and the title and body are
+refreshed on every publish so the page describes the build that is actually there — only
+after that build has uploaded, so a failed publish cannot leave the page describing bytes it
+does not have.
+
+Every other branch's build is a **prerelease**, which `releases/latest` skips: a branch build
+is not an offer to anybody. A rolling release that carries none of this workflow's own assets
+is refused rather than rewritten, whatever its tag.
 
 The download link the run prints is the tag-specific one,
-`https://github.com/<owner>/<repo>/releases/download/android-rolling-<branch>/Brapmony_Android_latest.apk`.
-It has to be tag-specific: `/releases/latest/download/...` resolves only to the newest
-**published** release, and a rolling release is a prerelease, so that path would never reach
-it. The publish job then fetches its own link back over the same path a browser uses and fails
-unless what arrives has this app's package, the versionCode that was just built, the checksum
-the build reported, and a signing certificate. A link that is not independently downloadable
-is a broken link, and the run says so instead of publishing a summary that looks fine.
+`https://github.com/<owner>/<repo>/releases/download/android-rolling-<branch>/Brapmony-latest.apk`.
+It is tag-specific rather than `/releases/latest/download/...` so that a link to a branch that
+is not the default still resolves, and so that the link keeps meaning the branch it names. The
+publish job then fetches its own link back over the same path a browser uses and fails unless
+what arrives has this app's package, the versionCode that was just built, the checksum the
+build reported, and a signing certificate. A link that is not independently downloadable is a
+broken link, and the run says so instead of publishing a summary that looks fine.
 
 Publishing needs no secret of its own: the APK is test-signed, and the workflow's
-`GITHUB_TOKEN` writes the prerelease. Whether two runs' APKs install over each other depends
-on a stable test key, which is optional; see [Signing](#signing) and
+`GITHUB_TOKEN` writes the release and the package. Whether two runs' APKs install over each
+other depends on a stable test key, which is optional; see [Signing](#signing) and
 [Which build installs over which](#which-build-installs-over-which).
+
+## The package
+
+GitHub Packages has no registry for an APK. It serves npm, Maven, Gradle, NuGet, RubyGems and
+container images, so the APK is published to the **container registry** (`ghcr.io`) as an
+**OCI artifact**: the container registry's own model for a file with metadata that is not an
+image. Nothing about it is a container image — the artifact type is
+`application/vnd.brapmony.android.apk` and the layer's media type is
+`application/vnd.android.package-archive` — and `oras pull` gives back the bytes that were
+pushed.
+
+`scripts/publish-package.sh` does it, from the same file the release gets:
+
+| Tag | What it names |
+| --- | --- |
+| `<sha7>` | One build, immutably |
+| `<branch>` | The newest build of that branch |
+| `<version>` | The APK of a version-tag release |
+| `latest` | The newest build of the default branch, and only that |
+
+The package is linked to the repository by the `org.opencontainers.image.source` annotation,
+which is what makes it appear on the repository's page and lets it inherit the repository's
+access permissions.
+
+**It is private until somebody makes it public.** GitHub creates a first-published package
+private whatever the repository's visibility is, and no REST endpoint changes that: a package
+admin does, once, in the package's settings. A private package still appears under the
+repository's Packages, so a push that succeeded says nothing about whether a downloader can
+pull it. The package step therefore asks the registry anonymously, with a registry config of
+its own so the credentials the push used are not in it, and reports which of the two the
+package is — `public` or a warning with the settings page to visit. It does not fail the run:
+the package was published, and the release is the route that always works.
+
+```sh
+oras pull ghcr.io/wwpol/harmony-android:latest      # public: no token needed
+```
+
+`packages: write` is granted to the two publishing jobs and to nothing else. The build job,
+which a pull request runs, holds no write permission at all.
 
 ## What a tag publishes
 
@@ -49,12 +122,14 @@ release for that tag:
 
 | Signing configured | Asset |
 | --- | --- |
-| `ANDROID_KEYSTORE_BASE64` and its three companions | `Brapmony_Android_VX.Y.Z.apk` |
-| Not configured | `Brapmony_Android_VX.Y.Z_debug.apk` |
+| `ANDROID_KEYSTORE_BASE64` and its three companions | `Brapmony-X.Y.Z.apk` |
+| Not configured | `Brapmony-X.Y.Z-debug.apk` |
 
 Both are accompanied by a `.sha256`. The job creates the tag's release if it does not exist
 and finds it if it does, so re-running a tag attaches to the same release instead of creating
 a second one, and it replaces only the two names it owns. It never touches another release.
+The same APK is pushed to the package under its version tag, so a version can be pulled by
+version as well as downloaded from the release.
 
 ## Signing
 
@@ -66,7 +141,7 @@ a second one, and it replaces only the two names it owns. It never touches anoth
 | Release from a tag, no keystore secret, stable test key | The repository's test key | Any other build signed with that key |
 | Release from a tag, neither secret | A key generated for that run | Nothing signed by another run |
 
-An APK is named for the key it carries: `_debug` means test-signed. It installs, and it is
+An APK is named for the key it carries: `-debug` means test-signed. It installs, and it is
 what to try a branch build with, but Android refuses to install it over a release-signed app
 (a signature mismatch), and it cannot be published to a store.
 
@@ -99,7 +174,7 @@ keytool -genkeypair -keystore test.keystore -storepass "$PASS" -keypass "$PASS" 
 ```
 
 It is a **test** key, not a release key: it never signs a release-signed install, and the APK
-stays named `_debug`. Without the secrets CI generates nothing to keep and stores no key; each
+stays named `-debug`. Without the secrets CI generates nothing to keep and stores no key; each
 run makes its own, and the run's summary and warning say that its APK will not install over
 another run's. The build reads the certificate's fingerprint out of the finished APK and fails
 when a configured key is not the one that signed it, so a name cannot claim a key the file
@@ -113,7 +188,7 @@ and no release APK pretends to be signed with one.
 signed with that one stable key rather than a key generated per checkout. Its certificate is
 `CN=Harmony CI, O=Harmony, C=US`, SHA-256
 `2E:F4:6C:81:35:76:BB:AF:CE:34:91:9F:0E:EE:75:A9:F4:2D:1B:9E:94:53:A9:B8:45:43:13:CE:A3:4C:4F:75`,
-read out of the APK that run published — downloaded again from the rolling prerelease and
+read out of the APK that run published — downloaded again from the rolling release and
 inspected with `apksigner`, not copied from a log. That is the stability baseline.
 
 The pin is proved to be in place by deduction from the run, not by reading its log (the log
@@ -142,7 +217,7 @@ would quietly change what one means. Each row is a test in `scripts/release.test
 
 | Situation | What happens |
 | --- | --- |
-| The release for the computed rolling tag is not a prerelease | Refused; nothing is written |
+| The release for the computed rolling tag carries none of this workflow's own assets | Refused; nothing is written |
 | A tag that is not `vX.Y.Z` is asked to make a version release | Refused, so a rolling tag can never become one |
 | An asset was not uploaded by this workflow | Never replaced or pruned; refused |
 | A re-run of the same commit, same bytes | Nothing changes, not even an asset id |
@@ -248,18 +323,23 @@ npm ci
 node --test scripts/*.test.mjs
 ```
 
-The publisher tests cover what a published download depends on: one prerelease per branch, the
-previous builds kept, only the stable names replaced, a re-run that changes nothing, a rebuild
-that gets its own name, a foreign asset that is never overwritten, a failed upload that leaves
-the last good build downloadable, retention bounded to this workflow's own builds, a version
-release left entirely alone, and a tag release created once and found again on a re-run.
+The publisher tests cover what a published download depends on: one release per branch, the
+previous builds kept, only the stable names replaced, the retired names retired and nothing
+else deleted, a re-run that changes nothing, a rebuild that gets its own name, a foreign asset
+that is never overwritten, a release that carries none of this workflow's assets refused, a
+failed publish that leaves the last good build downloadable and the page describing it,
+retention bounded to this workflow's own builds, a version release left entirely alone, a
+default branch's release moved out of the prereleases, another branch's left a prerelease, and
+a tag release created once and found again on a re-run.
 
 The workflow tests assert that every action is pinned to a commit SHA, that
-`pull_request_target` is not used, that `contents: write` appears only on the publishing jobs,
-that the branch publisher runs only for a push to this repository, that a push has no path
-filter, that the stable test key is configured from a secret and its absence reported, that
-the tag job stamps `VERSION` from the tag and attaches by release id, that the APK namer is
-called with a profile it accepts and really renames the file, that no step pipes `aapt2` or
+`pull_request_target` is not used, that `contents: write` and `packages: write` appear only on
+the publishing jobs, that the branch publisher runs only for a push to this repository, that a
+push has no path filter, that the stable test key is configured from a secret and its absence
+reported, that the tag job stamps `VERSION` from the tag and attaches by release id, that the
+APK namer is called with a profile it accepts and really renames the file to the name the
+scheme says, that a re-run's artifact does not land on the first attempt's name, that
+`latest` in the package is only ever the default branch's build, that no step pipes `aapt2` or
 `apksigner` into `head` (which fails the step with SIGPIPE under `pipefail`), and that the
 repository holds the Android app and nothing else.
 
@@ -311,12 +391,13 @@ fingerprint.
 
 **One real run has now completed.** [Run 44533075269](https://github.com/WWPOL/harmony-android/actions/runs/44533075269)
 (a push of `task/verify-apk-ci-publish-flow-3e8cphaa` at `fbd613f`) succeeded on a GitHub
-runner: the build job produced and uploaded the `android-apk-<run id>-<attempt>` artifact, and
-the publish job created the rolling prerelease, uploaded this run's APK, moved
-`Brapmony_Android_latest.apk` and its `.sha256` onto those bytes, fetched the download back and
-checked it, and printed the links. So the runner's environment — the `sdkmanager` package
-names, the `aapt2` and `apksigner` paths, `upload-artifact` and `download-artifact`, and the
-token's permission to create a release — is demonstrated, not assumed.
+runner: the build job produced and uploaded its artifact, and the publish job created the
+rolling release, uploaded this run's APK, moved the stable APK name and its `.sha256` onto
+those bytes, fetched the download back and checked it, and printed the links. So the runner's
+environment — the `sdkmanager` package names, the `aapt2` and `apksigner` paths,
+`upload-artifact` and `download-artifact`, and the token's permission to create a release — is
+demonstrated, not assumed. That run predates the name scheme and the package push described
+here, so it proves the mechanism, not the current names.
 
 That run carried both fixes in this change, so it proves more than the environment. Its build
 job called `scripts/name-artifact.sh debug "$1"` (the call `main` still gets wrong, see below),
@@ -331,13 +412,32 @@ the newest push to `main` (`618008b`), failed at `Name the APK` with
 the publish. That is what this change fixes: the build was green up to the naming step and
 nothing was published.
 
-That has one consequence worth stating plainly, because the README's download link depends on
-it: at the time of writing the only rolling prerelease was `android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa`,
-from the branch run above, and `android-rolling-main` did not exist, so
-`.../releases/download/android-rolling-main/Brapmony_Android_latest.apk` answered 404. It
-starts working with the first push to `main` that gets past the namer — that is, the merge of
-this change, which is itself such a push. The link was never wrong; nothing had published
-`main` yet.
+**What the repository actually offered.** `main`'s rolling release existed after the merge of
+that run, but it was a **prerelease**, so `api.github.com/repos/WWPOL/harmony-android/releases/latest`
+answered 404 and the repository page showed no Releases at all; only the tag-specific download
+URL resolved. Nothing was on GitHub Packages either. That is what this change fixes: the
+default branch's build is a release, so the Releases box and `/releases/latest` reach it, and
+the same file is pushed to the container registry as a package. The first push to `main` after
+this merges publishes both.
+
+**What has been checked here, and what has not.** The naming, the published/prerelease
+decision and the retirement of the old names are checked by `npm test` against an in-process
+stand-in for the releases API, and the first push after this change is reproduced exactly:
+the test seeds the stand-in with the release `main` actually had — `Brapmony_Android_latest.apk`,
+its `.sha256`, and `Brapmony_Android_V1.9.6_debug-main-606ab10.apk`, read from the GitHub API
+— publishes one build, and asserts that it becomes a release named `Brapmony 1.9.6` with the
+new names, the old stable names retired, and the old build left for pruning.
+
+The package push is run against a **real OCI registry** on this machine with the real `oras`
+binary: pushed, pulled back, and the bytes compared, including that the `latest` tag is only
+ever moved by a default-branch build. The APK used for the step runs below is a real one,
+from `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`, which was
+`BUILD SUCCESSFUL`.
+
+What has **not** been exercised is GitHub itself: the `GITHUB_TOKEN`'s `packages: write`
+permission, the package's default visibility on its first push, and the re-download of the
+published link, which needs a real release to exist. The workflow is written so that a
+failure in any of those fails the run and publishes no summary that looks fine.
 
 A version tag's release (`release.yml`) has still not been run on a runner: no `vX.Y.Z` tag has
 been pushed, so its steps are exercised locally only. That now includes the tag build's
