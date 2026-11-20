@@ -6,7 +6,9 @@
 // the release for that tag instead of creating a second one.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
@@ -65,7 +67,7 @@ test('no workflow runs untrusted code with a write token', () => {
 
 test('every push to a branch builds the client', () => {
   const android = parse(ANDROID);
-  assert.deepEqual(android.on.push.branches, ['**'], 'every branch builds, not only master');
+  assert.deepEqual(android.on.push.branches, ['**'], 'every branch builds, not only main');
   // Literally every push: a path filter would leave the previous commit's APK
   // standing after a push that touched nothing under the app.
   assert.equal(android.on.push.paths, undefined, 'push has no path filter');
@@ -174,6 +176,58 @@ test('the test signing key is configured from a secret, and its absence is repor
   const ignored = read('.gitignore');
   assert.match(ignored, /test-keystore\.properties/);
   assert.match(ignored, /\*\.keystore/);
+});
+
+// `keytool -list` proves the store opens with the password; it says nothing about whether
+// the alias names a key inside it. Both signing steps therefore check the alias too, and
+// fail before the build rather than at Gradle's signing task. The release keystore's step
+// is the one a tag build reaches, and it had the same gap.
+test('both signing steps check that the alias names a key in the keystore', () => {
+  const cases = [
+    [ANDROID, 'build', 'Configure the test signing key', 'ANDROID_TEST_KEY_ALIAS'],
+    [RELEASE, 'release', 'Configure the test signing key', 'ANDROID_TEST_KEY_ALIAS'],
+    [RELEASE, 'release', 'Configure release signing', 'ANDROID_KEY_ALIAS'],
+  ];
+  for (const [file, job, name, variable] of cases) {
+    const step = parse(file).jobs[job].steps.find((s) => s.name === name);
+    assert.ok(step, `${file} ${job} has no step ${name}`);
+    // The alias is checked against the store, with the alias the secrets name. The command
+    // is wrapped across lines with a trailing `\`, so the match spans whitespace.
+    assert.match(step.run, /keytool -list[\s\S]{0,200}?-alias "\$KEY_ALIAS"/, `${file} ${name} does not check the alias`);
+    // And the failure says which setting to fix.
+    assert.match(step.run, new RegExp(`${variable} is not|Check ${variable}`), `${name} does not say what to fix`);
+  }
+});
+
+// The check is only worth anything if its expectation comes from somewhere other than the
+// keystore the same run configured: a run that derived it from the secret would prove that
+// the secret agrees with itself and pass any certificate. The expectation is the repository
+// variable, and a run with the secret but without it fails rather than publishing unproven.
+test('the expected certificate is pinned independently of the configured keystore', () => {
+  const android = parse(ANDROID);
+  const digest = android.jobs.build.steps.find((s) => s.id === 'digest');
+  const run = digest.run;
+  assert.match(String(android.jobs.build.env.TEST_KEY_SHA256), /vars\.ANDROID_TEST_KEY_SHA256/);
+  assert.match(run, /expected_key=\$\(normalize "\$TEST_KEY_SHA256"\)/);
+  // The expected value comes from the variable and never from the keystore the same run
+  // configured: no command in the step runs keytool or opens test.keystore, so it cannot
+  // take its expectation from the same secret it is checking. (Both words do appear, in a
+  // comment and in the error message that tells an operator how to read the fingerprint;
+  // neither is a command.)
+  assert.ok(!/test\.keystore/.test(run), 'the step never opens the configured keystore');
+  const commands = run.split('\n').map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && !l.startsWith('echo'));
+  assert.ok(!commands.some((l) => /\bkeytool\b/.test(l)), 'the expectation is not read from the keystore');
+  // A secret without the pin fails, and says which variable to set, rather than comparing
+  // against an empty string and passing whatever the APK carries.
+  assert.match(run, /if \[ -z "\$expected_key" \]/);
+  assert.match(run, /ANDROID_TEST_KEY_SHA256 is not/);
+  // And a certificate that differs from the pin fails the build, so nothing is published.
+  assert.match(run, /if \[ "\$fingerprint" != "\$expected_key" \]/);
+  // The check runs before the checksum, the artifact and the publish: a mismatch stops the
+  // run before anything is uploaded rather than after.
+  const order = (name) => run.indexOf(name);
+  assert.ok(order('expected_key=') < order('sha256sum'), 'the certificate is checked before the checksum is written');
 });
 
 test('the tag build can use the stable test key too', () => {
@@ -342,5 +396,123 @@ test('the README describes the app, not a server', () => {
   for (const claim of ['self-host', 'Self-hosting', 'federation backend', 'federation-backend',
                        'Tauri', 'Supabase project', 'docker compose', 'ActivityPub']) {
     assert.ok(!new RegExp(claim, 'i').test(readme), `the README must not claim a \${claim}`);
+  }
+});
+
+// `name-artifact.sh` exits 2 on a profile it does not know, and android.yml called it as
+// `name-artifact.sh Android debug <apk>` after the restructure. Every push to every branch
+// therefore died at that step with exit 2, and every step after it -- the digest check, the
+// artifact upload -- was skipped, so no APK artifact and no rolling prerelease was ever
+// produced. The tests above passed throughout, because they only looked for the script's
+// name. This one runs the namer with the arguments each workflow actually passes and
+// asserts the file it produces, so a call the script refuses fails here instead of on a
+// runner.
+test('the APK namer is called with arguments it accepts, and names the file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'namer-'));
+  const apk = join(dir, 'app-debug.apk');
+  writeFileSync(apk, 'not a real apk, only a file to be renamed');
+  const env = {
+    ...process.env,
+    GITHUB_REF_NAME: 'main',
+    GITHUB_SHA: 'c214e8e5b731df3db9ac1062510ff5391d7f573a',
+    GITHUB_OUTPUT: join(dir, 'github-output'),
+  };
+  writeFileSync(env.GITHUB_OUTPUT, '');
+
+  // The branch build: a debug APK, named after its version, ref and commit.
+  const branch = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', apk], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(branch.status, 0, `the branch build's namer call failed: ${branch.stderr}`);
+  const named = branch.stdout.trim();
+  assert.match(
+    named,
+    /Brapmony_Android_V\d+\.\d+\.\d+_debug-main-c214e8e\.apk$/,
+    'the branch APK is named after its version, ref and commit',
+  );
+  assert.ok(existsSync(named), 'the APK really was renamed to that name');
+  assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /^path=/m, 'the path is written to GITHUB_OUTPUT');
+
+  // The tag build: `--release`, with the profile as the signing state.
+  for (const profile of ['release', 'debug']) {
+    const file = join(dir, `app-release-${profile}.apk`);
+    writeFileSync(file, 'a file to be renamed');
+    const tagged = spawnSync('bash', ['scripts/name-artifact.sh', '--release', profile, file], {
+      cwd: root, env, encoding: 'utf8',
+    });
+    assert.equal(tagged.status, 0, `the tag build's namer call failed for ${profile}: ${tagged.stderr}`);
+    const expected = profile === 'release' ? /Brapmony_Android_V\d+\.\d+\.\d+\.apk$/ : /Brapmony_Android_V\d+\.\d+\.\d+_debug\.apk$/;
+    assert.match(tagged.stdout.trim(), expected, `a ${profile}-profile tag build is named for its signing`);
+  }
+
+  // And the exact string each workflow passes, taken from the workflow itself, is one the
+  // namer accepts: the check above would still pass if a workflow passed `Android`.
+  const android = parse(ANDROID);
+  const call = android.jobs.build.steps.find((s) => String(s.run || '').includes('name-artifact.sh'));
+  assert.ok(call, 'the branch build names its APK with the script');
+  const args = /name-artifact\.sh\s+([^\n]+)/.exec(call.run)[1];
+  assert.ok(!/\bAndroid\b/.test(args), `the namer takes a profile (release|debug), not a platform: ${args}`);
+  assert.match(args, /^(--release )?(release|debug)\b/, `the namer call starts with a profile it knows: ${args}`);
+});
+
+// GitHub runs every `run:` step with `bash -eo pipefail`, so a command whose output is
+// piped into `head` fails the step with SIGPIPE (exit 141) as soon as it writes past the
+// first line. The publish job read the published APK's badging that way, which failed
+// every single time it was reached. The build job's digest step already writes to a file
+// for this reason; the rule is that anything that can write more than one line is not put
+// on the left of a pipe that stops reading.
+test('no step pipes a command that keeps writing into head', () => {
+  const offenders = [];
+  for (const file of WORKFLOWS) {
+    const doc = parse(file);
+    for (const [job, spec] of Object.entries(doc.jobs || {})) {
+      for (const step of spec.steps || []) {
+        if (!step.run) continue;
+        for (const line of step.run.split('\n')) {
+          // `aapt2 dump badging` and `apksigner verify` both print several lines; neither
+          // may be the left side of a pipe into head. `sed -n ...p` over a file is fine.
+          if (!/\|/.test(line) || !/\bhead\b/.test(line)) continue;
+          const left = line.slice(0, line.indexOf('|'));
+          if (/\baapt2\b|\bapksigner\b/.test(left)) {
+            offenders.push(`${file} ${job} ${step.name || step.uses}: ${line.trim()}`);
+          }
+        }
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `these pipe a multi-line command into head, which fails under pipefail:\n${offenders.join('\n')}`);
+});
+
+// `scripts/workflow-steps.mjs` is how a change to a step is run before it is pushed, so it
+// has to understand the `if:` forms the workflows actually use. It understood only a single
+// comparison, and release.yml guards its test-signing step with two joined by `&&`: that
+// step could not be run locally at all, and the tool exited 2 rather than running it. This
+// runs the runner against each guarded step -- with no secrets, so each one skips and
+// nothing is executed -- and fails if a condition cannot be evaluated. A step whose `if:`
+// is refused here is a step nobody can check on this machine.
+test('the local step runner can evaluate every guarded step', () => {
+  const guarded = [];
+  for (const file of WORKFLOWS) {
+    const doc = parse(file);
+    for (const [job, spec] of Object.entries(doc.jobs || {})) {
+      for (const step of spec.steps || []) {
+        if (step.run && step.if) guarded.push({ file, job, name: step.name, when: String(step.if) });
+      }
+    }
+  }
+  assert.ok(guarded.length >= 4, 'the workflows still guard their signing steps');
+
+  // The compound form is the one that was refused; keep it covered explicitly.
+  assert.ok(
+    guarded.some((g) => /\|\||&&/.test(g.when)),
+    'a guarded step joins two conditions, which the runner must evaluate',
+  );
+
+  for (const { file, job, name, when } of guarded) {
+    const run = spawnSync(
+      'node',
+      ['scripts/workflow-steps.mjs', file, job, '--step', name],
+      { cwd: root, encoding: 'utf8', env: { ...process.env, ANDROID_TEST_KEYSTORE_BASE64: '' } },
+    );
+    assert.notEqual(run.status, 2, `the runner cannot evaluate \`if: ${when}\` (${file} ${job}):\n${run.stderr}`);
+    assert.equal(run.status, 0, `running ${name} with no secrets failed:\n${run.stdout}\n${run.stderr}`);
   }
 });

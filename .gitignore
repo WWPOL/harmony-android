@@ -16,6 +16,13 @@ test-keystore.properties
 # The release tooling's dependencies
 node_modules/
 
+# Step output from running a workflow locally (scripts/workflow-steps.mjs writes these
+# beside the APK when the digest and publish steps are run by hand)
+apk-badging.txt
+apk-signature.txt
+published-badging.txt
+published-signature.txt
+
 # An instance's throwaway accounts and anon key: local, never committed
 e2e/fixture.json
 e2e/stack.env
