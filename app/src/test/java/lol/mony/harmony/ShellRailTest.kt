@@ -1,27 +1,27 @@
 package lol.mony.harmony
 
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.dp
-import lol.mony.harmony.ui.Shell
-import lol.mony.harmony.ui.ShellNavigation
-import lol.mony.harmony.ui.TopDestination
+import lol.mony.harmony.ui.navigation.Destination
+import lol.mony.harmony.ui.navigation.DestinationBadge
+import lol.mony.harmony.ui.navigation.HarmonyShell
+import lol.mony.harmony.ui.navigation.NavigationLayout
+import lol.mony.harmony.ui.navigation.navigationLayoutFor
+import lol.mony.harmony.ui.navigation.showsSpaceColumnAt
+import lol.mony.harmony.ui.navigation.showsTwoPanesAt
 import lol.mony.harmony.ui.theme.HarmonyTheme
 import lol.mony.harmony.ui.theme.VisualThemeSettings
 import org.junit.Assert.assertEquals
@@ -34,15 +34,21 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * The rail stays inside the system bars, and choosing from it puts it away.
+ * The app's frame adapts to the window, and its controls stay inside the system bars.
  *
- * Both are reports from a phone. The app draws edge to edge, so the rail began at y=0 and its
- * first destination sat under the status bar and the camera cutout; and a rail that never
- * closed left the thing it had just selected squeezed into the remaining width.
+ * Two behaviours are pinned here, because both were wrong in the shell this replaced:
  *
- * The insets are passed in rather than read from the window, so the arithmetic can be asserted
- * exactly: a synthetic status bar of 40dp and a cutout of 30dp on the start side, on a
- * 320x640dp screen. The production default is the real safe drawing area.
+ * - **The frame follows the window's width.** A phone gets a bottom bar, where a thumb reaches;
+ *   anything 600dp and wider gets a rail at the side, where a pointer and a two-handed grip both
+ *   find it. The old shell drew one 76dp rail at every width, which wasted a tablet's space and
+ *   squeezed a phone's content.
+ * - **Nothing sits under the status bar or a cutout.** The app draws edge to edge, so a
+ *   `fillMaxHeight` column starts at y=0 and its first item lands under the clock. The old rail
+ *   had exactly that bug; the insets are passed in here so the arithmetic can be asserted at a
+ *   known size instead of depending on a device with a notch.
+ *
+ * The insets are synthetic: a 40dp status bar and a 30dp start-side cutout on a 320x640dp
+ * screen. The production default is the real safe drawing area.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -51,153 +57,159 @@ class ShellRailTest {
     @get:Rule val compose = createComposeRule()
 
     /** A status bar and a start-side cutout, the shape a notched phone reports. */
-    private val notched = WindowInsets(
-        left = 30.dp, top = 40.dp, right = 0.dp, bottom = 24.dp,
-    )
+    private val notched = WindowInsets(left = 30.dp, top = 40.dp, right = 0.dp, bottom = 24.dp)
 
     private fun shell(
-        railOpen: Boolean,
-        onOpenChange: (Boolean) -> Unit = {},
-        onDestination: (TopDestination) -> Unit = {},
-        content: @androidx.compose.runtime.Composable () -> Unit = { Text("content") },
+        destination: Destination = Destination.Chats,
+        onDestination: (Destination) -> Unit = {},
+        chats: Int = 0,
+        mentions: Int = 0,
+        content: @androidx.compose.runtime.Composable (NavigationLayout) -> Unit =
+            { Text("content", Modifier.padding(0.dp)) },
     ) = @androidx.compose.runtime.Composable {
         HarmonyTheme(VisualThemeSettings()) {
-            Shell(
-                state = RenderHarness.fresh(),
-                destination = TopDestination.Chats,
+            HarmonyShell(
+                destination = destination,
                 onDestination = onDestination,
-                railOpen = railOpen,
-                onRailOpenChange = onOpenChange,
+                chats = chats,
+                mentions = mentions,
                 safeArea = notched,
-            ) { content() }
+                content = content,
+            )
         }
     }
 
     /**
-     * Every destination is below the status bar and the cutout, and inside the screen.
+     * A compact window draws a bottom bar and no rail.
      *
-     * This is the reported bug stated as a measurement: with the insets ignored, `Chats` starts
-     * at y=0 and its centre is under the clock. The assertion is on the node's real bounds, not
-     * on the presence of an inset modifier, so removing the padding fails it.
+     * The assertion is on which component exists, not on a flag: the bar's own tag is present
+     * and the rail's is not, which is what a person sees.
      */
-    @Test fun theFirstDestinationIsBelowTheStatusBarAndCutout() {
-        compose.setContent(shell(railOpen = true))
+    @Test fun aPhoneGetsABottomBar() {
+        compose.setContent(shell())
         compose.waitForIdle()
+        compose.onNodeWithTag("nav-bar").assertIsDisplayed()
+        assertTrue(
+            "a 320dp window drew a rail as well",
+            compose.onAllNodesWithTag("rail").fetchSemanticsNodes().isEmpty(),
+        )
+        // Every destination is reachable from the bar.
         for (label in listOf("Chats", "Social", "Files", "Alerts", "You")) {
-            val node = compose.onNodeWithTag("nav-" + label).fetchSemanticsNode()
-            val top = node.boundsInRoot.top
-            val left = node.boundsInRoot.left
-            assertTrue(
-                "$label starts at y=$top, under a 40dp status bar (" + with(compose.density) { 40.dp.toPx() } + "px)",
-                top >= with(compose.density) { 40.dp.toPx() },
-            )
-            assertTrue(
-                "$label starts at x=$left, under a 30dp cutout",
-                left >= with(compose.density) { 30.dp.toPx() },
-            )
-            // And it is on the screen, not pushed off the bottom by the padding.
-            assertTrue(
-                "$label ends at y=${node.boundsInRoot.bottom}, past the 640dp screen",
-                node.boundsInRoot.bottom <= with(compose.density) { 640.dp.toPx() },
-            )
+            compose.onNodeWithTag("nav-$label").assertIsDisplayed()
         }
     }
 
     /**
-     * The inset narrows what the rail's controls may use, not what its background covers.
+     * Every destination is inside the safe area, and on the screen.
      *
-     * The reported symptom was controls under the system bars; the fix must not trade that for
-     * controls clipped by their own container. So the assertion is relational: every
-     * destination sits inside the rail's own bounds, and the rail is inside the screen.
+     * This is the reported bug stated as a measurement: with the insets ignored, the first item
+     * starts at y=0 and its centre is under the clock. The assertion is on the node's real
+     * bounds, so removing the inset padding fails it.
      */
-    @Test fun theRailStillCoversItsControls() {
-        compose.setContent(shell(railOpen = true))
+    @Test fun everyDestinationIsInsideTheSafeArea() {
+        compose.setContent(shell())
         compose.waitForIdle()
-        val rail = compose.onNodeWithTag("rail").fetchSemanticsNode()
-        assertTrue("the rail is inside the screen",
-            rail.boundsInRoot.right <= with(compose.density) { 320.dp.toPx() } + 1f)
+        val top = with(compose.density) { 40.dp.toPx() }
+        val left = with(compose.density) { 30.dp.toPx() }
+        val screenHeight = with(compose.density) { 640.dp.toPx() }
+        val screenWidth = with(compose.density) { 320.dp.toPx() }
         for (label in listOf("Chats", "Social", "Files", "Alerts", "You")) {
-            val node = compose.onNodeWithTag("nav-" + label).fetchSemanticsNode()
+            val bounds = compose.onNodeWithTag("nav-$label").fetchSemanticsNode().boundsInRoot
             assertTrue(
-                "$label (${node.boundsInRoot}) is not inside the rail (${rail.boundsInRoot})",
-                node.boundsInRoot.left >= rail.boundsInRoot.left - 1f &&
-                    node.boundsInRoot.right <= rail.boundsInRoot.right + 1f,
+                "$label starts at y=${bounds.top}, under a 40dp status bar",
+                bounds.top >= top - 1f,
+            )
+            assertTrue(
+                "$label starts at x=${bounds.left}, outside the 320dp screen",
+                bounds.left >= -1f && bounds.left < screenWidth,
+            )
+            assertTrue(
+                "$label ends at y=${bounds.bottom}, past the 640dp screen",
+                bounds.bottom <= screenHeight + 1f,
+            )
+            // And it is a real touch target, not a 20dp icon with no room around it.
+            assertTrue(
+                "$label is only ${bounds.height}px tall, below the 48dp floor",
+                bounds.height >= with(compose.density) { 48.dp.toPx() } - 1f,
             )
         }
+        // The cutout inset is applied to the bar's own content, so nothing is under it either.
+        val bar = compose.onNodeWithTag("nav-bar").fetchSemanticsNode().boundsInRoot
+        assertTrue("the bar starts at x=${bar.left}, under the 30dp cutout", bar.left >= left - 1f)
     }
 
     /**
-     * Choosing a destination collapses the rail, and the menu button brings it back.
+     * A tap reaches the caller and the shell follows it.
      *
-     * The open/closed state belongs to the caller, so this drives the same two states the
-     * caller sets: a tap reports the destination and the shell asks to close, then the closed
-     * shell offers only the reopen handle. A Compose rule takes one `setContent`, so both
-     * states are drawn by one composition whose state the test changes.
+     * The destination is the caller's state, so this drives the same two values the caller sets:
+     * a tap reports the destination, and the frame draws the new one selected.
      */
-    @Test fun choosingADestinationCollapsesTheRail() {
-        var open by mutableStateOf(true)
-        var chosen: TopDestination? = null
-        // The state is read inside the composition, the way SignedInShell reads it: passing
-        // `open` to the helper would capture its first value and never recompose.
+    @Test fun tappingADestinationReportsIt() {
+        var chosen: Destination? = null
+        var current by mutableStateOf(Destination.Chats)
         compose.setContent {
             HarmonyTheme(VisualThemeSettings()) {
-                Shell(
-                    state = RenderHarness.fresh(),
-                    destination = TopDestination.Chats,
-                    // The caller does what SignedInShell does: take the destination, close.
-                    onDestination = { chosen = it; open = false },
-                    railOpen = open,
-                    onRailOpenChange = { open = it },
+                HarmonyShell(
+                    destination = current,
+                    onDestination = { chosen = it; current = it },
                     safeArea = notched,
-                ) { Text("the destination") }
+                    content = { Text("the destination", Modifier.fillMaxSize().testTag("destination")) },
+                )
             }
         }
         compose.waitForIdle()
-        compose.onNodeWithTag("nav-Social").assertIsDisplayed()
         compose.onNodeWithTag("nav-Social").performClick()
         compose.waitForIdle()
-        assertEquals("the tap reaches the caller", TopDestination.Social, chosen)
-        assertEquals("and the shell asks to close", false, open)
-        // Closed: the destinations go away and the way back is offered. The rail slides out,
-        // so the node exists until the animation ends; waiting for its absence is what a
-        // person sees, and asserting at once would only measure the first frame.
-        compose.waitUntil(10_000) {
-            compose.onAllNodesWithTag("nav-Chats").fetchSemanticsNodes().isEmpty()
-        }
-        compose.onNodeWithTag("rail-open").assertIsDisplayed()
-        // And the handle reopens it.
-        compose.onNodeWithTag("rail-open").performClick()
-        compose.waitUntil(10_000) {
-            compose.onAllNodesWithTag("nav-Chats").fetchSemanticsNodes().isNotEmpty()
-        }
-        assertEquals(true, open)
-        compose.onNodeWithTag("nav-Chats").assertIsDisplayed()
+        assertEquals("the tap reaches the caller", Destination.Social, chosen)
+        assertEquals("and the frame follows it", Destination.Social, current)
+        // The content is still there: the frame never covers what it navigated to.
+        compose.onNodeWithTag("destination").assertIsDisplayed()
     }
 
     /**
-     * The rule itself, independent of any composition.
+     * The width rule itself, independent of any composition.
      *
-     * `ShellRailTest`'s other tests drive a shell whose caller closes the rail, which would keep
-     * passing if `SignedInShell` stopped closing it. This pins the rule the shell calls, so a
-     * rail that stayed open after a tap fails here as well as on screen.
+     * The tests above draw one window; this pins the boundary, so a shell that drew a bottom bar
+     * on a tablet fails here even if the composition test is changed to match it.
      */
-    @Test fun choosingOrArrivingAlwaysClosesTheRail() {
-        assertEquals("a chosen destination is shown, not covered", false, ShellNavigation.railOpenAfterChoosing())
-        assertEquals("a notification's target is shown, not covered", false, ShellNavigation.railOpenAfterArriving())
+    @Test fun theWidthDecidesTheFrame() {
+        assertEquals("a phone upright gets a bottom bar", NavigationLayout.BottomBar, navigationLayoutFor(320))
+        assertEquals("a large phone still gets a bottom bar", NavigationLayout.BottomBar, navigationLayoutFor(599))
+        assertEquals("a phone on its side gets a rail", NavigationLayout.Rail, navigationLayoutFor(600))
+        assertEquals("a tablet gets a rail", NavigationLayout.Rail, navigationLayoutFor(1024))
     }
 
-    /** The reopen handle is itself inside the status bar inset, so it is reachable too. */
-    @Test fun theReopenHandleIsInsideTheInset() {
-        compose.setContent(shell(railOpen = false))
-        compose.waitForIdle()
-        val handle = compose.onNodeWithTag("rail-open").fetchSemanticsNode()
-        assertTrue(
-            "the handle starts at y=${handle.boundsInRoot.top}, under the status bar",
-            handle.boundsInRoot.top >= with(compose.density) { 40.dp.toPx() },
-        )
-        assertTrue(
-            "the handle starts at x=${handle.boundsInRoot.left}, under the cutout",
-            handle.boundsInRoot.left >= with(compose.density) { 30.dp.toPx() },
-        )
+    /**
+     * The badge a destination draws, and what it says.
+     *
+     * A badge is not just a number: TalkBack has to say what it counts, or a person moving by
+     * item hears "Chats" and never learns there is anything waiting.
+     */
+    @Test fun aBadgeSaysWhatItCounts() {
+        val badge = DestinationBadge(count = 5, mentions = 2)
+        assertEquals("5", badge.text)
+        assertEquals("Chats, 5 unread, 2 mentioning you", badge.spoken("Chats"))
+        assertEquals("Chats, 1 unread", DestinationBadge(count = 1).spoken("Chats"))
+        assertEquals("Chats, 250 unread", DestinationBadge(count = 250).spoken("Chats"))
+        // The cap keeps a large count from widening the bar.
+        assertEquals("99+", DestinationBadge(count = 250).text)
+    }
+
+    /**
+     * Three panes need an expanded window, and two need only a wide one.
+     *
+     * This is the rule a 640dp capture caught: the switcher column is up to 260dp and the list
+     * is 340dp, so drawing all three at 600dp left the room a strip of pixels with the message
+     * text wrapping one letter per line. The pane count is two decisions, and the second one
+     * starts where Material's expanded class does.
+     */
+    @Test fun aThirdPaneWaitsForAnExpandedWindow() {
+        assertTrue("a phone has no second pane", !showsTwoPanesAt(400))
+        assertTrue("600dp fits a list beside its detail", showsTwoPanesAt(600))
+        assertTrue("a tablet fits them too", showsTwoPanesAt(1024))
+        assertTrue("600dp is too narrow for three panes", !showsSpaceColumnAt(600))
+        assertTrue("839dp is still too narrow", !showsSpaceColumnAt(839))
+        assertTrue("840dp is where the third pane pays for itself", showsSpaceColumnAt(840))
+        assertTrue("a tablet has the room", showsSpaceColumnAt(1024))
     }
 }

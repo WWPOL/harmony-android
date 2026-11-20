@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import kotlinx.coroutines.runBlocking
 import lol.mony.harmony.RenderHarness.capture
@@ -20,7 +21,8 @@ import lol.mony.harmony.RenderHarness.waitUntilComposerEmpty
 import lol.mony.harmony.data.api.AuthApi
 import lol.mony.harmony.data.session.AuthState
 import lol.mony.harmony.ui.SignedInShell
-import lol.mony.harmony.ui.screens.chat.ChatWorkspace
+import lol.mony.harmony.ui.navigation.NavigationLayout
+import lol.mony.harmony.ui.screens.chat.ChatsDestination
 import lol.mony.harmony.ui.screens.signin.AuthFormScreen
 import lol.mony.harmony.ui.theme.VisualThemeSettings
 import org.junit.Assert.assertTrue
@@ -73,7 +75,7 @@ class NativeJourneyTest {
     @Test fun directMessageRoundTrip() {
         val state = signedIn()
         val session = state.auth.state.value as AuthState.SignedIn
-        compose.shot("journey-dm-list", state, settle = "Bob E2E") { ChatWorkspace(state, VisualThemeSettings()) }
+        compose.shot("journey-dm-list", state, settle = "Bob E2E") { ChatsDestination(state, VisualThemeSettings(), NavigationLayout.BottomBar) }
         compose.onNodeWithText("Bob E2E").performClick()
         settle("dm message from alice")
         compose.capture("journey-dm-room")
@@ -92,11 +94,11 @@ class NativeJourneyTest {
         assertTrue("the sent message is stored on the instance", stored.any { it.plainText == text })
     }
 
-    /** Pick the server in the rail, open its channel, and send a message into it. */
+    /** Pick the server in the space switcher, open its channel, and send a message into it. */
     @Test fun channelRoundTrip() {
         val state = signedIn()
         val session = state.auth.state.value as AuthState.SignedIn
-        compose.shot("journey-rail", state, settle = "Direct message") { ChatWorkspace(state, VisualThemeSettings()) }
+        compose.shot("journey-rail", state, settle = "Direct message") { ChatsDestination(state, VisualThemeSettings(), NavigationLayout.BottomBar) }
         compose.onNodeWithTag("rail-server-E2E Server").performClick()
         compose.waitUntil(180_000) { compose.onAllNodesWithTag("channel-list").fetchSemanticsNodes().isNotEmpty() }
         compose.waitForIdle()
@@ -128,7 +130,7 @@ class NativeJourneyTest {
     @Test fun refusedSignInStaysOnTheForm() {
         val state = fresh()
         val email = System.getenv("HARMONY_RENDER_EMAIL") ?: "fx_alice@e2e.harmony.local"
-        compose.shot("journey-signin", state, settle = "Welcome back") {
+        compose.shot("journey-signin", state, settle = "Use another instance") {
             AuthFormScreen(
                 instanceName = "Local Harmony", instanceDomain = RenderHarness.instanceUrl,
                 onSignIn = { _, _ -> AuthApi.Result.Failed("Invalid login credentials") },
@@ -148,7 +150,7 @@ class NativeJourneyTest {
     /** The auth form's other two modes are reachable and keep the person's typed email. */
     @Test fun registrationAndResetAreReachableFromSignIn() {
         val state = fresh()
-        compose.shot("journey-signin-modes", state, settle = "Welcome back") {
+        compose.shot("journey-signin-modes", state, settle = "Use another instance") {
             AuthFormScreen(
                 instanceName = "Local Harmony", instanceDomain = RenderHarness.instanceUrl,
                 onSignIn = { _, _ -> AuthApi.Result.Failed("not used") },
@@ -157,7 +159,10 @@ class NativeJourneyTest {
                 onChangeInstance = {},
             )
         }
-        compose.onNodeWithText("Create an account").performClick()
+        // The page scrolls: at this width the next-step row is below the fold, so the test
+        // scrolls to it the way a person would rather than clicking at a point that is not
+        // on screen.
+        compose.onNodeWithText("Join").performScrollTo().performClick()
         compose.waitUntil(180_000) {
             compose.onAllNodesWithTag("register-username").fetchSemanticsNodes().isNotEmpty()
         }
@@ -166,7 +171,7 @@ class NativeJourneyTest {
         compose.waitUntil(180_000) {
             compose.onAllNodesWithTag("signin-email").fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithText("Forgot your password?").performClick()
+        compose.onNodeWithText("Forgot your password?").performScrollTo().performClick()
         compose.waitUntil(180_000) {
             compose.onAllNodesWithTag("reset-email").fetchSemanticsNodes().isNotEmpty()
         }
@@ -181,10 +186,11 @@ class NativeJourneyTest {
      */
     @Test fun appearancePreviewRepaints() {
         val state = signedIn()
-        compose.shot("journey-appearance", state, settle = "Your profile") {
+        compose.shot("journey-appearance", state, settle = "Account") {
             lol.mony.harmony.ui.screens.you.YouScreen(state, VisualThemeSettings(), { _, _ -> }, {})
         }
-        compose.onNodeWithText("Appearance").performClick()
+        // The look is one row of the settings list; opening it is a tap, and back returns.
+        compose.onNodeWithTag("you-appearance").performClick()
         settle("Your look")
         val dark = compose.capture("journey-appearance-dark")
         compose.onNodeWithText("Light").performClick()

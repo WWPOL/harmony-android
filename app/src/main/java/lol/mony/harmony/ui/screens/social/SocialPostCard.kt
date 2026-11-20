@@ -50,7 +50,21 @@ internal fun SocialPostCard(
     val author = post.author
     var menu by remember { mutableStateOf(false) }
     var revealed by remember(row.id, post.contentWarning, post.isSensitive) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    // Each post is a card, not a strip between dividers. A feed is a list of discrete things a
+    // person scans, and a card is what says where one ends: the previous version separated posts
+    // with a full-bleed divider, which at 400dp reads as one long column of text with lines in
+    // it. The card's own surface also gives the action row a floor to sit on.
+    Surface(
+        // `surfaceRaised`, not `surfaceContainerLow`: this theme maps that role to the plain
+        // surface tone, so a card drawn with it is invisible against the page -- which is what
+        // the first capture of the feed showed.
+        color = lol.mony.harmony.ui.theme.LocalHarmonyColors.current.surfaceRaised,
+        shape = lol.mony.harmony.ui.theme.HarmonyShape.large,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (row.isBoost) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(Icons.Outlined.Repeat, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
@@ -142,7 +156,7 @@ internal fun SocialPostCard(
         }
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    }
 }
 
 @Suppress("DEPRECATION")

@@ -3,7 +3,8 @@ package lol.mony.harmony
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import lol.mony.harmony.RenderHarness.shotThenRetheme
 import lol.mony.harmony.RenderHarness.signedIn
-import lol.mony.harmony.ui.screens.chat.ChatWorkspace
+import lol.mony.harmony.ui.navigation.NavigationLayout
+import lol.mony.harmony.ui.screens.chat.ChatsDestination
 import lol.mony.harmony.ui.theme.VisualThemeSettings
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -46,7 +47,7 @@ class AccountAppearanceRenderTest {
             "chats-account-appearance", "chats-account-default", state,
             first = stored, second = VisualThemeSettings(),
             settle = "Direct message",
-        ) { theme -> ChatWorkspace(state, theme) }
+        ) { theme -> ChatsDestination(state, theme, NavigationLayout.BottomBar) }
         val differs = RenderHarness.differing(rendered, defaultLook)
         assertTrue("the account's look changed the screen (%d of %d pixels)"
             .format(differs, rendered.width * rendered.height), differs > rendered.width)

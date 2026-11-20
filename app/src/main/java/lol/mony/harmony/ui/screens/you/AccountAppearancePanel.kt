@@ -37,6 +37,7 @@ import lol.mony.harmony.ui.AppState
 import lol.mony.harmony.ui.theme.HarmonyTheme
 import lol.mony.harmony.ui.theme.LocalHarmonyColors
 import lol.mony.harmony.ui.theme.LocalSizes
+import lol.mony.harmony.ui.theme.dynamicColorSupported
 import lol.mony.harmony.ui.theme.VisualThemeSettings
 import kotlin.math.roundToInt
 
@@ -44,6 +45,8 @@ import kotlin.math.roundToInt
 internal fun AccountAppearancePanel(
     state: AppState, repository: AccountRepository, profile: AccountProfile,
     appearance: VisualThemeSettings, onAppearanceChange: (VisualThemeSettings, Boolean) -> Unit,
+    dynamicColor: Boolean = false,
+    onDynamicColorChange: (Boolean) -> Unit = {},
 ) {
     var baseline by remember(profile.id) { mutableStateOf(VisualThemeSettings.fromJson(profile.appearanceSettings)) }
     var edited by remember(appearance) { mutableStateOf(appearance) }
@@ -80,6 +83,25 @@ internal fun AccountAppearancePanel(
                     Text("Message preview", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
+        }
+    }
+    AccountSection(
+        "Wallpaper colors",
+        "Take this device's Material You palette instead of your account's own look.",
+    ) {
+        AccountToggle(
+            "Use wallpaper colors",
+            if (dynamicColorSupported) "Your layout, type and shapes stay the same; only the colors come from the wallpaper."
+            else "Android 12 or later is needed for wallpaper colors, so this device uses your account's look.",
+            checked = dynamicColor && dynamicColorSupported,
+            enabled = dynamicColorSupported,
+        ) { onDynamicColorChange(it) }
+        if (dynamicColor && dynamicColorSupported) {
+            Text(
+                "Saving your look below turns wallpaper colors off: a theme you chose is never replaced by the wallpaper.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
     if (edited.theme == "custom") AccountSection("Custom colors", "Use a hex color or OKLCH value. Empty fields use the theme's defaults.") {

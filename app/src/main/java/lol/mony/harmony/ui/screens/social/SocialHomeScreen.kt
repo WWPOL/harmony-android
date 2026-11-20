@@ -13,10 +13,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -40,6 +42,22 @@ fun SocialPostDetailScreen(state: AppState, postId: String, onClose: () -> Unit)
 @Composable
 fun SocialProfileScreen(state: AppState, profileId: String, onClose: () -> Unit) =
     SocialFeature(state, SocialRoute.Profile(profileId), onClose)
+
+/**
+ * A tab strip label: the full name where it fits, a short one where five tabs cannot.
+ *
+ * Five `titleSmall` labels do not fit 400dp -- "Following" and "Federated" both truncated to
+ * "Followi" and "Federat" in the capture. The short forms are what the reference's own tab bar
+ * uses, and the enum keeps the full label for the places that have room.
+ */
+private val SocialTimeline.stripLabel: String
+    get() = when (this) {
+        SocialTimeline.Home -> "Following"
+        SocialTimeline.Local -> "Local"
+        SocialTimeline.Federated -> "Fediverse"
+        SocialTimeline.Explore -> "Explore"
+        SocialTimeline.Bookmarks -> "Saved"
+    }
 
 private sealed interface SocialRoute {
     data object Feed : SocialRoute
@@ -135,6 +153,14 @@ private fun SocialFeature(state: AppState, initial: SocialRoute, onClose: (() ->
             }) }, navigationIcon = {
                 if (routes.size > 1 || onClose != null) IconButton(onClick = back) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
             }, actions = {
+                if (route !is SocialRoute.Members && route != SocialRoute.Lists && route != SocialRoute.Search) {
+                    // A filled tonal action rather than a bare icon: writing is the one thing
+                    // this screen is for, and it stays reachable with one hand.
+                    FilledTonalIconButton(
+                        onClick = { draft = SocialDraft() },
+                        modifier = Modifier.padding(end = 4.dp).testTag("social-compose"),
+                    ) { Icon(Icons.Outlined.Edit, "New post") }
+                }
                 IconButton(onClick = { updates.clear(); revision++ }) { Icon(Icons.Outlined.Refresh, "Refresh") }
                 if (route == SocialRoute.Feed) {
                     IconButton(onClick = { navigate(SocialRoute.Search) }) { Icon(Icons.Outlined.Search, "Find accounts or hashtags") }
@@ -149,18 +175,41 @@ private fun SocialFeature(state: AppState, initial: SocialRoute, onClose: (() ->
             })
         },
         snackbarHost = { SnackbarHost(snackbar) },
-        floatingActionButton = {
-            if (route !is SocialRoute.Members && route != SocialRoute.Lists && route != SocialRoute.Search) {
-                ExtendedFloatingActionButton(onClick = { draft = SocialDraft() }, icon = { Icon(Icons.Outlined.Edit, null) }, text = { Text("New post") })
-            }
-        },
+        // No corner FAB: writing a post is an action of the feed you are reading, so it lives in
+        // the app bar beside the feed's own controls. A floating button covers the last post's
+        // actions on a phone, which is the one place a person is most likely to be reaching.
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             actionError?.let { shown -> SocialError(shown, onRetry = { updates.clear(); revision++; actionError = null }, onDismiss = { actionError = null }) }
             when (route) {
                 SocialRoute.Feed -> {
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SocialTimeline.entries.forEach { tab -> FilterChip(selected = tab == timeline, onClick = { timelineName = tab.name }, label = { Text(tab.label) }) }
+                    // The timeline is what the feed *is*, not a filter on top of it, so it is a
+                    // tab strip under the app bar rather than a row of chips: five chips
+                    // scrolling sideways reads as a filter you might not have found yet, and the
+                    // selected one has to be found by eye. A scrollable primary tab row states
+                    // the choice, puts it where a thumb reaches, and carries an indicator a
+                    // person can see. It scrolls rather than dividing the width equally: five
+                    // labels split 400dp clip ("Followi", "Fediver"), and a tab whose name is
+                    // cut is a tab a person has to guess at.
+                    PrimaryScrollableTabRow(
+                        selectedTabIndex = SocialTimeline.entries.indexOf(timeline),
+                        containerColor = MaterialTheme.colorScheme.background,
+                        modifier = Modifier.testTag("social-timelines"),
+                    ) {
+                        SocialTimeline.entries.forEach { tab ->
+                            Tab(
+                                selected = tab == timeline,
+                                onClick = { timelineName = tab.name },
+                                text = {
+                                    Text(
+                                        tab.stripLabel,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
+                                },
+                            )
+                        }
                     }
                     SocialPostFeed("timeline:$timeline:$profileId", revision, postContent,
                         emptyText = when (timeline) {

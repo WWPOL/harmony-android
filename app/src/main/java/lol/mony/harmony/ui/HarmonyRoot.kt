@@ -11,6 +11,7 @@ import androidx.core.view.WindowCompat
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import lol.mony.harmony.BuildConfig
 import lol.mony.harmony.data.api.Endpoint
@@ -31,6 +32,9 @@ fun HarmonyRoot(state: AppState) {
     var retry by remember { mutableIntStateOf(0) }
     var showPicker by remember { mutableStateOf(false) }
     var appearance by remember { mutableStateOf(VisualThemeSettings()) }
+    // Wallpaper colours are a device preference, so they are read from this device's store and
+    // never written into the account's shared appearance object.
+    var dynamicColor by remember { mutableStateOf(false) }
     var instanceName by remember { mutableStateOf<String?>(null) }
     fun recover(error: Throwable) { startupError = error.message ?: "Could not load this account." }
 
@@ -59,9 +63,10 @@ fun HarmonyRoot(state: AppState) {
             appearance = if (state.appearanceIsDeviceOnly() && device != null) VisualThemeSettings.fromJson(device)
                 else VisualThemeSettings.fromJson(profile.appearanceSettings)
             state.rememberDeviceAppearance(appearance)
+            dynamicColor = runCatching { state.sessionStore.dynamicColorFlow.first() }.getOrDefault(false)
         } catch (error: Exception) { recover(error) }
     }
-    HarmonyTheme(appearance) {
+    HarmonyTheme(appearance, dynamicColor = dynamicColor) {
         val activity = LocalActivity.current
         val background = MaterialTheme.colorScheme.background.toArgb()
         SideEffect {
@@ -97,6 +102,13 @@ fun HarmonyRoot(state: AppState) {
                     )
                     signedIn != null && signedIn.profile == null -> ProfileSetup(state, signedIn)
                     signedIn != null -> SignedInShell(state, appearance,
+                        dynamicColor = dynamicColor,
+                        onDynamicColorChange = { wanted ->
+                            dynamicColor = wanted
+                            scope.launch {
+                                runCatching { state.sessionStore.setDynamicColor(wanted) }
+                            }
+                        },
                         onAppearanceChange = { updated, saveAccount ->
                             appearance = updated
                             scope.launch {
