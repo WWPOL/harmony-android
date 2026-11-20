@@ -29,6 +29,6 @@ Anything that gets you part of the way today, and why it is not enough.
 ## Before filing
 
 The app is not parity-complete. Check
-[docs/parity-audit.md](https://github.com/WWPOL/harmony-android/blob/master/docs/parity-audit.md)
+[docs/parity-audit.md](https://github.com/WWPOL/harmony-android/blob/main/docs/parity-audit.md)
 first: if the gap is already recorded there (encryption, push, uploads and several other flows
 are), an issue adding detail to that row is more useful than a new one.

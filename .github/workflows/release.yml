@@ -95,6 +95,14 @@ jobs:
             echo '::error::ANDROID_KEYSTORE_BASE64 decoded, but is not a keystore readable with ANDROID_KEYSTORE_PASSWORD.'
             exit 1
           fi
+          # The alias has to name a key the store carries. `keytool -list` above only proves
+          # the store opens, so without this a wrong ANDROID_KEY_ALIAS surfaced as a Gradle
+          # signing failure after the whole build had run.
+          if ! keytool -list -keystore release.keystore -storepass "$KEYSTORE_PASSWORD" \
+                 -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::the keystore decodes, but has no key with alias '$KEY_ALIAS'. Check ANDROID_KEY_ALIAS."
+            exit 1
+          fi
           cat > keystore.properties <<EOF
           storeFile=release.keystore
           storePassword=$KEYSTORE_PASSWORD
@@ -117,6 +125,13 @@ jobs:
           fi
           if ! keytool -list -keystore test.keystore -storepass "$KEYSTORE_PASSWORD" >/dev/null 2>&1; then
             echo '::error::ANDROID_TEST_KEYSTORE_BASE64 decoded, but is not a keystore readable with ANDROID_TEST_KEYSTORE_PASSWORD.'
+            exit 1
+          fi
+          # The alias has to name a key the keystore actually carries, or the build signs
+          # with nothing and the failure surfaces much later.
+          if ! keytool -list -keystore test.keystore -storepass "$KEYSTORE_PASSWORD" \
+                 -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::the keystore decodes, but has no key with alias '$KEY_ALIAS'. Check ANDROID_TEST_KEY_ALIAS."
             exit 1
           fi
           cat > test-keystore.properties <<EOF
@@ -194,9 +209,17 @@ jobs:
             echo '::error::the release keystore is configured, but the APK carries the test key'
             exit 1
           fi
-          if [ "$HAS_KEYSTORE" != 'true' ] && [ "$HAS_TEST_KEYSTORE" = 'true' ] && [ -n "$test_key" ] && [ "$fingerprint" != "$test_key" ]; then
-            echo '::error::the stable test key is configured, but the APK carries a different certificate'
-            exit 1
+          if [ "$HAS_KEYSTORE" != 'true' ] && [ "$HAS_TEST_KEYSTORE" = 'true' ]; then
+            # A test key without its fingerprint variable cannot be proved to be the one
+            # that signed the APK, and a comparison against nothing passes anything.
+            if [ -z "$test_key" ]; then
+              echo '::error::ANDROID_TEST_KEYSTORE_BASE64 is configured but ANDROID_TEST_KEY_SHA256 is not, so the APK cannot be proved to carry the stable test key. Set the repository variable to the certificate fingerprint (keytool -list -v, SHA256).'
+              exit 1
+            fi
+            if [ "$fingerprint" != "$test_key" ]; then
+              echo '::error::the stable test key is configured, but the APK carries a different certificate'
+              exit 1
+            fi
           fi
           ( cd "$(dirname "$apk")" && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256" )
           cat "$apk.sha256"
@@ -213,7 +236,7 @@ jobs:
               "The Android client's APK for ${{ steps.version.outputs.version }}." \
               "" \
               "Install it over an older build; Android keeps the app's data. See" \
-              "https://github.com/${{ github.repository }}/blob/master/docs/builds.md for what each" \
+              "https://github.com/${{ github.repository }}/blob/main/docs/builds.md for what each" \
               "signing configuration means, and for the branch builds.")"
       - name: Attach the APK and its checksum
         env:

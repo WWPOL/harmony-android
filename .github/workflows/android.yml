@@ -70,6 +70,8 @@ jobs:
       # The stable test key's certificate SHA-256 fingerprint (repository variable, colon
       # separated as keytool prints it). It is a digest, not the key: publishing it lets a run
       # prove which certificate it signed with, and lets two APKs be compared without either.
+      # It is the independent expectation the finished APK is checked against, so it is never
+      # derived from the keystore the same run configured.
       TEST_KEY_SHA256: ${{ vars.ANDROID_TEST_KEY_SHA256 }}
     outputs:
       # The name the APK was given, the commit it was built from and its checksum: the
@@ -112,6 +114,14 @@ jobs:
             echo '::error::ANDROID_TEST_KEYSTORE_BASE64 decoded, but is not a keystore readable with ANDROID_TEST_KEYSTORE_PASSWORD.'
             exit 1
           fi
+          # The key the build will sign with has to be the one the alias names, and the
+          # keystore has to carry it: `keytool -list` above only proves the store opens. A
+          # wrong ANDROID_TEST_KEY_ALIAS otherwise surfaced much later as an unsigned APK.
+          if ! keytool -list -keystore test.keystore -storepass "$KEYSTORE_PASSWORD" \
+                 -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::the keystore decodes, but has no key with alias '$KEY_ALIAS'. Check ANDROID_TEST_KEY_ALIAS."
+            exit 1
+          fi
           cat > test-keystore.properties <<EOF
           storeFile=test.keystore
           storePassword=$KEYSTORE_PASSWORD
@@ -148,7 +158,7 @@ jobs:
             echo "::error::Expected one debug APK, found: $*"
             exit 1
           fi
-          bash scripts/name-artifact.sh Android debug "$1"
+          bash scripts/name-artifact.sh debug "$1"
       # What the file is, checked against the APK itself rather than trusted: the
       # package, the version it reports, and the key it is signed with. A build that
       # fails any of these is not published.
@@ -189,9 +199,21 @@ jobs:
             exit 1
           fi
           echo "signing certificate SHA-256: $fingerprint"
-          if [ "$HAS_TEST_KEYSTORE" = 'true' ] && [ "$fingerprint" != "$(normalize "$TEST_KEY_SHA256")" ]; then
-            echo "::error::the stable test key is configured (SHA-256 $(normalize "$TEST_KEY_SHA256")), but the APK carries $fingerprint"
-            exit 1
+          if [ "$HAS_TEST_KEYSTORE" = 'true' ]; then
+            # Compared against the independently pinned ANDROID_TEST_KEY_SHA256, never
+            # against whatever key the run happens to have configured: a check that reads
+            # its expectation from the same secret it is checking proves only that the
+            # secret agrees with itself. With the secret set and this pin absent, the
+            # comparison would otherwise be against nothing and pass any certificate.
+            expected_key=$(normalize "$TEST_KEY_SHA256")
+            if [ -z "$expected_key" ]; then
+              echo '::error::ANDROID_TEST_KEYSTORE_BASE64 is configured but ANDROID_TEST_KEY_SHA256 is not, so the APK cannot be proved to carry the stable test key. Set the repository variable to the certificate fingerprint (keytool -list -v, SHA256).'
+              exit 1
+            fi
+            if [ "$fingerprint" != "$expected_key" ]; then
+              echo "::error::the stable test key is configured (SHA-256 $expected_key), but the APK carries $fingerprint"
+              exit 1
+            fi
           fi
           # `sha256sum --check` reads `<hash>  <name>`: the line describes the file
           # beside it, so checking it works from any directory the APK is in.
@@ -309,7 +331,11 @@ jobs:
           done
           [ -s published.apk ] || { echo "::error::$url did not download"; exit 1; }
           tools=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
-          badging=$("${tools}aapt2" dump badging published.apk | head -1)
+          # To a file, not through a pipe: GitHub runs the step with `pipefail`, and aapt2
+          # writing past the first line would fail the step with SIGPIPE (exit 141) once
+          # `head` exits. The same reason the build job's digest step does it this way.
+          "${tools}aapt2" dump badging published.apk > published-badging.txt
+          badging=$(head -1 published-badging.txt)
           echo "$badging"
           case $badging in
             *"package: name='io.github.wwpol.brapmony'"*) ;;
@@ -321,7 +347,10 @@ jobs:
           esac
           actual=$(sha256sum published.apk | cut -d' ' -f1)
           [ "$actual" = "$EXPECTED_SHA256" ] || { echo "::error::the published APK hashes to $actual, the build reported $EXPECTED_SHA256"; exit 1; }
-          fingerprint=$("${tools}apksigner" verify --print-certs published.apk | sed -n 's/^.*certificate SHA-256 digest: //p' | head -1)
+          # A file, not a pipe: apksigner writes several lines, and `head` closing the pipe
+          # early fails the step with SIGPIPE under pipefail.
+          "${tools}apksigner" verify --print-certs published.apk > published-signature.txt
+          fingerprint=$(sed -n 's/^.*certificate SHA-256 digest: //p' published-signature.txt | head -1)
           [ -n "$fingerprint" ] || { echo '::error::the published APK is not signed'; exit 1; }
           echo "published APK: versionCode $EXPECTED_VERSION_CODE, sha256 $actual, certificate SHA-256 $fingerprint"
           echo "- Fetched the download back and checked it: package io.github.wwpol.brapmony, versionCode $EXPECTED_VERSION_CODE, sha256 $actual, certificate SHA-256 $fingerprint." >> "$GITHUB_STEP_SUMMARY"

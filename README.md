@@ -5,6 +5,7 @@ Native Android client for [Harmony](https://mony.lol).
 
 # Table of Contents
 - [Overview](#overview)
+- [Download](#download)
 - [Development](#development)
 - [License](#license)
 
@@ -32,6 +33,34 @@ recovery, push notifications, and several media and administration flows are mis
 [docs/parity-audit.md](docs/parity-audit.md) names every gap, and
 [docs/parity-matrix.md](docs/parity-matrix.md) tracks each screen against the reference web
 client. Do not treat a green build as a claim of parity.
+
+# Download
+
+Every push to `main` publishes an installable APK to that branch's rolling prerelease. The
+stable link always names the newest build of `main`:
+
+**[Download the latest APK](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony_Android_latest.apk)**
+
+1. Open that link on the Android device and tap the downloaded file, or run
+   `adb install -r Brapmony_Android_latest.apk`.
+2. Allow installing from the browser or file manager when Android asks. The APK is
+   **test-signed**, not store-signed, so it installs over a build that was signed with the same
+   test key and not over one that was not; if Android refuses with a signature mismatch, uninstall
+   the older copy once and install again.
+3. The build needs Android 8.0 (API 26) or newer.
+
+Each build is also kept under its own name next to `Brapmony_Android_latest.apk` on the
+[releases page](https://github.com/WWPOL/harmony-android/releases), with a `.sha256` beside it,
+so a particular build stays downloadable after later pushes. Version releases (`vX.Y.Z`) are cut
+from tags and appear as full releases. [docs/builds.md](docs/builds.md) describes exactly what
+is published where and which build installs over which.
+
+> The rolling prerelease is a window on `main`, not an archive: it keeps the newest ten builds
+> of the branch and drops older ones. The version release of a tag is the archive.
+
+The APK is **not** on GitHub Packages. GitHub Packages hosts npm, Maven, Gradle, NuGet,
+RubyGems and container images, and has no registry for an APK; GitHub Releases is the
+download surface for a file like this, and it needs no token or client to fetch.
 
 # Development
 ## Build

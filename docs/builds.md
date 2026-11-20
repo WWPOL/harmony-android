@@ -6,7 +6,7 @@ updates which.
 
 ## What each push publishes
 
-[`android.yml`](https://github.com/WWPOL/harmony-android/blob/master/.github/workflows/android.yml)
+[`android.yml`](https://github.com/WWPOL/harmony-android/blob/main/.github/workflows/android.yml)
 runs on **every push to any branch**, whatever the push changed, and on pull requests that
 touch the app. A push is not filtered by path: a branch build is what somebody downloads to
 try the app, and a commit that changed nothing still has to produce the APK of that commit
@@ -43,7 +43,7 @@ on a stable test key, which is optional; see [Signing](#signing) and
 ## What a tag publishes
 
 A version tag (`vX.Y.Z`) runs
-[`release.yml`](https://github.com/WWPOL/harmony-android/blob/master/.github/workflows/release.yml),
+[`release.yml`](https://github.com/WWPOL/harmony-android/blob/main/.github/workflows/release.yml),
 which stamps `VERSION` from the tag, builds the release variant, and attaches the APK to the
 release for that tag:
 
@@ -83,6 +83,10 @@ over one another, configure one throwaway test key as repository secrets:
 | `ANDROID_TEST_KEY_ALIAS` | The key's alias |
 | `ANDROID_TEST_KEY_PASSWORD` | That key's password |
 
+Each signing step checks the keystore before the build uses it: that it decodes, that the
+password opens it, and that the alias names a key inside it. A wrong alias therefore fails
+before the build starts instead of as a Gradle signing error after it.
+
 The certificate's SHA-256 fingerprint goes in the repository variable
 `ANDROID_TEST_KEY_SHA256`, as `keytool -list -v` prints it (uppercase, colon-separated; the
 workflow normalises it). It is a digest, not the key. Generate the key once, offline, and keep
@@ -101,14 +105,35 @@ another run's. The build reads the certificate's fingerprint out of the finished
 when a configured key is not the one that signed it, so a name cannot claim a key the file
 does not carry, and a subject like `CN=Android Debug` is never mistaken for identity.
 
-The repository contains no signing key and no secret. Without them nothing here generates,
-guesses or stores a release key, and no release APK pretends to be signed with one.
+The repository contains no signing key and no secret of its own: the test key lives in
+repository secrets, never in the tree. Nothing here generates, guesses or stores a release key,
+and no release APK pretends to be signed with one.
 
-**Missing setup, stated plainly:** with neither `ANDROID_KEYSTORE_BASE64` nor
-`ANDROID_TEST_KEYSTORE_BASE64` configured, each run signs with a key of its own, so its APKs
-are not updates of anything else — not even of the previous run's. The run's log says so. That
-is the repository's state until somebody adds the test key or the release key. It is not a
-seamless update path, and this page does not describe it as one.
+**What is configured today:** the repository carries the test key secrets, so every CI build is
+signed with that one stable key rather than a key generated per checkout. Its certificate is
+`CN=Harmony CI, O=Harmony, C=US`, SHA-256
+`2E:F4:6C:81:35:76:BB:AF:CE:34:91:9F:0E:EE:75:A9:F4:2D:1B:9E:94:53:A9:B8:45:43:13:CE:A3:4C:4F:75`,
+read out of the APK that run published — downloaded again from the rolling prerelease and
+inspected with `apksigner`, not copied from a log. That is the stability baseline.
+
+The pin is proved to be in place by deduction from the run, not by reading its log (the log
+endpoint needs a token this session did not have). Its `Configure the test signing key` step
+succeeded and its `Note the test signing key` step was skipped, so the keystore secret was
+present. Its `Check the APK and write its checksum` step then passed, and at that commit that
+step exited non-zero both when `ANDROID_TEST_KEY_SHA256` was unset and when the fingerprint
+differed from it. So the variable is set, and it names exactly this certificate. A run that
+signed with a different key would have failed there and published nothing.
+
+It is the *new* key, and it is the baseline from here on. An APK signed by an older key does
+not install over one signed by this one, or the other way round: the switch to this key was a
+one-time break in the upgrade path, accepted when the CI pipeline was set up. What the check
+guarantees is that the key does not change again silently — every later run is compared with
+the fingerprint above, and one that differs fails instead of publishing.
+
+A run with neither `ANDROID_KEYSTORE_BASE64` nor `ANDROID_TEST_KEYSTORE_BASE64` configured
+still builds and publishes, but signs with a key of its own, so its APKs are not updates of
+anything else — not even of the previous run's. The run's log says so. That is not this
+repository's state: the test key is configured.
 
 ## What a publish will not do
 
@@ -233,8 +258,10 @@ The workflow tests assert that every action is pinned to a commit SHA, that
 `pull_request_target` is not used, that `contents: write` appears only on the publishing jobs,
 that the branch publisher runs only for a push to this repository, that a push has no path
 filter, that the stable test key is configured from a secret and its absence reported, that
-the tag job stamps `VERSION` from the tag and attaches by release id, and that the repository
-holds the Android app and nothing else.
+the tag job stamps `VERSION` from the tag and attaches by release id, that the APK namer is
+called with a profile it accepts and really renames the file, that no step pipes `aapt2` or
+`apksigner` into `head` (which fails the step with SIGPIPE under `pipefail`), and that the
+repository holds the Android app and nothing else.
 
 To run a step as GitHub would, after a local build:
 
@@ -242,6 +269,22 @@ To run a step as GitHub would, after a local build:
 ANDROID_HOME=/path/to/sdk \
   node scripts/workflow-steps.mjs .github/workflows/android.yml build \
   --step 'Check the APK and write its checksum' --set 'path=<the named apk>'
+```
+
+Without `--step`, the whole job runs and each step's outputs feed the next, which is how to
+check the signing, naming and digest steps together. The job's `env:` and each step's `if:`
+are evaluated — comparisons joined by `&&` and `||`, which is the form the signing steps use —
+and a step's `GITHUB_OUTPUT` becomes `steps.<id>.outputs.<name>` for the steps after it, so a
+job's steps chain the way they do on a runner:
+
+```sh
+ANDROID_HOME=/path/to/sdk \
+  node scripts/workflow-steps.mjs .github/workflows/android.yml build \
+  --set "secrets.ANDROID_TEST_KEYSTORE_BASE64=$(base64 -w 0 test.keystore)" \
+  --set 'secrets.ANDROID_TEST_KEYSTORE_PASSWORD=<store password>' \
+  --set 'secrets.ANDROID_TEST_KEY_ALIAS=<alias>' \
+  --set 'secrets.ANDROID_TEST_KEY_PASSWORD=<key password>' \
+  --set 'vars.ANDROID_TEST_KEY_SHA256=<the key’s SHA-256, as keytool -list -v prints it>'
 ```
 
 `scripts/fake-github-api.mjs` is the same stand-in as a process, for running the publish step
@@ -252,7 +295,7 @@ GITHUB_REPOSITORY=owner/repo node scripts/fake-github-api.mjs 8099 &
 node scripts/workflow-steps.mjs .github/workflows/android.yml publish \
   --step 'Publish' --cwd <a directory holding android-apk/<the apk>> \
   --set 'GITHUB_TOKEN=t' --set 'GITHUB_API_URL=http://127.0.0.1:8099' \
-  --set 'github.ref_name=master' --set 'needs.build.outputs.sha256=<sha256sum of the apk>'
+  --set 'github.ref_name=main' --set 'needs.build.outputs.sha256=<sha256sum of the apk>'
 ```
 
 A change to either workflow should keep those tests passing and their assertions honest: if an
@@ -261,9 +304,49 @@ deliberately, not by loosening it until it passes.
 
 ## What is not verified here
 
-The workflows are checked by parsing them and by running their shell steps on a machine. They
-have not been run by GitHub Actions from this repository: the branch that added them was not
-pushed, so no run, artifact or release created by them has been observed. The first push is
-what proves the runner's own environment — the `sdkmanager` package names, the `aapt2` and
-`apksigner` paths, and the token's permission to create a release. Until then, treat the
-workflow as reviewed and locally exercised, not as a demonstrated CI run.
+The workflows are checked by parsing them and by running their shell steps on a machine, and
+the build job has been run end to end locally with the stable test key configured: the APK is
+built, signed with that key, named, and its certificate read back and compared with the key's
+fingerprint.
+
+**One real run has now completed.** [Run 44533075269](https://github.com/WWPOL/harmony-android/actions/runs/44533075269)
+(a push of `task/verify-apk-ci-publish-flow-3e8cphaa` at `fbd613f`) succeeded on a GitHub
+runner: the build job produced and uploaded the `android-apk-<run id>-<attempt>` artifact, and
+the publish job created the rolling prerelease, uploaded this run's APK, moved
+`Brapmony_Android_latest.apk` and its `.sha256` onto those bytes, fetched the download back and
+checked it, and printed the links. So the runner's environment — the `sdkmanager` package
+names, the `aapt2` and `apksigner` paths, `upload-artifact` and `download-artifact`, and the
+token's permission to create a release — is demonstrated, not assumed.
+
+That run carried both fixes in this change, so it proves more than the environment. Its build
+job called `scripts/name-artifact.sh debug "$1"` (the call `main` still gets wrong, see below),
+and its publish job read the badging and the certificate into files instead of piping `aapt2`
+and `apksigner` into `head`. Both steps passed on the runner: `Name the APK` and
+`Check the published download`. The SIGPIPE failures and the namer's `Android` argument were
+real, and this run is the evidence that they are gone rather than merely argued away.
+
+**`main` failed the same way before this change.** [Run 44533004623](https://github.com/WWPOL/harmony-android/actions/runs/44533004623),
+the newest push to `main` (`618008b`), failed at `Name the APK` with
+`bash scripts/name-artifact.sh Android debug "$1"`, and skipped the digest, the artifact and
+the publish. That is what this change fixes: the build was green up to the naming step and
+nothing was published.
+
+That has one consequence worth stating plainly, because the README's download link depends on
+it: at the time of writing the only rolling prerelease was `android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa`,
+from the branch run above, and `android-rolling-main` did not exist, so
+`.../releases/download/android-rolling-main/Brapmony_Android_latest.apk` answered 404. It
+starts working with the first push to `main` that gets past the namer — that is, the merge of
+this change, which is itself such a push. The link was never wrong; nothing had published
+`main` yet.
+
+A version tag's release (`release.yml`) has still not been run on a runner: no `vX.Y.Z` tag has
+been pushed, so its steps are exercised locally only. That now includes the tag build's
+test-signing step, which the local step runner could not evaluate before the fix described
+above: it refused the step's two-part `if:` rather than running it.
+
+The certificate check needs **both** the secret and the repository variable. With
+`ANDROID_TEST_KEYSTORE_BASE64` set but `ANDROID_TEST_KEY_SHA256` unset, the run fails and says
+so, rather than signing with the stable key and proving nothing about which key it was. The
+variable is the independent expectation the APK is checked against, so it is never read out of
+the keystore the same run configured: a check whose expectation came from the thing it checks
+would pass any key.
