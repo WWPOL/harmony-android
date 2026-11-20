@@ -60,10 +60,10 @@ if [ "$MODE" = prepare ]; then
   # one name. Each is renamed here to the version its own manifest reports, which is the
   # number Android compares.
   sha=$(git rev-parse --short=7 HEAD)
-  mv "$OUT/first.apk" "$OUT/Brapmony_Android_V$version-debug-main-$sha.apk"
-  mv "$OUT/second.apk" "$OUT/Brapmony_Android_V$next-debug-main-$sha.apk"
-  first="$OUT/Brapmony_Android_V$version-debug-main-$sha.apk"
-  second="$OUT/Brapmony_Android_V$next-debug-main-$sha.apk"
+  mv "$OUT/first.apk" "$OUT/Brapmony-$version-$sha-debug.apk"
+  mv "$OUT/second.apk" "$OUT/Brapmony-$next-$sha-debug.apk"
+  first="$OUT/Brapmony-$version-$sha-debug.apk"
+  second="$OUT/Brapmony-$next-$sha-debug.apk"
   describe "$first" first
   describe "$second" second
   first_pkg=$(package_name "$first"); second_pkg=$(package_name "$second")
@@ -79,8 +79,8 @@ fi
 if [ "$MODE" = run ]; then
   # The two files `prepare` wrote, oldest version first; sort -V orders the version
   # numbers, not the letters of their names.
-  first=$(ls "$OUT"/Brapmony_Android_V*-debug-main-*.apk | sort -V | head -1)
-  second=$(ls "$OUT"/Brapmony_Android_V*-debug-main-*.apk | sort -V | tail -1)
+  first=$(ls "$OUT"/Brapmony-*-debug.apk | sort -V | head -1)
+  second=$(ls "$OUT"/Brapmony-*-debug.apk | sort -V | tail -1)
   second_code=$(version_code "$second")
   D wait-for-device
   echo "### installing the first build"

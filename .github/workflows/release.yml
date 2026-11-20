@@ -31,9 +31,11 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: write
+      # The tag's APK is published to GitHub Packages as well as attached to its release.
+      packages: write
     env:
       # Production signing is configured outside the tree. Absent, the build is
-      # test-signed and its file name carries _debug, so a test-signed APK is never
+      # test-signed and its file name carries -debug, so a test-signed APK is never
       # passed off as a production one.
       HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
       HAS_TEST_KEYSTORE: ${{ secrets.ANDROID_TEST_KEYSTORE_BASE64 != '' }}
@@ -145,14 +147,14 @@ jobs:
           if [ "$HAS_KEYSTORE" = 'true' ]; then
             echo "::notice::Building a release-signed APK."
           elif [ "$HAS_TEST_KEYSTORE" = 'true' ]; then
-            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret - the APK is signed with the repository's test key and named _debug. It installs over other test-signed builds, not over a release-signed install."
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret - the APK is signed with the repository's test key and named -debug. It installs over other test-signed builds, not over a release-signed install."
           else
-            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret - the APK is signed with a key generated for this run and named _debug. It will not install over a build signed by any other run."
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret - the APK is signed with a key generated for this run and named -debug. It will not install over a build signed by any other run."
           fi
       - name: Build the APK
         run: ./gradlew :app:assembleRelease :app:testReleaseUnitTest --no-daemon --console=plain --max-workers=2
-      # Named for what it is: the profile the APK was signed with, never the profile
-      # someone hoped it was.
+      # Named for what it is: `Brapmony-<version>.apk`, with `-debug` when the profile it
+      # was signed with was the test key. Never the profile someone hoped it was.
       - name: Name the APK
         id: name
         env:
@@ -223,6 +225,21 @@ jobs:
           fi
           ( cd "$(dirname "$apk")" && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256" )
           cat "$apk.sha256"
+      # The CLI that pushes an OCI artifact. GitHub Packages has no APK registry, so the
+      # APK is published to the container registry, and `oras` is the client that does
+      # that for a file rather than for a container image.
+      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
+        with:
+          version: 1.4.0
+      # The same APK, as a package, tagged with the version: this is what a version
+      # release leaves behind that can be found by version rather than by asset name.
+      - name: Publish the package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
+        run: |
+          bash .ci/scripts/publish-package.sh "${{ steps.name.outputs.path }}" \
+            "${{ steps.version.outputs.version }}" "${{ github.sha }}" --version-release
       # A tag's release is created or found by this job alone, so nothing races it. Uploads
       # replace only the two names this workflow owns.
       - name: Create or find the release

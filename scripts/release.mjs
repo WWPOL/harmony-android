@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // Publishes the Android client's APK from CI. Three callers:
 //
-//   node scripts/release.mjs rolling --apk <file> --branch <ref> \
-//       --commit <sha> [--keep <n>] [--body <markdown>] [--dry-run]
-//     Publishes a rolling prerelease for one branch: `Android (rolling) <branch>`
-//     tagged `android-rolling-<slug>`. Each run adds its APK under its own
-//     versioned name and refreshes the stable `Brapmony_Android_latest.apk` (and
-//     its `.sha256`) to the same bytes.
+//   node scripts/release.mjs rolling --apk <file> --branch <ref> --commit <sha> \
+//       --default-branch <ref> [--version <x.y.z>] [--keep <n>] [--body <markdown>] \
+//       [--dry-run]
+//     Publishes a rolling build of one branch: `Brapmony (rolling) <branch>` tagged
+//     `android-rolling-<slug>`. Each run adds its APK under its own versioned name and
+//     refreshes the stable `Brapmony-latest.apk` (and its `.sha256`) to the same bytes.
+//     The build of the repository's default branch is published as a **release**, so it
+//     is what the repository's Releases page and /releases/latest offer; any other
+//     branch's is a prerelease, which /releases/latest skips.
 //
 //   node scripts/release.mjs tag --tag <vX.Y.Z> [--name <title>] [--body <markdown>]
 //     Creates the version release for a tag, or finds the one that exists, and prints
@@ -16,10 +19,15 @@
 //     Attaches files to an existing release, replacing assets of the same name and
 //     nothing else.
 //
+// The same APK is also pushed to GitHub Packages as an OCI artifact by
+// scripts/publish-package.sh, which is what makes it a package on the repository as well
+// as a release asset.
+//
 // What this refuses to do, because a published download link is somebody's:
 //
 //   * touch a release whose tag is not a rolling tag it computed itself;
-//   * publish into a release that is not a prerelease;
+//   * publish into a release at that tag that carries none of its own assets (somebody
+//     else's release, or an empty one), rather than rewriting what it says;
 //   * overwrite an asset this workflow did not upload (assets carry an ownership
 //     label, and only labelled ones are ever replaced or pruned);
 //   * replace a build asset whose bytes differ, which would silently change what an
@@ -40,13 +48,21 @@ import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
-export const LATEST_ASSET = 'Brapmony_Android_latest.apk';
-export const LATEST_SHA256_ASSET = 'Brapmony_Android_latest.apk.sha256';
+// The stable name to bookmark: replaced on every publish, so it always names the newest
+// build of the branch. The build's own name is versioned and never changes.
+export const LATEST_ASSET = 'Brapmony-latest.apk';
+export const LATEST_SHA256_ASSET = 'Brapmony-latest.apk.sha256';
+// Names an earlier version of this workflow published under. They are retired on the
+// first publish that runs here, so a download does not sit under a name the
+// documentation no longer mentions, holding bytes nothing updates. Only assets this
+// workflow owns are ever removed.
+export const RETIRED_ASSETS = ['Brapmony_Android_latest.apk', 'Brapmony_Android_latest.apk.sha256'];
 // The prefix every rolling release tag carries. A version release's tag is `vX.Y.Z`,
 // so a lookup can never match one.
 export const ROLLING_TAG_PREFIX = 'android-rolling-';
 // How many of a branch's own builds a rolling release keeps.
 export const DEFAULT_KEEP = 10;
+
 // Written into every asset's label by this workflow. An asset without it was put there
 // by somebody else, and is never replaced or deleted.
 export const OWNER = 'brapmony-android';
@@ -58,11 +74,11 @@ export function ownedSha256(asset) {
   const m = /sha256:([0-9a-f]{64})/.exec(asset.label || '');
   return m ? m[1] : null;
 }
-// The asset names this workflow publishes. A tag's release also carries the Tauri
-// APK and latest.json, which are not these; naming is how the two are told apart on a
-// release whose assets predate the ownership label.
+// The asset names this workflow publishes: `Brapmony-<version>...` today, and
+// `Brapmony_Android_<version>...` from before the name scheme was flattened. Naming is
+// how these are told apart on a release whose assets predate the ownership label.
 export function ownName(name) {
-  return /^Brapmony_Android_/.test(name);
+  return /^Brapmony[_-]/.test(name);
 }
 export function ownsAsset(asset) {
   return isOwned(asset) || ownName(asset.name);
@@ -83,7 +99,27 @@ export function rollingTag(branch) {
 }
 
 export function rollingName(branch) {
-  return `Android (rolling) ${String(branch || '').trim()}`;
+  return `Brapmony (rolling) ${String(branch || '').trim()}`;
+}
+
+// The name a published release of the default branch carries, so the Releases page reads
+// as the app and its version rather than as a branch. The build is still named by the tag
+// (`android-rolling-<branch>`), which is what a download link uses.
+export function releaseTitle(branch, version) {
+  const v = String(version || '').trim();
+  return v ? `Brapmony ${v}` : rollingName(branch);
+}
+
+// Whether a rolling release is a published release or a prerelease. The default branch's
+// build is what the repository offers as its release: it is what /releases/latest and the
+// Releases box on the repository page point at, and a prerelease is skipped by both, so a
+// prerelease there means no release is offered at all. Every other branch stays a
+// prerelease -- a branch build is not an offer to anybody.
+export function isPublishedRelease(branch, defaultBranch) {
+  const b = String(branch || '').trim();
+  const d = String(defaultBranch || '').trim();
+  if (!b || !d) throw new PublishError('--default-branch is required to decide whether a build is a release');
+  return b === d;
 }
 
 export function sha256File(file) {
@@ -149,30 +185,64 @@ async function findByTag(gh, tag) {
   return (await gh.paginate('/releases')).find((r) => r.tag_name === tag) || null;
 }
 
-export async function ensureRollingRelease(gh, { branch, commit, body }) {
+// What a rolling release of [branch] should say and be: a published release for the
+// default branch, a prerelease for any other.
+export function rollingState({ branch, defaultBranch, version, body }) {
+  const published = isPublishedRelease(branch, defaultBranch);
+  return {
+    name: published ? releaseTitle(branch, version) : rollingName(branch),
+    body: body ?? '',
+    draft: false,
+    prerelease: !published,
+  };
+}
+
+// Finds the rolling release for [branch], or creates it. An existing release at that tag
+// is only ever this workflow's: one that carries no build of ours is somebody else's, and
+// is refused rather than rewritten. Changing the name, body and published state is a
+// separate call (updateRollingRelease) made after this run's build has uploaded, so a
+// failed publish cannot leave the repository's release saying something it is not.
+export async function ensureRollingRelease(gh, { branch, commit, defaultBranch, version, body }) {
   const tag = rollingTag(branch);
+  const wanted = rollingState({ branch, defaultBranch, version, body });
   const existing = await findByTag(gh, tag);
   if (existing) {
-    // A rolling release that somehow became a full release would take the tag of a
-    // download link people already have and start counting as a release; refuse rather
-    // than quietly rewrite its meaning.
-    if (!existing.prerelease) {
-      throw new PublishError(`release ${tag} exists and is not a prerelease; refusing to publish into it`);
+    const assets = await listAssets(gh, existing.id);
+    if (!assets.some(ownsAsset)) {
+      throw new PublishError(
+        `release ${tag} carries no build of this workflow's; refusing to publish into it`,
+      );
     }
-    return { id: existing.id, tag, created: false };
+    return { id: existing.id, tag, created: false, wanted, current: existing };
   }
   const created = await gh.json('POST', '/releases', {
     contentType: 'application/json',
     body: JSON.stringify({
       tag_name: tag,
-      name: rollingName(branch),
-      body,
-      draft: false,
-      prerelease: true,
+      ...wanted,
       ...(commit ? { target_commitish: commit } : {}),
     }),
   });
-  return { id: created.id, tag, created: true };
+  return { id: created.id, tag, created: true, wanted, current: null };
+}
+
+// Brings an existing rolling release in line with this build: the title and body describe
+// the newest build, and a release of the default branch is published while another
+// branch's is a prerelease. Only what differs is written, so a re-run of the same commit
+// changes nothing.
+export async function updateRollingRelease(gh, { id, tag, wanted, current }) {
+  if (!current) return { updated: [], prerelease: wanted.prerelease };
+  const patch = {};
+  if (current.prerelease !== wanted.prerelease) patch.prerelease = wanted.prerelease;
+  if (current.name !== wanted.name) patch.name = wanted.name;
+  if (wanted.body && current.body !== wanted.body) patch.body = wanted.body;
+  const updated = Object.keys(patch);
+  if (!updated.length) return { updated, prerelease: wanted.prerelease };
+  await gh.json('PATCH', `/releases/${id}`, {
+    contentType: 'application/json',
+    body: JSON.stringify(patch),
+  });
+  return { updated, prerelease: wanted.prerelease };
 }
 
 // A version release is addressed by its exact tag, and only ever a `vX.Y.Z` one: the
@@ -312,13 +382,27 @@ export async function replaceStable(gh, { releaseId, file, name, label }) {
   }
 }
 
+// Deletes assets this workflow published under a name it no longer uses, so a download
+// does not stay under a name nothing updates. Only this workflow's own assets are ever
+// removed: an unlabelled file somebody attached by hand is left exactly where it is.
+export async function retireAssets(gh, { releaseId, names = RETIRED_ASSETS }) {
+  const retired = [];
+  for (const asset of await listAssets(gh, releaseId)) {
+    if (!names.includes(asset.name)) continue;
+    if (!isOwned(asset)) continue;
+    await gh.json('DELETE', `/releases/assets/${asset.id}`);
+    retired.push(asset.name);
+  }
+  return retired;
+}
+
 // Deletes the oldest of a rolling release's own builds, keeping [keep] newest. Only
 // assets this workflow uploaded under a versioned name are candidates: unlabelled assets
 // (attached by hand), the stable names, and the checksum are all left alone, and so is
 // every other release.
 export async function pruneRollingAssets(gh, { releaseId, keep = DEFAULT_KEEP, protect = [] }) {
   if (!(keep > 0)) throw new PublishError(`--keep must be positive: ${keep}`);
-  const safe = new Set([LATEST_ASSET, LATEST_SHA256_ASSET, ...protect]);
+  const safe = new Set([LATEST_ASSET, LATEST_SHA256_ASSET, ...RETIRED_ASSETS, ...protect]);
   const assets = await listAssets(gh, releaseId);
   const builds = assets.filter(
     (a) => isOwned(a) && /\.apk$/.test(a.name) && !safe.has(a.name) && !a.name.includes('.staging-'),
@@ -348,6 +432,8 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       apk: { type: 'string' },
       branch: { type: 'string' },
       commit: { type: 'string' },
+      'default-branch': { type: 'string' },
+      version: { type: 'string' },
       body: { type: 'string' },
       keep: { type: 'string' },
       attempt: { type: 'string' },
@@ -359,22 +445,31 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
   });
 
   if (command === 'rolling') {
-    required(values, ['apk', 'branch']);
+    required(values, ['apk', 'branch', 'default-branch']);
     const tag = rollingTag(values.branch);
+    const published = isPublishedRelease(values.branch, values['default-branch']);
+    const kind = published ? 'release' : 'prerelease';
     if (values['dry-run']) {
-      log(`Would publish ${basename(values.apk)} to prerelease ${tag}`);
-      return { tag, dryRun: true };
+      log(`Would publish ${basename(values.apk)} to ${kind} ${tag}`);
+      return { tag, dryRun: true, prerelease: !published };
     }
     const gh = ghOverride ?? client();
-    const { id, created } = await ensureRollingRelease(gh, {
+    const { id, created, wanted, current } = await ensureRollingRelease(gh, {
       branch: values.branch,
       commit: values.commit,
+      defaultBranch: values['default-branch'],
+      version: values.version,
       body: values.body ?? '',
     });
-    log(`${created ? 'Created' : 'Found'} rolling prerelease ${tag} (${id})`);
+    log(`${created ? 'Created' : 'Found'} rolling ${published ? 'release' : 'prerelease'} ${tag} (${id})`);
     const attempt = Number(values.attempt ?? 1) || 1;
     const build = await publishBuild(gh, { releaseId: id, file: values.apk, name: basename(values.apk), attempt });
     log(`${build.uploaded ? 'Uploaded' : 'Kept'} ${build.name} on ${tag} (sha256 ${build.sha256})`);
+    // Only now that this build is on the release is what the release says brought up to
+    // date: a publish that fails before this point leaves the page describing the build
+    // that is actually there.
+    const { updated } = await updateRollingRelease(gh, { id, tag, wanted, current });
+    if (updated.length) log(`Updated ${tag}: ${updated.join(', ')}`);
     // The stable name is only touched once the run's own asset is safely there, so a
     // failed build upload cannot disturb the build people are already downloading.
     const sha256 = build.sha256;
@@ -383,6 +478,8 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
     const checksum = stableText(`${sha256}  ${LATEST_ASSET}\n`, LATEST_SHA256_ASSET);
     await replaceStable(gh, { releaseId: id, file: checksum, name: LATEST_SHA256_ASSET, label: ownerLabel(sha256) });
     log(`Updated ${LATEST_SHA256_ASSET} on ${tag}`);
+    const retired = await retireAssets(gh, { releaseId: id });
+    if (retired.length) log(`Retired ${retired.join(', ')} from ${tag}`);
     const pruned = await pruneRollingAssets(gh, {
       releaseId: id,
       keep: Number(values.keep ?? DEFAULT_KEEP),
@@ -392,7 +489,7 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
     if (process.env.GITHUB_OUTPUT) {
       appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\nrelease-id=${id}\nsha256=${sha256}\n`);
     }
-    return { id, tag, uploaded: build.uploaded ? build.name : null, sha256, pruned };
+    return { id, tag, uploaded: build.uploaded ? build.name : null, sha256, pruned, retired, prerelease: !published };
   }
 
   if (command === 'tag') {

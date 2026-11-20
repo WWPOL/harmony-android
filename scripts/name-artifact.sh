@@ -6,17 +6,21 @@
 # With [file], renames it in place to <stem>.<ext>, prints the new path and appends
 # `path=<new path>` to GITHUB_OUTPUT when that is set. Without it, prints <stem>.
 #
-#   dev build:  Brapmony_Android_V<version>_<kind>-<ref>-<sha7>.apk
-#   --release:  Brapmony_Android_V<version>.apk, `_debug` appended for a test-signed
-#               build
+#   branch build:  Brapmony-<version>-<sha7>[-debug].apk
+#   --release:     Brapmony-<version>[-debug].apk
 #
-# `_debug` is a signing statement, not only a build type: it says the APK carries the
-# repository's test key, so Android refuses it as an update of a release-signed install.
+# The version is the root VERSION file, which the release workflow stamps from the tag;
+# the short commit is what tells two builds of one version apart; and `-debug` is a
+# signing statement, not only a build type: it says the APK carries the repository's
+# test key, so Android refuses it as an update of a release-signed install. A name
+# therefore reads as what the file is, in the order Gradle names a variant:
+# `<app>-<version>-<build>[-<signing>]`.
 #
-# <kind>     `dev` for a release-profile build, `debug` for a debug one.
-# <version>  the root VERSION file, which the release workflow stamps from the tag.
-# <ref>      GITHUB_REF_NAME, each run of characters outside [A-Za-z0-9.-]
-#            replaced by one `-`, cut to 40 characters.
+# The branch is not in the name. It is in the tag of the release the file is published
+# to (`android-rolling-<branch>`), which is where a downloader looks for it, and a
+# branch name can carry characters and length a file name should not.
+#
+# <profile>  `release` for a release-signed build, `debug` for a test-signed one.
 # <sha7>     first 7 characters of GITHUB_SHA.
 #
 # Runs from the root of the tree being built. Bash 3.2 and BSD userland (macOS
@@ -54,24 +58,17 @@ if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
   exit 1
 fi
 
-stem="Brapmony_Android_V${version}"
-if [ "$channel" = release ]; then
-  [ "$profile" = release ] || stem="${stem}_debug"
-else
-  if [ -z "${GITHUB_REF_NAME:-}" ] || [ -z "${GITHUB_SHA:-}" ]; then
-    echo "$0: GITHUB_REF_NAME and GITHUB_SHA must be set" >&2
+# A tag's release names the version and nothing else: it is the archive, one file per
+# version. A branch build is one of many of the same version, so it carries the commit.
+stem="Brapmony-${version}"
+if [ "$channel" != release ]; then
+  if [ -z "${GITHUB_SHA:-}" ]; then
+    echo "$0: GITHUB_SHA must be set" >&2
     exit 1
   fi
-  case $profile in
-    release) kind=dev ;;
-    debug) kind=debug ;;
-  esac
-  ref=$(printf '%s' "$GITHUB_REF_NAME" | sed -e 's/[^A-Za-z0-9.-][^A-Za-z0-9.-]*/-/g' -e 's/--*/-/g')
-  ref=${ref:0:40}
-  ref=${ref#-}
-  ref=${ref%-}
-  stem="${stem}_${kind}-${ref}-${GITHUB_SHA:0:7}"
+  stem="${stem}-${GITHUB_SHA:0:7}"
 fi
+[ "$profile" = release ] || stem="${stem}-debug"
 
 if [ -z "$file" ]; then
   printf '%s\n' "$stem"
@@ -84,4 +81,16 @@ dest="$(dirname "$file")/$stem.${file##*.}"
 printf '%s\n' "$dest"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   printf 'path=%s\n' "$dest" >>"$GITHUB_OUTPUT"
+  printf 'stem=%s\n' "$stem" >>"$GITHUB_OUTPUT"
+  # The Actions artifact is named after the APK, so what a run uploads and what a release
+  # publishes are called the same thing. A re-run of the same commit would otherwise put
+  # its own bytes under the name the first attempt used, so the attempt number is added
+  # when there is more than one.
+  attempt=${GITHUB_RUN_ATTEMPT:-1}
+  case $attempt in
+    '' | 1) artifact=$stem ;;
+    *) artifact="$stem-attempt-$attempt" ;;
+  esac
+  printf 'artifact=%s\n' "$artifact" >>"$GITHUB_OUTPUT"
 fi
+exit 0

@@ -42,6 +42,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The branch whose build is published as a release and tagged `latest` in the package.
+  # Every other branch's build is a prerelease, which the repository's Releases page and
+  # /releases/latest do not offer.
+  DEFAULT_BRANCH: main
+
 jobs:
   # The tooling that names, checks and publishes APKs, run against a stand-in for the
   # GitHub API. It needs Node and nothing else, so it runs beside the build rather than
@@ -74,9 +80,11 @@ jobs:
       # derived from the keystore the same run configured.
       TEST_KEY_SHA256: ${{ vars.ANDROID_TEST_KEY_SHA256 }}
     outputs:
-      # The name the APK was given, the commit it was built from and its checksum: the
-      # three things a downloader needs to know what they have.
+      # The name the APK was given, the name of the artifact holding it, the commit it was
+      # built from and its checksum: what a downloader needs to know what they have, and
+      # what the publishing job needs to fetch those exact bytes.
       apk: ${{ steps.name.outputs.path }}
+      artifact: ${{ steps.name.outputs.artifact }}
       sha256: ${{ steps.digest.outputs.sha256 }}
       version: ${{ steps.version.outputs.version }}
       version-code: ${{ steps.version.outputs.version-code }}
@@ -96,7 +104,7 @@ jobs:
       # A debug keystore is generated per checkout and therefore has a random certificate, so
       # two runs would sign with different keys and Android would refuse to install one over
       # the other. A repository secret can supply one stable test key instead; the APK is
-      # still named _debug, because it is still a test key and never a release key. Without the
+      # still named -debug, because it is still a test key and never a release key. Without the
       # secret the builds are still produced, and the run says what that means.
       - name: Configure the test signing key
         if: env.HAS_TEST_KEYSTORE == 'true'
@@ -149,7 +157,7 @@ jobs:
       # These are build, JVM and lint checks, NOT emulator or full-parity verification.
       - run: ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --console=plain --max-workers=2
       # A debug APK is test-signed with the repository's debug key: installable, but not
-      # an update of a release-signed install. The name says so (`_debug`).
+      # an update of a release-signed install. The name says so (`-debug`).
       - name: Name the APK
         id: name
         run: |
@@ -233,11 +241,13 @@ jobs:
             echo "certificate-sha256=$fingerprint"
           } > "$apk.txt"
           cat "$apk.sha256" "$apk.txt"
-      # Immutable per run: the artifact is named after this run and never overwritten,
-      # so a link to it always means the bytes that run built.
+      # The artifact carries the APK's own name, so what a run uploads and what a release
+      # publishes are called the same thing. The namer adds `-attempt-<n>` on a re-run of
+      # the same commit, so a second attempt's bytes never land on the first attempt's
+      # name; that is what keeps the artifact immutable.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: android-apk-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.name.outputs.artifact }}
           path: |
             ${{ steps.name.outputs.path }}
             ${{ steps.name.outputs.path }}.sha256
@@ -245,11 +255,13 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  # Publishes the newest build of each branch as a rolling prerelease. A prerelease is
-  # deliberately not a release: /releases/latest skips it, so a branch build is never
-  # offered to anybody as a release.
+  # Publishes the newest build of each branch, as a release of the default branch and as
+  # a prerelease of any other. The default branch's is what the repository offers as its
+  # release -- the Releases box on the repository page and /releases/latest both reach a
+  # release and skip a prerelease -- and it is also pushed to GitHub Packages, so the app
+  # is a package on the repository as well as a file on a release.
   publish:
-    name: Publish the rolling prerelease
+    name: Publish the release and the package
     needs: build
     # A push to a branch of this repository, and nothing else: a pull request from a fork
     # runs the build job only, with no token that can write.
@@ -260,9 +272,13 @@ jobs:
       group: android-publish-${{ github.ref }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
+      # Pushing to GitHub Packages needs this and nothing else of its own. It is granted
+      # on this job alone: the build job, which a pull request runs, holds no write
+      # permission at all.
+      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -270,11 +286,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
+      # The CLI that pushes an OCI artifact. GitHub Packages has no APK registry, so the
+      # APK is published to the container registry, and `oras` is the client that does
+      # that for a file rather than for a container image.
+      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
+        with:
+          version: 1.4.0
       # The artifact is read-only evidence of what the build job produced; publishing
       # reads it back rather than rebuilding, so the published bytes are the checked bytes.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: android-apk-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.build.outputs.artifact }}
           path: android-apk
       - name: Publish
         env:
@@ -296,10 +318,14 @@ jobs:
             echo "::error::The downloaded APK hashes to $actual, the build reported $SHA256"
             exit 1
           fi
+          # The default branch's build is published as a release, which is what the
+          # repository's Releases page and /releases/latest offer. Another branch's is a
+          # prerelease: a branch build is not an offer to anybody.
           node scripts/release.mjs rolling --apk "$apk" \
             --branch "$BRANCH" --commit "$COMMIT" \
+            --default-branch "$DEFAULT_BRANCH" --version "$VERSION" \
             --body "$(printf '%s\n' \
-              "Rolling build of \`$BRANCH\` for the Android client." \
+              "The newest build of \`$BRANCH\` for the Android client." \
               "" \
               "| | |" \
               "| --- | --- |" \
@@ -307,14 +333,35 @@ jobs:
               "| Commit | \`$COMMIT\` |" \
               "| Checksum | \`$SHA256\` |" \
               "" \
-              "\`Brapmony_Android_latest.apk\` always names the newest build of this branch; the" \
+              "\`Brapmony-latest.apk\` always names the newest build of this branch; the" \
               "other APK is the build of the commit above and never changes. Both are **debug-signed" \
               "with a test key**: installable, but Android will not install one over a release-signed" \
-              "build, and these are not production releases. Releases are cut from version tags.")"
-      # A rolling release is a prerelease, so /releases/latest/download/... would not
-      # resolve to it. The link people are given is the tag-specific one; this step fetches
-      # it back over the same path a browser would and checks that what arrives is the APK
-      # that was just built: package, versionCode, certificate fingerprint and checksum.
+              "build, and neither is a production release. Those are cut from version tags.")"
+      # The same APK, as a package: GitHub Packages serves no APK registry, so it goes to
+      # the container registry (ghcr.io) as an OCI artifact. This is what makes the build
+      # a package on the repository as well as a file on a release.
+      - name: Publish the package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          PACKAGE_DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          # One APK, already hash-checked against what the build reported. The package is
+          # pushed from those same bytes, so a package tag and a release asset of the same
+          # commit are the same file.
+          set -- android-apk/*.apk
+          if [ $# -ne 1 ] || [ ! -f "$1" ]; then
+            echo "::error::Expected one downloaded APK, found: $*"
+            exit 1
+          fi
+          bash scripts/publish-package.sh "$1" "$VERSION" "$COMMIT"
+      # The link people are given is the tag-specific one -- it names the release, which
+      # a browser can follow whether or not the release is the repository's newest. This
+      # step fetches it back over the same path a browser would and checks that what
+      # arrives is the APK that was just built: package, versionCode, certificate
+      # fingerprint and checksum.
       - name: Check the published download
         env:
           BRANCH: ${{ github.ref_name }}
@@ -322,7 +369,7 @@ jobs:
           EXPECTED_VERSION_CODE: ${{ needs.build.outputs.version-code }}
         run: |
           tag=$(node -e "import('./scripts/release.mjs').then(m => console.log(m.rollingTag(process.env.BRANCH)))")
-          url="https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony_Android_latest.apk"
+          url="https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony-latest.apk"
           echo "checking $url"
           # GitHub answers a download URL with a redirect to a signed blob; -L follows it.
           for attempt in 1 2 3 4 5; do
@@ -358,13 +405,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           tag=$(node -e "import('./scripts/release.mjs').then(m => console.log(m.rollingTag(process.env.BRANCH)))")
           {
-            echo "### Android: rolling build of \`$BRANCH\`"
+            echo "### Brapmony $VERSION: build of \`$BRANCH\`"
             echo ""
-            echo "- [Brapmony_Android_latest.apk](https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony_Android_latest.apk) (newest build of this branch)"
-            echo "- [The rolling release](https://github.com/${{ github.repository }}/releases/tag/$tag)"
+            echo "- [Brapmony-latest.apk](https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony-latest.apk) (newest build of this branch)"
+            echo "- [The release](https://github.com/${{ github.repository }}/releases/tag/$tag)"
+            echo "- [The package](https://github.com/${{ github.repository }}/pkgs/container/${GITHUB_REPOSITORY#*/})"
             echo "- [This run's artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo ""
             echo "Debug-signed with the test key; not a production release."

@@ -7,9 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 
@@ -49,7 +49,7 @@ test('no workflow runs untrusted code with a write token', () => {
   // The workflow default is read-only; only jobs that publish opt in.
   assert.deepEqual(android.permissions, { contents: 'read' });
   for (const [job, spec] of Object.entries(android.jobs)) {
-    if (spec.permissions && spec.permissions.contents === 'write') {
+    if (spec.permissions && (spec.permissions.contents === 'write' || spec.permissions.packages === 'write')) {
       assert.equal(job, 'publish', `only the publishing job may write, not ${job}`);
       // A pull request, and a pull request from a fork in particular, must never reach it.
       assert.match(String(spec.if), /github\.event_name == 'push'/, `${job} must be push-only`);
@@ -59,10 +59,11 @@ test('no workflow runs untrusted code with a write token', () => {
   }
   // The build job that pull requests run holds no permission of its own.
   assert.equal(android.jobs.build.permissions, undefined);
-  // The release workflow writes only from the job that creates the release.
+  // The release workflow writes only from the job that creates the release, and that job
+  // writes the package as well as the release.
   const release = parse(RELEASE);
   assert.deepEqual(release.permissions, { contents: 'read' });
-  assert.deepEqual(release.jobs.release.permissions, { contents: 'write' });
+  assert.deepEqual(release.jobs.release.permissions, { contents: 'write', packages: 'write' });
 });
 
 test('every push to a branch builds the client', () => {
@@ -77,13 +78,19 @@ test('every push to a branch builds the client', () => {
   assert.match(android.concurrency.group, /github\.ref/);
 });
 
-test('a branch build publishes an immutable artifact and a rolling prerelease, in that order', () => {
+test('a branch build publishes an immutable artifact and a rolling release, in that order', () => {
   const android = parse(ANDROID);
   const build = android.jobs.build;
   const upload = build.steps.find((s) => String(s.uses || '').startsWith('actions/upload-artifact@'));
   assert.ok(upload, 'the build uploads its APK');
-  assert.match(String(upload.with.name), /github\.run_id/, 'the artifact name is per run, so it is never overwritten');
-  assert.match(String(upload.with.name), /github\.run_attempt/);
+  // The artifact is named after the APK itself, so what a run uploads and what a release
+  // publishes are called the same thing. It is still unique per attempt: the namer adds
+  // `-attempt-<n>` when this is a re-run, which is what keeps it immutable.
+  assert.match(String(upload.with.name), /steps\.name\.outputs\.artifact/, 'the artifact is named by the namer');
+  const namer = build.steps.find((s) => String(s.run || '').includes('name-artifact.sh'));
+  assert.match(namer.run, /name-artifact\.sh/, 'the namer names the APK');
+  assert.match(read('scripts/name-artifact.sh'), /GITHUB_RUN_ATTEMPT/, 'the namer knows which attempt this is');
+  assert.match(read('scripts/name-artifact.sh'), /artifact="\$stem-attempt-\$attempt"/, 'a re-run gets its own artifact name');
   assert.match(String(upload.with.path), /sha256|sha256sum|\.sha256/, 'the artifact carries a checksum');
   // The APK's own metadata file is written beside it.
   const digest = build.steps.find((s) => s.id === 'digest');
@@ -104,10 +111,13 @@ test('a tag builds the APK into the release for that tag', () => {
   const release = parse(RELEASE);
   const job = release.jobs.release;
   assert.ok(job, 'release.yml builds the APK');
-  assert.deepEqual(job.permissions, { contents: 'write' });
+  assert.deepEqual(job.permissions, { contents: 'write', packages: 'write' });
   const run = shell(job);
   assert.match(run, /release\.mjs tag --tag "\$RELEASE_TAG"/, 'the release for the tag is created or found');
   assert.match(run, /release\.mjs upload --release-id "\$RELEASE_ID"/, 'the APK is attached by id');
+  // The tag's APK is a package too, tagged with its version.
+  assert.match(run, /publish-package\.sh/, 'the tag\'s APK is pushed to GitHub Packages');
+  assert.match(run, /--version-release/, 'with the version as a package tag');
   // The APK is built from the tag's tree, and the helper comes from the workflow's own commit.
   assert.ok(job.steps.some((s) => String(s.with && s.with.ref) === '${{ github.event.inputs.tag || github.ref }}'));
   assert.ok(job.steps.some((s) => String(s.with && s.with.path) === '.ci'));
@@ -123,7 +133,7 @@ test('the APK is never published under a name that hides its signing', () => {
   const release = parse(RELEASE);
   const job = release.jobs.release;
   const name = job.steps.find((s) => s.id === 'name');
-  // The profile passed to the namer is the signing state, so a test-signed build is _debug.
+  // The profile passed to the namer is the signing state, so a test-signed build is -debug.
   assert.match(name.run, /profile=\$\(/);
   assert.match(name.run, /HAS_KEYSTORE/);
   assert.match(name.run, /--release "\$profile"/);
@@ -133,16 +143,26 @@ test('the APK is never published under a name that hides its signing', () => {
   assert.match(check.run, /the release keystore is configured, but the APK carries the test key/);
 });
 
-test('the rolling release is a prerelease, so it is never offered as a release', () => {
+// What the repository offers as its release: the default branch's build. A prerelease is
+// skipped by /releases/latest and by the Releases box on the repository page, so before
+// this the repository offered no release at all and only the tag-specific download URL
+// worked. Every other branch stays a prerelease: a branch build is not an offer.
+test('the default branch is a release, and another branch is a prerelease', () => {
   // Comments name endpoints; only code paths count.
   const source = read('scripts/release.mjs')
     .split('\n')
     .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
     .join('\n');
-  assert.match(source, /prerelease: true/, 'the rolling release is a prerelease');
-  assert.match(source, /is not a prerelease; refusing to publish into it/, 'an existing full release is refused');
+  assert.match(source, /prerelease: !published/, 'the state follows the branch');
+  assert.match(source, /function isPublishedRelease/, 'and is decided in one place');
   assert.ok(!/releases\/latest/.test(source), 'nothing reads or writes /releases/latest');
   assert.ok(!/\/releases\/tags\//.test(source), 'no release is looked up by tag URL');
+  // The workflow says which branch that is, in one place, and passes it to the publisher.
+  const android = parse(ANDROID);
+  assert.equal(String(android.env.DEFAULT_BRANCH), 'main');
+  const publish = android.jobs.publish.steps.find((s) => s.run && s.run.includes('release.mjs rolling'));
+  assert.match(publish.run, /--default-branch "\$DEFAULT_BRANCH"/, 'the publisher is told which branch is the release');
+  assert.match(publish.run, /--version "\$VERSION"/, 'and names the release after the version');
 });
 
 test('the build the app reads its version from is the repository VERSION file', () => {
@@ -263,13 +283,14 @@ test('the rolling download link is tag-specific and is fetched back', () => {
   // A prerelease is excluded from /releases/latest, so only the tag names the file.
   assert.match(check.run, /releases\/download\/\$tag\//);
   assert.ok(!/releases\/latest\/download/.test(check.run), 'never the latest-release path');
+  assert.match(check.run, /releases\/download\/\$tag\/Brapmony-latest\.apk/, 'the stable name is the new one');
   assert.match(check.run, /curl -fsSL/, 'the file is downloaded');
   assert.match(check.run, /aapt2" dump badging|aapt2 dump badging/, 'and its package and versionCode read');
   assert.match(check.run, /apksigner" verify|apksigner verify/, 'and its certificate');
   assert.match(check.run, /sha256sum/, 'and its checksum');
   // The summary link is the same tag-specific URL.
   const report = publish.find((s) => s.name === 'Report the download links');
-  assert.match(report.run, /releases\/download\/\$tag\/Brapmony_Android_latest\.apk/);
+  assert.match(report.run, /releases\/download\/\$tag\/Brapmony-latest\.apk/);
   assert.ok(!/releases\/latest\/download/.test(report.run));
 });
 
@@ -419,17 +440,22 @@ test('the APK namer is called with arguments it accepts, and names the file', ()
   };
   writeFileSync(env.GITHUB_OUTPUT, '');
 
-  // The branch build: a debug APK, named after its version, ref and commit.
+  // The branch build: a test-signed APK, named after its version and commit.
   const branch = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', apk], { cwd: root, env, encoding: 'utf8' });
   assert.equal(branch.status, 0, `the branch build's namer call failed: ${branch.stderr}`);
   const named = branch.stdout.trim();
-  assert.match(
-    named,
-    /Brapmony_Android_V\d+\.\d+\.\d+_debug-main-c214e8e\.apk$/,
-    'the branch APK is named after its version, ref and commit',
-  );
+  assert.equal(basename(named), 'Brapmony-1.9.6-c214e8e-debug.apk', 'the branch APK is named after its version and commit');
   assert.ok(existsSync(named), 'the APK really was renamed to that name');
-  assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /^path=/m, 'the path is written to GITHUB_OUTPUT');
+  const output = readFileSync(env.GITHUB_OUTPUT, 'utf8');
+  assert.match(output, /^path=/m, 'the path is written to GITHUB_OUTPUT');
+  assert.match(output, /^artifact=Brapmony-1\.9\.6-c214e8e-debug$/m, 'and the artifact name with it');
+  // A re-run of the same commit must not land on the first attempt's artifact name.
+  writeFileSync(apk, 'a second attempt');
+  const rerun = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', apk], {
+    cwd: root, env: { ...env, GITHUB_RUN_ATTEMPT: '2' }, encoding: 'utf8',
+  });
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /^artifact=Brapmony-1\.9\.6-c214e8e-debug-attempt-2$/m);
 
   // The tag build: `--release`, with the profile as the signing state.
   for (const profile of ['release', 'debug']) {
@@ -439,7 +465,7 @@ test('the APK namer is called with arguments it accepts, and names the file', ()
       cwd: root, env, encoding: 'utf8',
     });
     assert.equal(tagged.status, 0, `the tag build's namer call failed for ${profile}: ${tagged.stderr}`);
-    const expected = profile === 'release' ? /Brapmony_Android_V\d+\.\d+\.\d+\.apk$/ : /Brapmony_Android_V\d+\.\d+\.\d+_debug\.apk$/;
+    const expected = profile === 'release' ? /Brapmony-\d+\.\d+\.\d+\.apk$/ : /Brapmony-\d+\.\d+\.\d+-debug\.apk$/;
     assert.match(tagged.stdout.trim(), expected, `a ${profile}-profile tag build is named for its signing`);
   }
 
@@ -515,4 +541,161 @@ test('the local step runner can evaluate every guarded step', () => {
     assert.notEqual(run.status, 2, `the runner cannot evaluate \`if: ${when}\` (${file} ${job}):\n${run.stderr}`);
     assert.equal(run.status, 0, `running ${name} with no secrets failed:\n${run.stdout}\n${run.stderr}`);
   }
+});
+
+// A package is only a package if it can be pushed and pulled back. GitHub Packages has no
+// APK registry, so the APK goes to the container registry as an OCI artifact; the command
+// that does it is `scripts/publish-package.sh`, and this runs that script against a real
+// registry on this machine when one is configured -- PACKAGE_TEST_REGISTRY, the way
+// scripts/workflow-steps.mjs runs a step rather than trusting it.
+//
+// The script is skipped, and says so, when there is no registry or no `oras` to push with:
+// a check that silently passes because it could not run is worse than no check.
+test('the package push puts the APK on a registry and pulls back the same bytes', (t) => {
+  const registry = process.env.PACKAGE_TEST_REGISTRY;
+  const oras = process.env.ORAS;
+  if (!registry || !oras) {
+    t.skip('set PACKAGE_TEST_REGISTRY and ORAS to run this against a registry');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'package-test-'));
+  const apk = join(dir, 'Brapmony-1.9.6-c214e8e-debug.apk');
+  writeFileSync(apk, Buffer.from('PK: bytes that must survive the round trip\n'));
+  const repo = `pkgtest-${process.pid}/harmony-android`;
+  const push = spawnSync('bash', ['scripts/publish-package.sh', apk, '1.9.6', 'c214e8e5b731df3db9ac1062510ff5391d7f573a'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ORAS: oras,
+      PACKAGE_REGISTRY: registry,
+      GITHUB_REPOSITORY: repo,
+      GITHUB_REF_NAME: 'main',
+      PACKAGE_DEFAULT_BRANCH: 'main',
+      GITHUB_TOKEN: '',
+      ORAS_PASSWORD: '',
+    },
+  });
+  assert.equal(push.status, 0, `the package push failed:\n${push.stdout}\n${push.stderr}`);
+  const image = `${registry}/${repo.toLowerCase()}`;
+  // `latest` is the default branch's build, `main` the branch's, and the commit is there
+  // for a link that never changes.
+  for (const tag of ['latest', 'main', 'c214e8e']) {
+    const manifest = spawnSync(oras, ['manifest', 'fetch', '--plain-http', `${image}:${tag}`], { encoding: 'utf8' });
+    assert.equal(manifest.status, 0, `${tag} was not pushed:\n${manifest.stderr}`);
+    const parsed = JSON.parse(manifest.stdout);
+    assert.equal(parsed.artifactType, 'application/vnd.brapmony.android.apk', 'it says what it is');
+    assert.equal(
+      parsed.annotations['org.opencontainers.image.source'],
+      `https://github.com/${repo}`,
+      'the package is linked to the repository, which is what puts it on the repository page',
+    );
+    assert.equal(parsed.annotations['org.opencontainers.image.version'], '1.9.6');
+  }
+  // And pulling it back gives the bytes that were pushed.
+  const pullDir = join(dir, 'pull');
+  mkdirSync(pullDir);
+  const pull = spawnSync(oras, ['pull', '--plain-http', `${image}:latest`, '-o', pullDir], { encoding: 'utf8' });
+  assert.equal(pull.status, 0, pull.stderr);
+  assert.deepEqual(readFileSync(join(pullDir, basename(apk))), readFileSync(apk), 'the pulled bytes are the pushed bytes');
+});
+
+// A branch build must never become what asking for `latest` gets: `latest` is the default
+// branch's build, and only that. The tags are what a puller asks for, so this runs the
+// script and reads the tags it pushed under rather than reading its source: a check that
+// matched the text would pass on a script that computed something else.
+//
+// The push itself needs a registry (see the round-trip test above); the tag list does not.
+// A registry that refuses the connection still gets the attempt, and `oras` names the tags
+// it was about to push, which is what is read here.
+function packageTags({ ref, defaultBranch, versionRelease = false, repo = 'WWPOL/harmony-android' }) {
+  const dir = mkdtempSync(join(tmpdir(), 'package-tags-'));
+  const apk = join(dir, 'Brapmony-1.9.6-c214e8e-debug.apk');
+  writeFileSync(apk, 'a file to be pushed');
+  // A stand-in for `oras` that prints the arguments it was given, so the tags are read
+  // from what the script really passes, not from what it looks like it computes.
+  const fake = join(dir, 'oras');
+  writeFileSync(fake, '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@"\n');
+  const chmod = spawnSync('chmod', ['+x', fake]);
+  assert.equal(chmod.status, 0);
+  const args = [apk, '1.9.6', 'c214e8e5b731df3db9ac1062510ff5391d7f573a'];
+  if (versionRelease) args.push('--version-release');
+  const run = spawnSync('bash', ['scripts/publish-package.sh', ...args], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ORAS: fake,
+      PACKAGE_REGISTRY: '127.0.0.1:1',
+      GITHUB_REPOSITORY: repo,
+      GITHUB_REF_NAME: ref,
+      PACKAGE_DEFAULT_BRANCH: defaultBranch,
+      GITHUB_TOKEN: '',
+      ORAS_PASSWORD: '',
+    },
+  });
+  assert.equal(run.status, 0, `the package script failed:\n${run.stdout}\n${run.stderr}`);
+  // The stand-in prints one argument per line, so the push's target is the argument that
+  // starts with the registry and carries a tag: `<registry>/<owner>/<repo>:<tag>[,<tag>]`.
+  const image = run.stdout.split('\n').find((l) => l.startsWith('127.0.0.1:1/') && /:\S+$/.test(l));
+  assert.ok(image, `the script pushed nothing:\n${run.stdout}`);
+  // The registry's address carries a port and so a colon of its own: the tags follow the
+  // last colon, which is the one before the first tag.
+  return image.slice(image.lastIndexOf(':') + 1).split(',');
+}
+
+test('the package tags a branch build by its branch, and only the default branch as latest', () => {
+  // A push to the default branch: the commit, the branch, and `latest`.
+  assert.deepEqual(
+    packageTags({ ref: 'main', defaultBranch: 'main' }),
+    ['c214e8e', 'main', 'latest'],
+    'the default branch is the commit, the branch and latest',
+  );
+  // A push to another branch: the commit and that branch. Never `latest`, which would
+  // make a branch build what a downloader gets by asking for the newest one.
+  assert.deepEqual(
+    packageTags({ ref: 'feature/x', defaultBranch: 'main' }),
+    ['c214e8e', 'feature-x'],
+    'another branch is tagged by its branch, never latest',
+  );
+  // A version release: the commit and the version. Its ref is the tag, which would be the
+  // same build under a second name nobody asked for.
+  assert.deepEqual(
+    packageTags({ ref: 'v1.9.6', defaultBranch: 'main', versionRelease: true }),
+    ['c214e8e', '1.9.6'],
+    'a version release is tagged by version',
+  );
+});
+
+// The package is linked to the repository, or nobody finds it: an unlinked package is a
+// free-standing thing with no page on the repository and no inherited access.
+test('the package is linked to this repository, and named after it', () => {
+  const script = read('scripts/publish-package.sh');
+  assert.match(script, /org\.opencontainers\.image\.source/, 'the package carries its repository');
+  assert.match(script, /https:\/\/github\.com\/\$\{GITHUB_REPOSITORY/, 'and the link is this repository');
+  assert.match(script, /tr 'A-Z' 'a-z'/, 'a container name is lowercase');
+  // The workflow passes the default branch, so the tag condition has something to compare.
+  const android = parse(ANDROID);
+  const step = android.jobs.publish.steps.find((s) => s.name === 'Publish the package');
+  assert.ok(step, 'the publish job pushes the package');
+  assert.match(String(step.env.PACKAGE_DEFAULT_BRANCH), /env\.DEFAULT_BRANCH/);
+  assert.match(step.run, /publish-package\.sh/);
+});
+
+// GitHub creates a first-published package private, whatever the repository's visibility
+// is, and no API makes it public. A push that succeeded therefore says nothing about
+// whether anybody can download it, and the step has to say which it is rather than let a
+// private package be described as a public download. It must not fail the run either: the
+// package was published, and the release is the route that always works.
+test('the package step reports whether the package can be downloaded, and does not fail on private', () => {
+  const script = read('scripts/publish-package.sh');
+  assert.match(script, /manifest fetch/, 'it asks the registry for the package back');
+  assert.match(script, /--registry-config/, 'anonymously, with no credentials of the push');
+  assert.match(script, /visibility=public/, 'a package that pulls anonymously is reported as public');
+  assert.match(script, /visibility=private/, 'and one that does not as private');
+  assert.match(script, /::warning::The package is private/, 'with a warning that says so');
+  assert.match(script, /Change visibility/, 'and where to change it');
+  // Reporting a private package is not a reason to fail the publish.
+  const fetch = script.slice(script.indexOf('manifest fetch'), script.indexOf('GITHUB_STEP_SUMMARY'));
+  assert.ok(!/exit 1/.test(fetch), 'a private package does not fail the run');
 });
