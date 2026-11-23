@@ -56,6 +56,10 @@ rotation, system appearance or device rendering.
   the thread it opens, which is the transition that used to crash the app.
 - `pinned-sheet.png`, `actions-sheet.png` -- the pinned-messages sheet and the
   message-actions sheet, both of which read the same cleared nullable.
+- `connection-reconnecting.png` -- a room whose live connection dropped: the banner
+  says the app is putting it back, counts the attempt, and offers to skip the wait.
+  `connection-unavailable.png` is the other banner state, an instance that refused
+  the join, where no retry on a timer can help.
 - `swipe-to-reply-direction.png` -- a message row held mid-drag: it has moved
   away from the start edge and the reply arrow is on the trailing edge it
   uncovered. This one needs no instance -- `SwipeToReplyTest` drives the

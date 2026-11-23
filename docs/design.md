@@ -49,6 +49,34 @@ shapes), `data/repo` (one repository per surface), `data/session` (the stored se
 token) and `ui`. `AppContainer` assembles the dependencies explicitly, Compose state observes
 repository results, and every screen preserves failure, loading and retry states.
 
+### The live connection reconnects by itself
+
+A room's realtime socket is a supervised loop, not a single attempt: when it drops, the app
+opens another one. Nobody is asked to press anything, because "the connection came back" is not
+something a person should have to arrange.
+
+- `data/api/Realtime.kt` runs the loop. Each attempt joins the room's topic, and a socket that
+  closes, fails or goes silent ends only that attempt. Between attempts `ReconnectPolicy` waits
+  1 s, then 2, 4, 8, 16 and 30 s, staying there; a join that succeeds starts the schedule over.
+  Jitter shortens each wait by up to 20%, so many clients dropped by one outage do not all come
+  back in the same millisecond.
+- The access token is read again before every attempt (`AuthRepository.freshToken`), so a
+  reconnect after a refresh joins with the token that is valid now rather than the one the room
+  was opened with.
+- The heartbeat's `send` result is checked and OkHttp's own ping notices a connection that has
+  gone silent, so a socket the OS killed is replaced in seconds instead of being written to for
+  ever.
+- `data/api/NetworkMonitor.kt` reports the device regaining a network, and that -- like the
+  banner's own button -- only *shortens* a wait. The backoff alone is enough; these are the
+  accelerators.
+- A join the instance **refuses** (the account lost access to the room, the session ended) ends
+  the loop instead of being retried on a timer, which would be a loop against a refusal.
+
+`ui/HarmonyAppState.kt` draws this as `LiveStatus.Reconnecting(attempt, reason)`: a banner that
+says the app is reconnecting and offers to skip the wait, and nothing at all while connected.
+The socket is the only writer of that state; a failed REST read says a page did not load, not
+that the connection is down.
+
 ```
 app/src/main/java/lol/mony/harmony/
   AppContainer.kt   the dependency graph, built once per process

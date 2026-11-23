@@ -163,10 +163,12 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 }
             }
             failure = null
-            state.markLive(LiveStatus.Connected)
         } catch (error: Exception) {
+            // A failed read says this page did not load. Whether the *connection* is down is the
+            // socket's to report: it retries by itself, and claiming an outage from one REST
+            // failure is what used to put a Retry button in front of a person for a blip the app
+            // was already handling.
             failure = error.message ?: "Could not load messages."
-            state.markLive(LiveStatus.Offline("You are offline. Messages will refresh when the connection returns."))
         } finally { loading = false; refreshing = false }
     }
     /**
@@ -240,7 +242,6 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     }
                     state.resolveAuthors(session.endpoint, token, listOf(already))
                     failure = null
-                    state.markLive(LiveStatus.Connected)
                     return@launch
                 }
                 val sent = if (direct)
@@ -254,7 +255,6 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                         loaded = true)
                 }
                 state.resolveAuthors(session.endpoint, token, listOf(acknowledged))
-                state.markLive(LiveStatus.Connected)
             } catch (error: Exception) {
                 val reason = error.message ?: "Not sent."
                 state.rooms.replace(key, retryKey ?: nonce, RoomRow(
@@ -323,15 +323,21 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
         if (draftReady) { delay(250); state.sessionStore.saveDraft(draftKey, draft) }
     }
     LaunchedEffect(roomId) {
-        val token = state.auth.freshToken() ?: return@LaunchedEffect
-        Realtime(Http.client).room(session.endpoint, token, roomId, direct).collect { event ->
+        // The token is asked for on every attempt, not taken once: a reconnect after the
+        // access token was refreshed must join with the token that is valid now.
+        val realtime = state.realtime
+        realtime.room(
+            session.endpoint,
+            token = { state.auth.freshToken() },
+            roomId = roomId,
+            direct = direct,
+            retryNow = state.retryNow,
+        ).collect { event ->
             when (event) {
                 LiveUpdate.Connected -> { state.markLive(LiveStatus.Connected); load() }
                 LiveUpdate.Changed -> load()
-                is LiveUpdate.Unavailable -> {
-                    state.markLive(LiveStatus.Offline(event.reason))
-                    failure = null
-                }
+                is LiveUpdate.Reconnecting -> state.markLive(LiveStatus.Reconnecting(event.attempt, event.reason))
+                is LiveUpdate.Unavailable -> state.markLive(LiveStatus.Unavailable(event.reason))
             }
         }
     }
@@ -402,7 +408,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
         )
         // The connection banner is drawn only while the instance cannot be reached. A healthy
         // connection says nothing: an always-on label is noise that hides a real outage.
-        ConnectionBanner(live) { action { load() } }
+        ConnectionBanner(live) { state.retryNow(); action { load() } }
         if (openFailure != null) ErrorBanner(openFailure) { failure = null }
         if (refreshing && rows.isNotEmpty()) LinearProgressIndicator(Modifier.fillMaxWidth())
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -705,7 +711,16 @@ internal fun countLabel(count: Int, noun: String): String =
     count.toString() + " " + noun + (if (count == 1) "" else "s")
 
 /**
- * The connection banner: shown only when the instance cannot be reached, with a retry.
+ * The connection banner: what the live connection is doing when it is not simply connected.
+ *
+ * It has two states, and the difference is what the app is doing about it:
+ *
+ * - [LiveStatus.Reconnecting] -- the socket dropped and the app is putting it back by itself.
+ *   The banner says so, and its button *skips the wait* rather than being the way to connect:
+ *   a person who has just walked out of a tunnel should not have to wait out a backoff, and a
+ *   person who does nothing must still get their room back.
+ * - [LiveStatus.Unavailable] -- the instance refused the connection, so no retry on a timer
+ *   can help and the banner says why instead of offering one that would fail.
  *
  * A connected client draws nothing here. The old always-on "Live updates connected" line took
  * a strip of every screen and made the one state worth noticing -- being offline -- look like
@@ -713,14 +728,39 @@ internal fun countLabel(count: Int, noun: String): String =
  */
 @Composable
 internal fun ConnectionBanner(status: LiveStatus, onRetry: () -> Unit) {
-    if (status !is LiveStatus.Offline) return
-    Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth().testTag("connection-banner")) {
+    val reason: String
+    val action: String
+    val container: androidx.compose.ui.graphics.Color
+    val content: androidx.compose.ui.graphics.Color
+    when (status) {
+        is LiveStatus.Reconnecting -> {
+            // The reason says what happened; this says what the app is doing about it. The
+            // attempt count only appears once it is worth knowing -- "Retrying (1)" would draw
+            // attention to the first try of a blip that is already over.
+            reason = status.reason + " Reconnecting" +
+                (if (status.attempt > 1) " (attempt ${status.attempt})" else "") + "."
+            action = "Retry now"
+            container = MaterialTheme.colorScheme.secondaryContainer
+            content = MaterialTheme.colorScheme.onSecondaryContainer
+        }
+        is LiveStatus.Unavailable -> {
+            reason = status.reason
+            action = "Refresh"
+            container = MaterialTheme.colorScheme.errorContainer
+            content = MaterialTheme.colorScheme.onErrorContainer
+        }
+        // Connected, and the first attempt before it has answered: nothing worth a strip.
+        LiveStatus.Connected, LiveStatus.Connecting -> return
+    }
+    Surface(color = container, modifier = Modifier.fillMaxWidth().testTag("connection-banner")) {
         Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.CloudOff, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
+            if (status is LiveStatus.Reconnecting)
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = content)
+            else Icon(Icons.Default.CloudOff, null, Modifier.size(16.dp), tint = content)
             Spacer(Modifier.width(8.dp))
-            Text(status.reason, Modifier.weight(1f).padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onErrorContainer)
-            TextButton(onClick = onRetry, modifier = Modifier.testTag("connection-retry")) { Text("Retry") }
+            Text(reason, Modifier.weight(1f).padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall,
+                color = content)
+            TextButton(onClick = onRetry, modifier = Modifier.testTag("connection-retry")) { Text(action) }
         }
     }
 }

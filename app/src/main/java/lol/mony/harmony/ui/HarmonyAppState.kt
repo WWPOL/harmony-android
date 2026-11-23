@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import lol.mony.harmony.data.model.Bot
@@ -46,6 +48,8 @@ class AppState(
     val profiles: ProfileRepository = container.profiles,
     val settings: SettingsRepository = container.settings,
     val sessionStore: SessionStore = container.sessionStore,
+    val realtime: lol.mony.harmony.data.api.Realtime = container.realtime,
+    private val network: lol.mony.harmony.data.api.NetworkMonitor = container.network,
 ) {
     /** The signed-in account's profile id, resolved once per session. */
     val profileId = MutableStateFlow<String?>(null)
@@ -289,16 +293,43 @@ class AppState(
     /**
      * Whether the instance is currently reachable, and why not when it is not.
      *
-     * The app shows a banner for [LiveStatus.Offline] and nothing at all while it is connected:
-     * an always-visible "connected" label is noise that makes a real outage harder to notice.
+     * The socket is the only thing that reports this: it is the one component that both knows
+     * when the connection is up and puts it back when it drops. A REST call that fails says
+     * something about that one request, not about the connection, so it does not write here.
+     *
+     * The app shows a banner for [LiveStatus.Reconnecting] and nothing at all while it is
+     * connected: an always-visible "connected" label is noise that makes a real outage harder
+     * to notice.
      */
     private val _live = MutableStateFlow<LiveStatus>(LiveStatus.Connecting)
     val live: StateFlow<LiveStatus> = _live.asStateFlow()
 
     fun markLive(status: LiveStatus) { _live.value = status }
 
-    /** True while something has failed and a retry is worth offering. */
-    val isOffline: Boolean get() = _live.value is LiveStatus.Offline
+    /**
+     * Something to skip the reconnect backoff: the person pressed Retry, or the device regained
+     * a network.
+     *
+     * The room's loop listens to it, so a wait that would have lasted half a minute ends now.
+     * It is deliberately only an accelerator -- the loop reconnects without it, which is what
+     * "auto reconnect" has to mean, and a phone that comes out of a tunnel with nobody looking
+     * at it still gets its room back.
+     */
+    private val retryNudges = MutableStateFlow(0)
+
+    /**
+     * The nudges themselves: the person's button, and the device regaining a network.
+     *
+     * One flow rather than two arguments because a room only ever wants "try now"; where that
+     * came from does not change what it does.
+     */
+    val retryNow: kotlinx.coroutines.flow.Flow<Unit> =
+        kotlinx.coroutines.flow.merge(retryNudges.drop(1).map { }, network.regained())
+
+    fun retryNow() { retryNudges.value = retryNudges.value + 1 }
+
+    /** True while the connection is down and the app is putting it back. */
+    val isReconnecting: Boolean get() = _live.value is LiveStatus.Reconnecting
 
     fun setTyping(channelId: String, names: List<String>) {
         _typing.update { it + (channelId to names) }
@@ -403,10 +434,19 @@ sealed interface LiveStatus {
     /** Realtime is attached and the room is being kept current; no banner. */
     data object Connected : LiveStatus
     /**
-     * The instance cannot be reached, or realtime was refused. The banner names what is wrong
-     * in a way a person can act on, and offers a retry.
+     * The connection dropped and the app is putting it back by itself.
+     *
+     * This is a state the app is *acting* on, not a failure to report and wait over: the banner
+     * says what happened and that a retry is coming, and its button is an accelerator for
+     * someone who does not want to wait the backoff out. [attempt] counts from 1, so the banner
+     * can say "Retrying (2)" without pretending the first try never happened.
      */
-    data class Offline(val reason: String) : LiveStatus
+    data class Reconnecting(val attempt: Int, val reason: String) : LiveStatus
+    /**
+     * The instance refused the connection outright, so a retry on a timer cannot help: the
+     * account lost access to the room, or the session ended. The banner names it.
+     */
+    data class Unavailable(val reason: String) : LiveStatus
 }
 
 data class UnreadBadges(
