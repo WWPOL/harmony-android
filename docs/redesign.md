@@ -200,6 +200,16 @@ sheet can be read before it is tapped. The quick reactions stay a row of faces a
 reaction is the one action taken without reading anything. The sheet is one of the two places the
 app's per-message capability lives; the other is the message row's own long press, unchanged.
 
+**The emoji picker: five faces became every emoji.** The quick row was the whole of reacting --
+`listOf("👍", "❤️", "😂", "🎉", "👀")` in the sheet's body, so a reaction outside those five could
+not be made at all. Its last cell is now a "+" that opens `EmojiPicker`: Unicode's 1906 base emoji
+in their own categories, searchable by Unicode's names and by CLDR's keywords (which is why "lol",
+"rofl", "+1" and "hello" find the face a person means), with a skin-tone row that changes what a
+tone-able emoji inserts rather than listing every toned variant six times, the picks this account
+made last on this device, and the instance's server/instance/personal custom emoji. The five faces
+stay where they were: the common reaction is still one tap from the long press, and the picker is
+for the other 1900.
+
 **The instance picker: the last screen shaped like the old app.** It is the first thing a person
 sees after installing, and it was a centred column -- a wordmark, a heading, a paragraph, a field,
 a button -- with the paragraph doing the work the page's structure should have. It is now the

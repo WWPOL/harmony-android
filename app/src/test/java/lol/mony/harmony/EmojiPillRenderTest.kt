@@ -155,7 +155,7 @@ class EmojiPillRenderTest {
     /**
      * A `:shortcode:` typed into the text draws that emoji's picture.
      *
-     * This client has no picker, so this is how a custom emoji is actually used -- and the
+     * Typing the shortcode is how a custom emoji is used in text, beside the picker -- and the
      * reference draws the picture for it. The bug drew the name, so the sentence read
      * `shipping :blobcat: today` where the emoji belonged.
      */

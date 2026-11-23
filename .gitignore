@@ -28,6 +28,9 @@ e2e/fixture.json
 e2e/stack.env
 e2e/idp/
 
+# Python bytecode from running a repository script by hand (scripts/emoji/gen_emoji.py)
+__pycache__/
+
 # Editor and OS noise
 .DS_Store
 .idea/

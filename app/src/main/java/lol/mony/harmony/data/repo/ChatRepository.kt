@@ -216,6 +216,34 @@ class ChatRepository(private val rest: RestApi) {
     }
 
     /**
+     * The custom emoji this account can react with: the room's server's own, the instance's
+     * imports, and the account's personal ones.
+     *
+     * The filter is PostgREST's `or`, and it is deliberately *wider* than the room: the
+     * instance and personal emoji are usable in any room, and a server's emoji are the ones a
+     * person reaches for in that server. Narrowing it to the server alone would hide a
+     * person's own emoji from their DMs, which is where they most want them.
+     *
+     * A row that was removed keeps its id for the messages already carrying it
+     * (`deleted_at`, the lifecycle migration) but is no longer offered, and neither is one
+     * whose file was purged: the reference filters the same two ways.
+     */
+    suspend fun emojiLibrary(endpoint: Endpoint, token: String, serverId: String? = null): Result<List<CustomEmoji>> = runCatching {
+        val filters = buildList {
+            add("deleted_at" to "is.null")
+            add("name" to "not.is.null")
+            if (serverId != null) {
+                add("or" to "(scope.eq.instance,scope.eq.user,server_id.eq.$serverId)")
+            } else {
+                add("or" to "(scope.eq.instance,scope.eq.user)")
+            }
+        }
+        rest.select(endpoint, token, "emojis", filters = filters, order = "name.asc", limit = EMOJI_PAGE,
+            serializer = ListSerializer(CustomEmoji.serializer())).getOrThrow()
+            .filter { it.hasImage && !it.name.isNullOrBlank() }
+    }
+
+    /**
      * The `emojis` rows a set of ids names, so a custom emoji can be drawn as its picture.
      *
      * A reaction row carries `emoji_id`, and a message part carries the emoji's whole row; the
@@ -236,10 +264,10 @@ class ChatRepository(private val rest: RestApi) {
     /**
      * The `emojis` rows a set of `:shortcodes:` names, so text that uses one draws its picture.
      *
-     * A message's text is where a custom emoji is used most: this client has no picker, so a
-     * person types `:blobcat:` and the reference draws blobcat's picture for it. Only the names
-     * the instance actually has come back; the rest stay the text they were written as, which is
-     * what the reference's own renderer does with a name its resolver cannot answer.
+     * A message's text is where a custom emoji is used most: a person types `:blobcat:` and the
+     * reference draws blobcat's picture for it. Only the names the instance actually has come
+     * back; the rest stay the text they were written as, which is what the reference's own
+     * renderer does with a name its resolver cannot answer.
      */
     suspend fun emojisNamed(endpoint: Endpoint, token: String, names: Collection<String>): Map<String, Emoji> {
         val unique = names.map { it.substringBefore('~').trim().trim(':') }
@@ -356,6 +384,9 @@ class ChatRepository(private val rest: RestApi) {
 
     companion object {
         const val PAGE = 50
+
+        /** How many custom emoji one read of the library asks for. */
+        const val EMOJI_PAGE = 1000
 
         /** The default `max_message_length`, and the ceiling the instance clamps it to. */
         const val DEFAULT_MAX_LENGTH = 2000

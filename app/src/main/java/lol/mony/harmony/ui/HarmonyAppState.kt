@@ -209,8 +209,8 @@ class AppState(
         val ids = parts.mapNotNull { part -> part.emoji?.takeIf { !it.hasImage }?.id }
             .filter { it !in known }.distinct()
         if (ids.isNotEmpty()) runCatching { rememberEmojis(chats.emojis(endpoint, token, ids).values) }
-        // A `:shortcode:` written into the text is how most custom emoji are used: this client has
-        // no picker, so the name is what a person types, and the reference draws its picture.
+        // A `:shortcode:` written into the text is the other way a custom emoji is used, beside
+        // the picker: the name is what a person types, and the reference draws its picture.
         val knownNames = _emojis.value.values.mapNotNull { it.name }.toSet()
         val names = parts.filter { it.type == "text" }
             .flatMap { part -> textTokens(part.text.orEmpty()) }

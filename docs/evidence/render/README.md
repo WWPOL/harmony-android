@@ -13,6 +13,12 @@ one: every capture path returns black, for the reasons in
 composables draw and how the theme applies; what they cannot show is touch, IME,
 rotation, system appearance or device rendering.
 
+The emoji captures carry one more caveat of the same kind: Robolectric draws with
+the fonts bundled in its `android-all` jar, and that set has gaps. A glyph the JVM
+runner has no font for -- `U+1F617` (:kissing face:) in the Smileys capture -- draws
+as a box there and as its emoji on a device. The picker's own tests do not depend
+on the glyphs drawing: they assert the tree and the value each cell hands over.
+
 ## The files
 
 - `instance-picker.png` -- the signed-out entry: wordmark, instance field,
@@ -41,8 +47,8 @@ rotation, system appearance or device rendering.
   shortcode and not an id.
 - `message-text-emoji.png` -- `shipping [image] today`, where the message's own
   text is `shipping :blobcat: today`: a shortcode typed into a message draws
-  that emoji's picture. This client has no picker, so this is how a custom emoji
-  is actually used, and the bug drew the name here.
+  that emoji's picture. Typing the shortcode is how a custom emoji is used in
+  text, beside the picker, and the bug drew the name here.
 - `reaction-emoji-image.png` -- a reaction pill whose emoji names an `emojis`
   row: the row's picture with its count. Before
   [custom-emoji.md](../../custom-emoji.md) this pill drew the row's **uuid**,
@@ -54,6 +60,22 @@ rotation, system appearance or device rendering.
   is the other half of the same bug.
 - `thread-sheet-open.png`, `thread-opened.png` -- the room's Threads sheet, and
   the thread it opens, which is the transition that used to crash the app.
+- `emoji-picker-dark.png`, `emoji-picker-light.png` -- the emoji picker, which
+  replaced a row of five hardcoded faces: the search box, the account's recents,
+  the skin-tone row, the category tabs, the server's custom emoji and the whole
+  Smileys category.
+- `emoji-picker-empty.png` -- the same picker for an account that has not used it
+  yet: no recents, and every emoji still there.
+- `emoji-picker-limit.png` -- the 20-reaction limit, stated above the grid
+  instead of arriving as a database error after the tap.
+- `emoji-picker-smileys.png`, `emoji-picker-people.png`, `emoji-picker-food.png`,
+  `emoji-picker-symbols.png`, `emoji-picker-custom.png` -- one capture per
+  category, and the tab holding the instance's own emoji, so a category that drew
+  nothing would be visible here.
+- `emoji-picker-search.png` -- a search for "lol": Unicode's names and CLDR's
+  keywords both match, so a face is found by the word a person types.
+- `quick-reactions.png` -- the quick row above the actions sheet, with the "+"
+  cell that opens the picker.
 - `attachment-composer.png` -- the composer's attachment strip with three files:
   one still uploading (45%, with its bar), one whose photo details were removed
   ("location removed", with the keep switch), and one the instance's upload limit

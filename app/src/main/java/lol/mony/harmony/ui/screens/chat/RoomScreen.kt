@@ -43,6 +43,7 @@ import lol.mony.harmony.data.api.*
 import lol.mony.harmony.data.model.*
 import lol.mony.harmony.data.repo.ChatRepository
 import lol.mony.harmony.data.session.AuthState
+import lol.mony.harmony.data.session.SessionStore
 import lol.mony.harmony.ui.AppState
 import lol.mony.harmony.ui.LiveStatus
 import lol.mony.harmony.ui.components.*
@@ -101,6 +102,21 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     val emojiRows by state.emojis.collectAsState()
     var selectedProfile by remember(cacheKey) { mutableStateOf<String?>(null) }
     var reactors by remember(cacheKey) { mutableStateOf<Pair<Message, String>?>(null) }
+    // The picker: which message it is for, the instance's custom emoji, and this account's own
+    // recent picks. The library is read once per room, not once per open, because a person
+    // opens and closes the picker far more often than a server's emoji change.
+    var pickerFor by remember(cacheKey) { mutableStateOf<Message?>(null) }
+    var customEmoji by remember(cacheKey) { mutableStateOf<List<CustomEmoji>>(emptyList()) }
+    var recentEmoji by remember(cacheKey) { mutableStateOf<List<String>>(emptyList()) }
+    // The channel's server, which is what the custom-emoji section is headed by and what the
+    // library query filters on. A DM has none, and then only instance and personal emoji apply.
+    var serverId by remember(roomId) { mutableStateOf<String?>(null) }
+    var serverName by remember(roomId) { mutableStateOf<String?>(null) }
+    // A DM has no server, so it is resolved the moment it opens; a channel is resolved by the
+    // read below. The distinction keeps the library from being fetched twice -- once before the
+    // channel's server is known and once after -- and from being fetched at all when the
+    // channel read failed, rather than silently offering only the instance's emoji.
+    var serverResolved by remember(roomId) { mutableStateOf(direct) }
     val live by state.live.collectAsState()
     val sizes = LocalSizes.current
     // A notification can name a message far older than the page this room opens on. The id is
@@ -313,21 +329,26 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
      * tapping the second custom pill removed the first. The row the instance stores carries
      * the same key back, which is what makes a second tap remove rather than add.
      *
-     * The write follows the reference client's rule (`Reaction.toggleEmojiId`): a pill that names
-     * an `emojis` row writes `emoji_id`, anything else writes `custom_emoji_content`. Writing the
-     * row id into the content column -- which this used to do for a pill whose row stored no
-     * content -- is refused by the instance's own trigger, and removing by the wrong column
-     * deleted nothing.
+     * [pick] is set when the reaction is being added from the picker, which knows both halves
+     * of the identity: a custom emoji is stored as its `emoji_id` and a unicode one as its
+     * content, and only the picker can say which of the two it handed over.
+     *
+     * Without a pick the write follows the reference client's rule (`Reaction.toggleEmojiId`): a
+     * pill that names an `emojis` row writes `emoji_id`, anything else writes
+     * `custom_emoji_content`. Writing the row id into the content column -- which this used to do
+     * for a pill whose row stored no content -- is refused by the instance's own trigger, and
+     * removing by the wrong column deleted nothing.
      */
-    suspend fun react(message: Message, key: String) {
+    suspend fun react(message: Message, key: String, pick: EmojiPick? = null) {
         val cacheKey = state.roomKey(roomId, direct, thread?.id)
         val token = state.auth.freshToken() ?: error("Sign in again.")
         val rows = state.rooms.snapshot(cacheKey)?.reactions?.get(message.id).orEmpty()
         val existing = rows.firstOrNull { it.key == key }
         val mine = rows.any { it.userId == myId && it.key == key }
-        // A pill already on the message keeps its own shape, so joining it writes what it carries.
-        val emojiId = existing?.toggleEmojiId ?: key.takeIf { isEmojiRowId(it) }
-        val content = if (emojiId != null) null else (existing?.content ?: key)
+        // The picker knows which half of the identity it handed over, so it wins; a pill already
+        // on the message keeps its own shape, so joining it writes what it carries.
+        val emojiId = pick?.emojiId ?: existing?.toggleEmojiId ?: key.takeIf { isEmojiRowId(it) }
+        val content = if (emojiId != null) null else (existing?.toggleContent ?: key)
         if (mine) state.chats.removeReaction(session.endpoint, token, message.id, myId, emojiId, content).getOrThrow()
         else state.chats.addReaction(session.endpoint, token, message.id, myId, emojiId, content).getOrThrow()
         runCatching { state.chats.reactionsFor(session.endpoint, token, listOf(message.id)).getOrThrow() }
@@ -336,9 +357,31 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 state.resolveReactionEmojis(session.endpoint, token, it[message.id].orEmpty())
             }
     }
+
     fun action(work: suspend () -> Unit) { scope.launch {
         try { work() } catch (error: Exception) { failure = error.message ?: "The action failed." }
     } }
+
+    /**
+     * Reacts with a pick from the picker, and remembers it as the account's most recent.
+     *
+     * The recent is recorded only once the reaction landed. A reaction the instance refuses --
+     * a full pill row, an emoji this channel may not use -- is not something this account uses,
+     * and a picker whose first row fills with refusals would be worse than one with no recents.
+     * The list in memory is updated too, so reopening the picker in the same visit shows the
+     * pick without a re-read of the store.
+     */
+    fun reactWithPick(message: Message, pick: EmojiPick) {
+        scope.launch {
+            try {
+                react(message, pick.emojiId ?: pick.glyph, pick)
+                runCatching { state.sessionStore.recordEmoji(pick.recentKey) }
+                recentEmoji = SessionStore.addRecentEmoji(recentEmoji, pick.recentKey)
+            } catch (error: Exception) {
+                failure = error.message ?: "The action failed."
+            }
+        }
+    }
 
     /**
      * Puts the message in the list and sends it. The row is the person's own until the instance
@@ -456,9 +499,34 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
         try {
             val token = state.auth.freshToken() ?: return@LaunchedEffect
             if (direct) title = state.chats.conversation(session.endpoint, token, roomId, myId, state.profiles)?.title ?: "Conversation"
-            else title = state.container.rest.select(session.endpoint, token, "channels", filters = listOf("id" to "eq.$roomId"),
-                serializer = ListSerializer(Channel.serializer())).getOrThrow().firstOrNull()?.name ?: "Channel"
+            else {
+                val channel = state.container.rest.select(session.endpoint, token, "channels",
+                    filters = listOf("id" to "eq.$roomId"),
+                    serializer = ListSerializer(Channel.serializer())).getOrThrow().firstOrNull()
+                title = channel?.name ?: "Channel"
+                // The channel's server is what the picker's custom-emoji section names, and
+                // what the library query asks for: a server's emoji are usable in its channels.
+                serverId = channel?.serverId
+                serverResolved = true
+            }
         } catch (error: Exception) { failure = error.message }
+    }
+    // The custom emoji and this account's recents, read when the room opens. Both are best
+    // effort: a picker without them still offers every unicode emoji, which is the whole of
+    // the task, so a failed read is silent rather than a banner over the channel.
+    LaunchedEffect(cacheKey, serverId, serverResolved) {
+        runCatching { state.sessionStore.recentEmoji() }.onSuccess { recentEmoji = it }
+        if (!serverResolved) return@LaunchedEffect
+        val token = state.auth.freshToken() ?: return@LaunchedEffect
+        runCatching { state.chats.emojiLibrary(session.endpoint, token, serverId).getOrThrow() }
+            .onSuccess { customEmoji = it }
+        val wanted = serverId ?: return@LaunchedEffect
+        // The section is headed by the server's name, so a person knows whose emoji these are.
+        runCatching {
+            state.container.rest.select(session.endpoint, token, "servers",
+                filters = listOf("id" to "eq.$wanted"),
+                serializer = ListSerializer(Server.serializer())).getOrThrow().firstOrNull()?.name
+        }.onSuccess { serverName = it }
     }
     LaunchedEffect(draftKey, draft) {
         if (draftReady) { delay(250); state.sessionStore.saveDraft(draftKey, draft) }
@@ -500,6 +568,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     val openThreads = threads
     val openSearchRows = searchRows
     val openSearchOpen = searchOpen
+    val openPicker = pickerFor
     val rows = room.rows
     val reactions = room.reactions
 
@@ -727,15 +796,18 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     if (openSelected != null) {
         val message = openSelected
         val author = message.author(people, bots).name
+        // The 20-reaction limit is the instance's, per person per message: a pick beyond it is
+        // refused by the database, so the picker says so before the tap rather than after.
+        val mine = reactions[message.id].orEmpty().count { it.userId == myId }
+        val limitReached = mine >= MESSAGE_REACTION_LIMIT
         ModalBottomSheet(onDismissRequest = { selected = null }) {
             // The quick reactions stay a row of faces above the list: a reaction is the one
             // action a person takes without reading anything, so it does not belong in the
-            // list of verbs below it.
-            Row(Modifier.fillMaxWidth().padding(horizontal = HarmonySize.gutter), horizontalArrangement = Arrangement.SpaceEvenly) {
-                listOf("👍", "❤️", "😂", "🎉", "👀").forEach { emoji ->
-                    TextButton(onClick = { selected = null; action { react(message, emoji) } }) { Text(emoji, fontSize = 24.sp) }
-                }
-            }
+            // list of verbs below it. The last cell opens the picker, which is the whole set.
+            QuickReactionRow(
+                onReact = { emoji -> selected = null; reactWithPick(message, EmojiPick(emoji)) },
+                onMore = { selected = null; pickerFor = message },
+            )
             HorizontalDivider(Modifier.padding(horizontal = HarmonySize.gutterLarge))
             ActionSheetContent(
                 title = "Message from $author",
@@ -773,6 +845,28 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                         add(ActionItem("Delete", Icons.Default.Delete, detail = "This cannot be undone", destructive = true,
                             onClick = { delete = message; selected = null }))
                     }
+                },
+            )
+        }
+    }
+    // The picker, for the message the sheet's "+" opened it on. It replaces the actions sheet
+    // rather than stacking on it: a modal sheet over a modal sheet is two scrims and a
+    // back press that closes the wrong one.
+    if (openPicker != null) {
+        val mine = reactions[openPicker.id].orEmpty().count { it.userId == myId }
+        ModalBottomSheet(onDismissRequest = { pickerFor = null }) {
+            EmojiPickerSheet(
+                title = "React to " + openPicker.author(people, bots).name,
+                onPick = { pick -> pickerFor = null; reactWithPick(openPicker, pick) },
+                customEmoji = customEmoji,
+                recent = recentEmoji,
+                customLabel = serverName ?: "Custom emoji",
+                notice = if (mine >= MESSAGE_REACTION_LIMIT)
+                    "This message has $MESSAGE_REACTION_LIMIT of your reactions, the most one person can add." else null,
+                blocked = mine >= MESSAGE_REACTION_LIMIT,
+                onClearRecent = {
+                    recentEmoji = emptyList()
+                    scope.launch { runCatching { state.sessionStore.clearRecentEmoji() } }
                 },
             )
         }

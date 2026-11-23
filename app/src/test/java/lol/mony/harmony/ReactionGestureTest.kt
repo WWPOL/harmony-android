@@ -5,9 +5,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
@@ -112,6 +116,58 @@ class ReactionGestureTest {
         compose.onAllNodesWithTag("reaction-\uD83D\uDC4D").fetchSemanticsNodes().let {
             assertEquals("one pill per emoji, not one per reaction", 1, it.size)
         }
+    }
+
+    /**
+     * A custom pill draws its own picture once the library holds its row.
+     *
+     * This is what makes a pick from the picker visible on the message: the pill used to show
+     * `:cat:` because this client never fetched the `emojis` row, so a reaction chosen from the
+     * server's own emoji looked like text typed by hand.
+     */
+    @Test fun aCustomPillDrawsItsPictureWhenTheLibraryHoldsIt() {
+        val url = java.io.File.createTempFile("pill", ".png").apply {
+            val bitmap = android.graphics.Bitmap.createBitmap(32, 32, android.graphics.Bitmap.Config.ARGB_8888)
+            bitmap.eraseColor(android.graphics.Color.rgb(255, 0, 170))
+            outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        }.toURI().toString()
+        compose.setContent {
+            HarmonyTheme(VisualThemeSettings()) {
+                Surface {
+                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                        MessageReactions(
+                            message = message, reactions = reactions, myId = "me",
+                            onToggle = {}, onShowReactors = {},
+                            emojis = mapOf("e-cat" to Emoji(id = "e-cat", name = "cat", url = url)),
+                        )
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+        // The picture is the pill's own node, so a pill that fell back to its shortcode fails.
+        // The pill merges its children's semantics, so the image is found in the unmerged tree.
+        compose.onNodeWithTag("reaction-emoji-e-cat", useUnmergedTree = true).assertExists()
+        // Coil decodes off the main thread, so the picture arrives a frame or two later.
+        var drawn = false
+        compose.waitUntil(60_000) {
+            val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
+            drawn = (0 until bitmap.height).any { y ->
+                (0 until bitmap.width).any { x ->
+                    val pixel = bitmap.getPixel(x, y)
+                    android.graphics.Color.red(pixel) > 200 && android.graphics.Color.green(pixel) < 80
+                }
+            }
+            drawn
+        }
+        assertTrue("the custom pill's image drew", drawn)
+    }
+
+    /** A custom pill with no row in the library keeps its shortcode, so nothing disappears. */
+    @Test fun aCustomPillWithoutItsRowKeepsItsShortcode() {
+        pills({}, {})
+        compose.onNodeWithTag("reaction-emoji-e-cat", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText(":cat:", substring = true, useUnmergedTree = true).assertExists()
     }
 
     /** A reaction's key and content are the same identity the pill is drawn and toggled under. */

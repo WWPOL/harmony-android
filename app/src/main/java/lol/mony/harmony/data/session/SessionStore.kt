@@ -184,4 +184,64 @@ class SessionStore(private val context: Context, private val sealer: SessionSeal
         val key = accountKey("draft.$room")
         context.sessionData.edit { if (text.isEmpty()) it.remove(key) else it[key] = text }
     }
+
+    /**
+     * The emoji this account picked last, most recent first.
+     *
+     * It is a device preference, not a server one: the instance keeps *favourites*
+     * (`emoji_favorites`), which are deliberate and shared with the web client, while "what I
+     * used a minute ago" is what this device saw and belongs beside the drafts. The list is
+     * the picker's first row, so it is the shortest path to the face a person actually uses.
+     *
+     * An entry is what was written to the reaction: a unicode glyph, or `id:<uuid>` for a
+     * custom emoji, which is the only thing that identifies it across servers.
+     */
+    suspend fun recentEmoji(): List<String> {
+        val key = accountKey("emoji.recent")
+        return parseRecentEmoji(context.sessionData.data.first()[key])
+    }
+
+    /** Records one pick at the front of the recents, keeping [RECENT_EMOJI] of them. */
+    suspend fun recordEmoji(pick: String) {
+        if (!isRecordableEmoji(pick)) return
+        val key = accountKey("emoji.recent")
+        context.sessionData.edit { preferences ->
+            preferences[key] = addRecentEmoji(parseRecentEmoji(preferences[key]), pick).joinToString("\n")
+        }
+    }
+
+    /** Forgets the recents, which is what a person asking for a clean picker means. */
+    suspend fun clearRecentEmoji() {
+        val key = accountKey("emoji.recent")
+        context.sessionData.edit { it.remove(key) }
+    }
+
+    companion object {
+        /** How many recent picks the picker remembers: one screenful of the row it draws. */
+        const val RECENT_EMOJI = 24
+
+        /**
+         * The recents list a new pick produces: the pick at the front, no duplicates, capped.
+         *
+         * It is a pure function so the rules can be tested without a DataStore: a repeated
+         * pick moves to the front rather than appearing twice, and the list stays one row.
+         */
+        fun addRecentEmoji(current: List<String>, pick: String): List<String> {
+            if (!isRecordableEmoji(pick)) return current
+            return (listOf(pick) + current.filter { it != pick }).take(RECENT_EMOJI)
+        }
+
+        /**
+         * Whether a pick can be stored as one entry.
+         *
+         * The list is stored newline-separated, so a pick carrying a newline would split into
+         * two entries; a blank one is not an emoji at all. Both are refused rather than
+         * sanitised, because either means the caller handed over the wrong thing.
+         */
+        fun isRecordableEmoji(pick: String): Boolean = pick.isNotBlank() && !pick.contains('\n')
+
+        /** The stored newline-separated list, with blank entries dropped. */
+        fun parseRecentEmoji(stored: String?): List<String> =
+            stored?.split('\n')?.filter { it.isNotBlank() }.orEmpty()
+    }
 }

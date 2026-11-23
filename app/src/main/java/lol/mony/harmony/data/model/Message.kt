@@ -498,10 +498,19 @@ data class Message(
     fun isMine(authUserId: String?): Boolean = userId != null && userId == authUserId
 }
 
+/**
+ * The most reactions one person can put on one message.
+ *
+ * It is the instance's own limit (`check_message_emoji_reaction_limit` raises past twenty), so
+ * it is a fact about the server rather than a client preference: the picker states it before a
+ * pick rather than letting the database refuse one, and the repository turns the database's
+ * refusal into a sentence for the case where another device got there first.
+ */
+const val MESSAGE_REACTION_LIMIT = 20
+
 /** A row of `reactions`, aggregated the way the web client groups them per emoji. */
 @Serializable
-data class Reaction(
-    val id: String? = null,
+data class Reaction(    val id: String? = null,
     @SerialName("message_id") val messageId: String,
     @SerialName("user_id") val userId: String? = null,
     @SerialName("bot_id") val botId: String? = null,

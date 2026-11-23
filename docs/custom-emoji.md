@@ -90,8 +90,8 @@ applies.
 
 ## Three shapes a custom emoji hides in
 
-**Inside a message's text.** This is where most custom emoji are used: this client has no picker,
-so a person types `:blobcat:` into the composer, and the reference draws blobcat's picture for it
+**Inside a message's text.** This is where most custom emoji are used: a person types `:blobcat:`
+into the composer, and the reference draws blobcat's picture for it
 (`renderMarkdownToHTML`'s `emoji` token, resolved through `findEmojiByName`). The app drew the
 name -- a "long name" where an emoji belonged. `textTokens` splits a text part into literal text
 and its shortcodes by the reference's own rules (`src/utils/markdownParser.ts`): `:name:` of
