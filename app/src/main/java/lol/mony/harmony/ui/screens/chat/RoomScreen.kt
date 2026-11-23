@@ -133,6 +133,17 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     val media by state.signedMedia.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+    // Every link in the room opens through this. A device with no browser installed -- an
+    // emulator image, a locked-down work profile -- throws from `openUri`, and a link that
+    // silently does nothing is indistinguishable from a link that is not a link. The sentence
+    // says which, and the room's own error banner shows it.
+    var linkFailure by remember(cacheKey) { mutableStateOf<String?>(null) }
+    val openLinkFailure = linkFailure
+    val openLink: (String) -> Unit = { url ->
+        runCatching { uriHandler.openUri(url) }.onFailure {
+            linkFailure = "Nothing on this device can open " + url
+        }
+    }
     // One job per attachment, keyed by its id, so removing a file cancels exactly that upload.
     val uploadJobs = remember(draftKey) { mutableMapOf<String, kotlinx.coroutines.Job>() }
     fun upload(attachment: Attachment) {
@@ -648,6 +659,9 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
         // connection says nothing: an always-on label is noise that hides a real outage.
         ConnectionBanner(live) { state.retryNow(); action { load() } }
         if (openFailure != null) ErrorBanner(openFailure) { failure = null }
+        // A link nothing could open is not the same as a failed load: it gets its own line so a
+        // browser-less device says so instead of swallowing the tap.
+        openLinkFailure?.let { reason -> ErrorBanner(reason) { linkFailure = null } }
         if (refreshing && rows.isNotEmpty()) LinearProgressIndicator(Modifier.fillMaxWidth())
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (loading && rows.isEmpty()) LoadingState("Loading messages")
@@ -683,6 +697,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                         highlighted = highlighted == row.message.id,
                         signedUrl = { path -> media[path]?.url },
                         onOpenAttachment = { part -> viewing = part },
+                        onOpenLink = openLink,
                     )
                 }
             }
@@ -879,7 +894,10 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     }
                     if (message.userId == myId) {
                         if (message.isEditable) {
-                            add(ActionItem("Edit", Icons.Default.Edit, onClick = { edit = message; editText = message.plainText; selected = null }))
+                            // The box holds the body as it was typed: `[label](url)` for a masked
+                            // link, the bare URL otherwise. `plainText` would flatten a masked
+                            // link to its label and lose the address on save.
+                            add(ActionItem("Edit", Icons.Default.Edit, onClick = { edit = message; editText = message.editText; selected = null }))
                         }
                         add(ActionItem("Delete", Icons.Default.Delete, detail = "This cannot be undone", destructive = true,
                             onClick = { delete = message; selected = null }))
@@ -941,7 +959,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                         Text(row.author(people, bots).name, style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold)
                         MessageContent(row, sizes.messageSp, signedUrl = { path -> media[path]?.url },
-                            onOpenAttachment = { part -> viewing = part })
+                            onOpenAttachment = { part -> viewing = part }, onOpenLink = openLink)
                     }
                 }
             }
@@ -1097,7 +1115,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     Text(row.author(people, bots).name, style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold)
                     MessageContent(row, sizes.messageSp, signedUrl = { path -> media[path]?.url },
-                        onOpenAttachment = { part -> viewing = part })
+                        onOpenAttachment = { part -> viewing = part }, onOpenLink = openLink)
                 }
             }
                 if (openSearchRows?.isEmpty() == true) item { Text("No results") } }
@@ -1231,6 +1249,7 @@ internal fun MessageRow(
     highlighted: Boolean = false,
     signedUrl: ((String) -> String?)? = null,
     onOpenAttachment: ((ContentPart) -> Unit)? = null,
+    onOpenLink: ((String) -> Unit)? = null,
 ) {
     val message = row.message
     val sizes = LocalSizes.current
@@ -1293,7 +1312,7 @@ internal fun MessageRow(
                 }
                 MessageContent(message, sizes.messageSp, baseUrl = baseUrl,
                     signedUrl = signedUrl, onOpenAttachment = onOpenAttachment,
-                    emojis = emojis,
+                    emojis = emojis, onOpenLink = onOpenLink,
                     encryptedNotice = if (message.encrypted) "Encrypted message. Keys are not available in this client." else null)
                 if (row.isPending) Text("Sending…", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("sending-label"))

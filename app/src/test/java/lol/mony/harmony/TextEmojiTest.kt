@@ -38,6 +38,7 @@ class TextEmojiTest {
             when (it) {
                 is TextToken.Literal -> it.text
                 is TextToken.Shortcode -> ":" + it.name + ":"
+                is TextToken.Link -> it.url
             }
         }
         assertEquals(text, rebuilt)

@@ -484,11 +484,46 @@ data class Message(
     val inlineParts: List<ContentPart> get() = content.filter { it.isInline }
 
     /**
-     * True when this message's text can be edited here: not encrypted, and nothing but text parts.
-     * Editing rewrites the whole body as one text part, which would drop a mention or an emoji.
+     * The link previews this message carries, keyed the way the instance stored them.
+     *
+     * The cards live in `metadata.embeds` rather than in `content`: the database's own trigger
+     * writes one for a post on the instance, and the federation backend writes one for every
+     * other URL after it has fetched the page. A message with no metadata has none.
+     */
+    val linkPreviews: Map<String, LinkPreview> by lazy { metadata.linkPreviews() }
+
+    /**
+     * True when the message's author asked for its embeds to be hidden (`metadata.suppress_embeds`).
+     *
+     * The instance's `set_message_embeds_suppressed` sets this for the author or a moderator, and
+     * the stored previews stay so the flag can be cleared again. A suppressed message draws its
+     * links as plain links, which is what the reference's `embedsSuppressed` does.
+     */
+    val embedsSuppressed: Boolean
+        get() = (metadata as? JsonObject)?.booleanOrNull("suppress_embeds") == true
+
+    /** The preview that belongs to [part], when this message has one and is not suppressing it. */
+    fun previewFor(part: ContentPart): LinkPreview? =
+        if (embedsSuppressed) null else linkPreviews.forPart(part)
+
+    /**
+     * The body as editable text: its prose, with each link written the way it was typed.
+     *
+     * `[label](url)` for a masked link, `<url>` for one whose preview was suppressed, the bare
+     * URL otherwise. [MessageTextParts.parse] reads it back to the same parts.
+     */
+    val editText: String get() = editTextOf(content)
+
+    /**
+     * True when this message's body can be edited here: not encrypted, and nothing but text and
+     * link parts.
+     *
+     * A link is editable because it round-trips: [editText] writes it as `[label](url)` or the
+     * bare URL, and the save parses that back. A mention, an emoji, an attachment or a poll does
+     * not, and editing one would drop it.
      */
     val isEditable: Boolean
-        get() = !encrypted && content.all { it.type == "text" }
+        get() = !encrypted && content.all { it.type == "text" || it.type == "url" }
 
     /** True when the message carries an attachment, sticker, poll or embed of its own. */
     val hasAttachmentParts: Boolean

@@ -58,6 +58,23 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
 - `message-emoji-fallback.png` -- an emoji whose file cannot load draws its
   shortcode in place. An `AsyncImage` with no error branch leaves a hole, which
   is the other half of the same bug.
+- `message-links.png` -- a message with a `url` part the instance previewed:
+  the link on the sentence's line and its card beneath. The card is Harmony's
+  own embed style, not this app's invention -- an 80dp **square thumbnail on
+  the leading edge** with the site, the title and the description beside it,
+  inside a hairline frame. Tapping either opens the URL
+  (`MessageLinkRenderTest`), which is what the app could not do before
+  [links-and-embeds.md](../../links-and-embeds.md).
+- `message-link-in-text.png` -- a message stored as one `text` part, the shape
+  an older build of this client and every other client writes: the URL in the
+  prose is still a link -- an annotation *inside* the sentence, so the words
+  around it wrap through it -- and a tap opens it.
+- `message-embed-text-only.png` -- a card with no picture: the site, the title
+  and the description are the card, at the larger type the reference uses for
+  that shape, rather than a hole where a thumbnail would have been.
+- `message-embed-media.png` -- a GIF page, whose picture *is* the content: drawn
+  at its own aspect with the text beneath it, and the site's dark favicon on the
+  white chip that keeps it visible on the dark theme.
 - `thread-sheet-open.png`, `thread-opened.png` -- the room's Threads sheet, and
   the thread it opens, which is the transition that used to crash the app.
 - `emoji-picker-dark.png`, `emoji-picker-light.png` -- the emoji picker, which

@@ -117,7 +117,16 @@ class ChatRepository(private val rest: RestApi) {
                 })
             }
             put("content", buildJsonArray {
-                if (text.isNotBlank()) add(buildJsonObject { put("type", "text"); put("text", text) })
+                // A typed body is stored as the parts the instance previews and every client
+                // links: prose as `text`, each URL as its own `url` part. Writing the whole body
+                // as one text part -- which this client used to do -- hides every link from the
+                // instance's own preview trigger (`process_local_link_previews` reads `url`
+                // parts only) and from any client that draws a link by its part.
+                if (text.isNotBlank()) {
+                    for (part in MessageTextParts.parse(text)) {
+                        add(HarmonyJson.encodeToJsonElement(ContentPart.serializer(), part))
+                    }
+                }
                 for (part in files) add(HarmonyJson.encodeToJsonElement(ContentPart.serializer(), part))
             })
         }
@@ -140,12 +149,19 @@ class ChatRepository(private val rest: RestApi) {
         val original = rest.select(endpoint, token, "messages", filters = listOf("id" to "eq.$messageId"),
             serializer = ListSerializer(Message.serializer())).getOrThrow().firstOrNull()
             ?: error("This message is no longer available.")
-        require(!original.encrypted && original.content.all { it.type == "text" }) {
+        require(!original.encrypted && original.isEditable) {
             "Editing encrypted or structured/media messages is not implemented; nothing was changed."
         }
         rest.update(endpoint, token, "messages", listOf("id" to "eq.$messageId"),
             buildJsonObject {
-                put("content", buildJsonArray { add(buildJsonObject { put("type", "text"); put("text", text) }) })
+                // An edit is stored the way a send is: prose as `text`, each URL as its own
+                // `url` part, so the instance can preview it and every client can link it. The
+                // edit box holds the body as source (`Message.editText`), which this parses back.
+                put("content", buildJsonArray {
+                    for (part in MessageTextParts.parse(text)) {
+                        add(HarmonyJson.encodeToJsonElement(ContentPart.serializer(), part))
+                    }
+                })
             }.toString(), serializer = ListSerializer(Message.serializer())).getOrThrow().firstOrNull()
             ?: error("This message could not be edited. Check your permissions.")
     }

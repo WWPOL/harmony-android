@@ -106,6 +106,10 @@ notification screens had the same `x!!` shape and are fixed the same way.
 thread, back out, reopen -- and requires the thread's own messages on screen, so
 a sheet that merely stopped crashing without opening the thread fails too.
 
+Links are a part of their own and are drawn as links, with the preview card the
+instance stores for them; that is a change of its own, described in
+[links-and-embeds.md](links-and-embeds.md).
+
 ## What this does not do
 
 - It does not render attachments as thumbnails, polls as votable cards or
