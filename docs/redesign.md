@@ -84,6 +84,15 @@ refresh, pins and threads into an overflow instead of five icons competing with 
 composer is one docked surface with a filled circular send, because a text field with a button
 beside it reads as two controls that happen to be adjacent.
 
+**Swipe to reply travels away from the start edge.** It used to travel towards the end edge,
+which is the direction a navigation drawer opens in: the gesture that should answer a message
+was the gesture that pulls a drawer open. `SwipeToReplyRow` (`ui/screens/chat/SwipeToReply.kt`)
+now owns the direction in one place -- the sign comes from `LocalLayoutDirection`, so a mirrored
+layout mirrors the gesture too -- and the reply arrow draws on the edge the row uncovers, not
+the one it slides over. The drag stays horizontal-only, so the message list's vertical scroll is
+never taken from it, and the reply remains reachable from the actions sheet and from a custom
+accessibility action.
+
 ## The other pages
 
 The frame and Chats were the first round's work, and they left the rest of the app looking like

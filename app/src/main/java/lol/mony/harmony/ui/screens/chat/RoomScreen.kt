@@ -3,10 +3,8 @@
 package lol.mony.harmony.ui.screens.chat
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,11 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
@@ -67,7 +61,8 @@ import java.util.UUID
  *   then becomes the instance's own row. A failed send stays in the list with Retry, and its
  *   text is still in the composer, so nothing is lost.
  * - A horizontal drag on a row is a reply gesture, with the arrow and the row's own offset as
- *   the feedback, matching what a messaging app on Android does.
+ *   the feedback. It travels away from the start edge, the opposite way to a navigation drawer,
+ *   so the two gestures cannot be confused. See [SwipeToReplyRow].
  */
 @Composable
 fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: VisualThemeSettings, onBack: () -> Unit) {
@@ -724,10 +719,10 @@ internal fun showsAuthorHeader(message: Message, previous: Message?): Boolean {
  * One message: its author, its body and its reactions, plus the two gestures a messaging app
  * has here -- long-press for actions and a horizontal drag to reply.
  *
- * The drag is deliberately horizontal-only (`detectHorizontalDragGestures`), so the vertical
- * scroll of the list is never stolen from it, and the row slides with the finger while a reply
- * arrow fades in behind it. The same reply is reachable from the actions sheet and from a
- * custom accessibility action, so a person who cannot perform a drag is not locked out of it.
+ * The drag itself lives in [SwipeToReplyRow], which owns its direction: it travels *away* from
+ * the start edge, because a drawer opens the other way. The same reply is reachable from the
+ * actions sheet and from a custom accessibility action, so a person who cannot perform a drag
+ * is not locked out of it.
  */
 @Composable
 private fun MessageRow(
@@ -740,45 +735,19 @@ private fun MessageRow(
     val message = row.message
     val sizes = LocalSizes.current
     val name = if (message.isSystem) "System" else author.name
-    val haptics = LocalHapticFeedback.current
     val time = runCatching { DateTimeFormatter.ofPattern(if (appearance.use24HourTime) "HH:mm" else "h:mm a")
         .withZone(ZoneId.systemDefault()).format(Instant.parse(message.createdAt)) }.getOrDefault("")
-    val replyThreshold = 64.dp
-    var drag by remember(row.key) { mutableStateOf(0f) }
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val offset = animateFloatAsState(drag, label = "reply-offset").value
-    val revealed = offset >= with(density) { replyThreshold.toPx() }
 
-    Box(Modifier.fillMaxWidth()
-        .then(if (highlighted) Modifier.background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)) else Modifier)
-        .testTag(if (highlighted) "message-highlighted" else "message-row-" + row.key)) {
-        // The feedback sits under the row and slides in as the row moves aside.
-        if (offset > 0f) Box(Modifier.matchParentSize().padding(start = 12.dp), contentAlignment = Alignment.CenterStart) {
-            Icon(Icons.AutoMirrored.Filled.Reply, "Reply",
-                Modifier.size(20.dp).alpha((offset / with(density) { replyThreshold.toPx() }).coerceIn(0f, 1f)),
-                tint = MaterialTheme.colorScheme.primary)
-        }
+    SwipeToReplyRow(
+        key = row.key,
+        onReply = onReply,
+        modifier = Modifier
+            .then(if (highlighted) Modifier.background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)) else Modifier)
+            .testTag(if (highlighted) "message-highlighted" else "message-row-" + row.key),
+    ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .graphicsLayer { translationX = offset }
-                .pointerInput(row.key) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { drag = 0f },
-                        onHorizontalDrag = { _, amount ->
-                            // Rightwards only: a leftward drag is not a gesture this client uses.
-                            drag = (drag + amount).coerceIn(0f, size.width * 0.5f)
-                        },
-                        onDragEnd = {
-                            if (drag >= with(density) { replyThreshold.toPx() }) {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onReply()
-                            }
-                            drag = 0f
-                        },
-                        onDragCancel = { drag = 0f },
-                    )
-                }
                 .combinedClickable(onClick = {}, onLongClick = onActions)
                 .semantics {
                     customActions = listOf(

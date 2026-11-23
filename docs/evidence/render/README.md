@@ -40,6 +40,12 @@ rotation, system appearance or device rendering.
   the thread it opens, which is the transition that used to crash the app.
 - `pinned-sheet.png`, `actions-sheet.png` -- the pinned-messages sheet and the
   message-actions sheet, both of which read the same cleared nullable.
+- `swipe-to-reply-direction.png` -- a message row held mid-drag: it has moved
+  away from the start edge and the reply arrow is on the trailing edge it
+  uncovered. This one needs no instance -- `SwipeToReplyTest` drives the
+  gesture composable directly, which is the point of the capture: the direction
+  is what it records. A row dragged the other way would put the arrow on the
+  leading edge, and the same test asserts where it lands.
 
 ## The account's own look
 
