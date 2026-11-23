@@ -5,6 +5,7 @@
 // It holds its state in memory and prints what it received, so a step can be run against it
 // exactly as it runs on a runner. Nothing here is used by the workflow.
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 
 const port = Number(process.argv[2] || 8099);
 const repo = process.env.GITHUB_REPOSITORY || 'WWPOL/brapmony';
@@ -72,6 +73,9 @@ const server = http.createServer(async (req, res) => {
       label: url.searchParams.get('label') || '',
       size: body.length,
       state: 'uploaded',
+      // GitHub computes a SHA-256 over every asset it stores and reports it; the publisher
+      // compares that with the file it uploaded, so the stand-in models it too.
+      digest: `sha256:${createHash('sha256').update(body).digest('hex')}`,
       content: body.toString('base64'),
       browser_download_url: `${base}/${repo}/releases/download/${release.tag_name}/${name}`,
     };

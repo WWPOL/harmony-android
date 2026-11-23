@@ -49,21 +49,35 @@ test('no workflow runs untrusted code with a write token', () => {
   // The workflow default is read-only; only jobs that publish opt in.
   assert.deepEqual(android.permissions, { contents: 'read' });
   for (const [job, spec] of Object.entries(android.jobs)) {
-    if (spec.permissions && (spec.permissions.contents === 'write' || spec.permissions.packages === 'write')) {
-      assert.equal(job, 'publish', `only the publishing job may write, not ${job}`);
-      // A pull request, and a pull request from a fork in particular, must never reach it.
-      assert.match(String(spec.if), /github\.event_name == 'push'/, `${job} must be push-only`);
-      assert.match(String(spec.if), /github\.repository == 'WWPOL\/harmony-android'/, `${job} must be this repository`);
-      assert.ok(spec.needs, `${job} must build before it publishes`);
-    }
+    if (!spec.permissions) continue;
+    const writes = Object.entries(spec.permissions).filter(([, level]) => level === 'write');
+    if (!writes.length) continue;
+    assert.equal(job, 'publish', `only the publishing job may write, not ${job}`);
+    // A pull request, and a pull request from a fork in particular, must never reach it.
+    assert.match(String(spec.if), /github\.event_name == 'push'/, `${job} must be push-only`);
+    assert.match(String(spec.if), /github\.repository == 'WWPOL\/harmony-android'/, `${job} must be this repository`);
+    assert.ok(spec.needs, `${job} must build before it publishes`);
   }
-  // The build job that pull requests run holds no permission of its own.
+  // The build job that pull requests run holds no permission of its own, and in particular
+  // never the ones that sign a provenance statement: a fork's code must not be able to
+  // obtain an attestation that says GitHub's workflow produced it.
   assert.equal(android.jobs.build.permissions, undefined);
+  for (const signing of ['id-token', 'attestations', 'artifact-metadata']) {
+    assert.equal(android.jobs.publish.permissions[signing], 'write', `the publish job needs ${signing}: write`);
+    assert.equal(android.jobs.build.permissions, undefined, `the build job must not hold ${signing}`);
+    assert.equal(android.jobs.tooling.permissions, undefined, `the tooling job must not hold ${signing}`);
+  }
   // The release workflow writes only from the job that creates the release, and that job
-  // writes the package as well as the release.
+  // writes the package and the attestations as well as the release.
   const release = parse(RELEASE);
   assert.deepEqual(release.permissions, { contents: 'read' });
-  assert.deepEqual(release.jobs.release.permissions, { contents: 'write', packages: 'write' });
+  assert.deepEqual(release.jobs.release.permissions, {
+    contents: 'write',
+    packages: 'write',
+    'id-token': 'write',
+    attestations: 'write',
+    'artifact-metadata': 'write',
+  });
 });
 
 test('every push to a branch builds the client', () => {
@@ -111,7 +125,8 @@ test('a tag builds the APK into the release for that tag', () => {
   const release = parse(RELEASE);
   const job = release.jobs.release;
   assert.ok(job, 'release.yml builds the APK');
-  assert.deepEqual(job.permissions, { contents: 'write', packages: 'write' });
+  assert.equal(job.permissions.contents, 'write');
+  assert.equal(job.permissions.packages, 'write');
   const run = shell(job);
   assert.match(run, /release\.mjs tag --tag "\$RELEASE_TAG"/, 'the release for the tag is created or found');
   assert.match(run, /release\.mjs upload --release-id "\$RELEASE_ID"/, 'the APK is attached by id');
@@ -613,13 +628,25 @@ function packageTags({ ref, defaultBranch, versionRelease = false, repo = 'WWPOL
   const apk = join(dir, 'Brapmony-1.9.6-c214e8e-debug.apk');
   writeFileSync(apk, 'a file to be pushed');
   // A stand-in for `oras` that prints the arguments it was given, so the tags are read
-  // from what the script really passes, not from what it looks like it computes.
+  // from what the script really passes, not from what it looks like it computes. It also
+  // prints the `Digest:` line a push prints, because the script reads it: the digest is
+  // what the package is attested by.
   const fake = join(dir, 'oras');
-  writeFileSync(fake, '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@"\n');
+  writeFileSync(fake, [
+    '#!/usr/bin/env bash',
+    'printf \'%s\\n\' "$@"',
+    'for last; do :; done',
+    'if [ "${1:-}" = push ]; then',
+    '  printf \'Digest: sha256:%s\\n\' "$(sha256sum "${last%%:*}" | cut -d" " -f1)"',
+    'fi',
+    '',
+  ].join('\n'));
   const chmod = spawnSync('chmod', ['+x', fake]);
   assert.equal(chmod.status, 0);
   const args = [apk, '1.9.6', 'c214e8e5b731df3db9ac1062510ff5391d7f573a'];
   if (versionRelease) args.push('--version-release');
+  const out = join(dir, 'output');
+  writeFileSync(out, '');
   const run = spawnSync('bash', ['scripts/publish-package.sh', ...args], {
     cwd: root,
     encoding: 'utf8',
@@ -632,6 +659,7 @@ function packageTags({ ref, defaultBranch, versionRelease = false, repo = 'WWPOL
       PACKAGE_DEFAULT_BRANCH: defaultBranch,
       GITHUB_TOKEN: '',
       ORAS_PASSWORD: '',
+      GITHUB_OUTPUT: out,
     },
   });
   assert.equal(run.status, 0, `the package script failed:\n${run.stdout}\n${run.stderr}`);
@@ -698,4 +726,100 @@ test('the package step reports whether the package can be downloaded, and does n
   // Reporting a private package is not a reason to fail the publish.
   const fetch = script.slice(script.indexOf('manifest fetch'), script.indexOf('GITHUB_STEP_SUMMARY'));
   assert.ok(!/exit 1/.test(fetch), 'a private package does not fail the run');
+});
+
+// An attestation is only worth something if it says what it is about: the APK file for the
+// download, and the manifest digest for the package (its tags move, its digest does not).
+// Both are attested in each publishing workflow, and both attestations are checked back
+// from outside -- by signature, repository, signer workflow and the commit the run built --
+// so a run that cannot produce one that verifies fails instead of publishing a claim.
+test('what a workflow publishes is attested, and the attestation is verified', () => {
+  const cases = [
+    [ANDROID, 'publish', 'android.yml', 'Publish', 'Publish the package'],
+    [RELEASE, 'release', 'release.yml', 'Name the APK', 'Publish the package'],
+  ];
+  for (const [file, job, workflow, apkStep, packageStep] of cases) {
+    const spec = parse(file).jobs[job];
+    const steps = spec.steps;
+    const attest = steps.filter((s) => String(s.uses || '').startsWith('actions/attest@'));
+    assert.equal(attest.length, 2, `${file}: the APK and the package are each attested`);
+    // The APK's subject is the file itself, so a downloader's copy is what is checked.
+    const apk = attest.find((s) => s.with && s.with['subject-path']);
+    assert.ok(apk, `${file}: the APK is attested by path`);
+    assert.match(String(apk.with['subject-path']), new RegExp(`steps\\.${steps.find((s) => s.name === apkStep).id}\\.outputs`),
+      `${file}: the APK attested is the one this run published`);
+    // The package's subject is its manifest digest: tags move, the digest does not.
+    const pkg = attest.find((s) => s.with && s.with['subject-digest']);
+    assert.ok(pkg, `${file}: the package is attested by digest`);
+    assert.match(String(pkg.with['subject-digest']), /steps\.package\.outputs\.digest/,
+      `${file}: the digest is the one the push reported`);
+    assert.match(String(pkg.with['subject-name']), /steps\.package\.outputs\.image/);
+    assert.equal(pkg.with['push-to-registry'], true, `${file}: the attestation travels with the package`);
+    assert.ok(steps.some((s) => s.name === packageStep && s.id === 'package'), `${file}: the push reports its digest`);
+    // And the statement is read back, pinned to this repository, this workflow and this
+    // commit: an attestation that says something else is not this run's.
+    const verify = steps.find((s) => s.name === 'Verify the attestations');
+    assert.ok(verify, `${file}: the attestations are verified, not assumed`);
+    assert.match(verify.run, /--repo "\$GITHUB_REPOSITORY"/);
+    assert.match(verify.run, /--signer-workflow "\$WORKFLOW"/);
+    assert.match(String(verify.env.WORKFLOW), new RegExp(`${workflow.replace(/\./g, '\\.')}$`),
+      `${file}: the signer is this workflow`);
+    assert.match(verify.run, /--source-digest "\$COMMIT"/, `${file}: the attestation must name the commit that was built`);
+    assert.match(verify.run, /oci:\/\/\$IMAGE@\$DIGEST/, `${file}: the package's attestation is verified too`);
+    // A pull request never reaches the signing: the build job holds none of it.
+    assert.equal(parse(file).jobs[job].permissions['id-token'], 'write');
+  }
+});
+
+// GitHub computes a digest of every release asset it stores. The publisher compares it with
+// the file it uploaded, which is the only check of the stored bytes that does not come from
+// this workflow itself.
+test('the stored asset is checked against GitHub\'s own digest', () => {
+  const source = read('scripts/release.mjs');
+  assert.match(source, /export function checkAssetDigest/, 'the comparison is in one place');
+  assert.match(source, /sha256:\$\{String\(sha256\)\.toLowerCase\(\)\}/, 'it compares sha256:hex');
+  assert.match(source, /refusing to publish it/, 'and refuses a mismatch');
+  // Every upload goes through it, and a re-run that uploads nothing still checks what is
+  // stored under its name.
+  const upload = source.slice(source.indexOf('async function uploadFile'), source.indexOf('export async function publishBuild'));
+  assert.match(upload, /checkAssetDigest\(asset/, 'an upload is checked');
+  const build = source.slice(source.indexOf('export async function publishBuild'), source.indexOf('export async function replaceStable'));
+  assert.match(build, /checkAssetDigest\(same/, 'a re-run checks the bytes already there');
+  const stable = source.slice(source.indexOf('export async function replaceStable'), source.indexOf('export async function retireAssets'));
+  assert.match(stable, /checkAssetDigest\(current\[0\]/, 'and the stable name checks what it points at');
+  // A digest that is not reported leaves nothing to compare, and is not an error.
+  assert.match(source, /if \(!reported\) return \{ checked: false, digest: null \}/);
+});
+
+// The artifact the publish job reads back is checked against the digest GitHub recorded
+// when the build uploaded it: a transfer that changed anything fails before publishing.
+test('the downloaded artifact is checked against the digest it was uploaded with', () => {
+  const android = parse(ANDROID);
+  const download = android.jobs.publish.steps.find((s) => String(s.uses || '').startsWith('actions/download-artifact@'));
+  assert.ok(download, 'the publish job downloads what the build uploaded');
+  assert.equal(download.with['digest-mismatch'], 'error', 'a digest mismatch fails the job rather than being ignored');
+  // The build reports the checksum, and the publish job compares it again with the file it
+  // received: two digests, one computed here and one recorded there.
+  const publish = android.jobs.publish.steps.find((s) => s.id === 'publish');
+  assert.match(publish.run, /actual=\$\(sha256sum/, 'the received file is hashed');
+  assert.match(publish.run, /"\$actual" != "\$SHA256"/, 'and compared with what the build reported');
+});
+
+// `actions/attest` pushes the package's attestation to the registry itself, and takes the
+// credentials for that from ~/.docker/config.json -- which the package step's `oras login`
+// writes. A workflow that attests before pushing the package, or pushes it without a login,
+// would fail inside the action with a message about a missing credential file. The order is
+// therefore checked, and the run checks the file before the action needs it.
+test('the package attestation has registry credentials to push with, because the push logged in', () => {
+  for (const [file, job] of [[ANDROID, 'publish'], [RELEASE, 'release']]) {
+    const names = parse(file).jobs[job].steps.map((s) => s.name || s.uses);
+    const push = names.findIndex((n) => n === 'Publish the package');
+    const check = names.findIndex((n) => n === 'Check the registry credentials the attestation needs');
+    const attest = names.findIndex((n) => n === "Attest the package's provenance");
+    assert.ok(push >= 0 && check >= 0 && attest >= 0, `${file}: all three steps exist`);
+    assert.ok(push < check && check < attest, `${file}: the login is before the check, and the check before the attestation`);
+    const step = parse(file).jobs[job].steps.find((s) => s.name === 'Check the registry credentials the attestation needs');
+    assert.match(step.run, /\.docker\/config\.json/, `${file}: the file the action reads is the one checked`);
+    assert.match(step.run, /exit 1/, `${file}: its absence fails the run`);
+  }
 });

@@ -58,10 +58,12 @@ after(async () => {
 const fails = (matcher, name) =>
   typeof matcher === 'string' ? name.includes(matcher) : !!matcher && matcher.test(name);
 
-async function fakeGitHub({ releases: seed = [], failUploads = null } = {}) {
+async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUploads = null } = {}) {
   const releases = structuredClone(seed);
   const calls = [];
-  const state = { failUploads };
+  // `digests: false` makes the stand-in answer without a digest, the way an API that does
+  // not model the field does; a test then sees that a publish still works.
+  const state = { failUploads, corruptUploads, digests: true };
   let nextId = 900;
   const server = http.createServer(async (req, res) => {
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -133,10 +135,20 @@ async function fakeGitHub({ releases: seed = [], failUploads = null } = {}) {
         label: url.searchParams.get('label') || '',
         size: body.length,
         state: 'uploaded',
+        // GitHub computes a SHA-256 over every asset it stores and reports it; the
+        // publisher compares it with the file it uploaded. `corruptUploads` stores bytes
+        // other than the ones sent, which is what a truncated or rewritten upload looks
+        // like from the publisher's side.
+        digest: `sha256:${sha(fails(state.corruptUploads, name) ? Buffer.from('not the bytes that were sent') : body)}`,
         content: body.toString('base64'),
         browser_download_url: `${base}/${OWNER_REPO}/releases/download/${release.tag_name}/${name}`,
       };
       release.assets.push(asset);
+      // The stand-in can answer without the digest field, as an API that predates it does.
+      if (!state.digests) {
+        const { digest, ...rest } = asset;
+        return send(201, rest);
+      }
       return send(201, asset);
     }
     m = match(new RegExp(`^/repos/${OWNER_REPO}/releases/assets/(\\d+)$`));
@@ -219,10 +231,11 @@ function workspace(commit = 'abc1234', bytes = null) {
 // release or a prerelease, and `--version` names the release.
 const DEFAULT_BRANCH = 'master';
 
-async function publish(args, { gh: existing, releases, failUploads } = {}) {
-  const gh = existing ?? (await fakeGitHub({ releases, failUploads }));
+async function publish(args, { gh: existing, releases, failUploads, corruptUploads } = {}) {
+  const gh = existing ?? (await fakeGitHub({ releases, failUploads, corruptUploads }));
   // A reused server may be told to fail this publish's uploads.
   if (existing && failUploads !== undefined) existing.state.failUploads = failUploads;
+  if (existing && corruptUploads !== undefined) existing.state.corruptUploads = corruptUploads;
   const out = join(mkdtempSync(join(tmpdir(), 'brapmony-out-')), 'output');
   writeFileSync(out, '');
   const full = [...args];
@@ -438,6 +451,96 @@ test('a failed stable upload leaves the previous stable build in place', async (
   } finally {
     await first.cleanup();
     await second.cleanup();
+  }
+});
+
+// GitHub computes a SHA-256 over every asset it stores and reports it as `digest`. It is
+// the one digest the publisher did not compute itself, so it is the one check that the
+// file a downloader will get is the file this run built. A mismatch fails the publish
+// before the stable name moves, so nothing that is already published is disturbed.
+test('the asset GitHub stored is checked against the file that was uploaded', async () => {
+  const first = workspace('abc1234');
+  const second = workspace('def5678');
+  try {
+    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
+    const before = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
+    // The next build's bytes are stored as something else: a proxy or a truncated upload.
+    await assert.rejects(
+      publish(['--apk', second.apk, '--branch', 'master', '--commit', 'def5678'], {
+        gh: firstRun.gh,
+        corruptUploads: /def5678/,
+      }),
+      /GitHub stored Brapmony-1\.9\.6-def5678-debug\.apk as sha256:[0-9a-f]{64}, but the file hashes to sha256:[0-9a-f]{64}/,
+    );
+    const after = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
+    assert.equal(after.id, before.id, 'the stable name did not move onto bytes that are not the build');
+    assert.equal(after.content, before.content);
+  } finally {
+    await first.cleanup();
+    await second.cleanup();
+  }
+});
+
+// The digest is compared, not recorded: an API that reports none leaves nothing to
+// compare, and the upload is accepted as it came back. GitHub reports one for every
+// asset, so this is what keeps the check from becoming a failure of the publish on a
+// server that does not model it (an older GitHub Enterprise, the local stand-in).
+test('a stored asset without a digest is not a failure', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    gh.state.digests = false;
+    const { id } = await seedRolling(gh);
+    const name = 'Brapmony-1.9.6-abc1234-debug.apk';
+    const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(ownerLabel(sha(readFileSync(ws.apk))))}`, {
+      body: readFileSync(ws.apk),
+      contentType: 'application/octet-stream',
+    });
+    assert.equal(uploaded.digest, undefined, 'the stand-in answered without a digest');
+    // The same bytes are already there under that name, so nothing is re-uploaded, and
+    // with no digest to compare the publish continues.
+    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name });
+    assert.equal(build.uploaded, false);
+    assert.equal(build.asset.id, uploaded.id);
+    // The stable name, too: the label says which bytes are there, and no digest is
+    // reported to contradict it.
+    const label = ownerLabel(sha(readFileSync(ws.apk)));
+    const stable = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET, label });
+    assert.ok(stable.asset, 'the stable name was published');
+    const replaced = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET, label });
+    assert.equal(replaced.replaced, 0, 'a second call is a no-op, as a re-run must be');
+    assert.equal(replaced.asset.id, stable.asset.id, 'the stable asset is the same one, not a new upload');
+    await gh.close();
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// A label is this workflow's claim about the bytes; GitHub's digest is the registry's.
+// A re-run that finds its own label but different stored bytes must not report success.
+test('a re-run whose stored bytes are not the label is refused', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    const { id } = await seedRolling(gh);
+    const sha256 = sha(readFileSync(ws.apk));
+    const name = 'Brapmony-1.9.6-abc1234-debug.apk';
+    const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(ownerLabel(sha256))}`, {
+      body: readFileSync(ws.apk),
+      contentType: 'application/octet-stream',
+    });
+    assert.equal(uploaded.label, ownerLabel(sha256), 'the stored asset claims these bytes');
+    // What is stored is not what the label claims: the digest GitHub computed says so.
+    // The asset list the publisher reads is where the digest comes from, so the stored
+    // asset is what carries the wrong one.
+    gh.releases[0].assets.find((a) => a.id === uploaded.id).digest = `sha256:${'c'.repeat(64)}`;
+    await assert.rejects(
+      publishBuild(gh, { releaseId: id, file: ws.apk, name }),
+      /refusing to publish it/,
+    );
+    await gh.close();
+  } finally {
+    await ws.cleanup();
   }
 });
 

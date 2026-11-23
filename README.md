@@ -68,6 +68,27 @@ exactly what is published where and which build installs over which.
 > The rolling release is a window on `main`, not an archive: it keeps the newest ten builds
 > of the branch and drops older ones. The version release of a tag is the archive.
 
+**What you downloaded, and which commit it came from.** Every APK published here -- on a
+release, as an artifact, or as a package -- carries a signed **build provenance attestation**.
+GitHub signs a statement that this exact file was produced by this repository's workflow at a
+particular commit, so the file can be checked without trusting the download page:
+
+```sh
+gh attestation verify Brapmony-latest.apk --repo WWPOL/harmony-android
+```
+
+To pin it to a workflow and a commit as well:
+
+```sh
+gh attestation verify Brapmony-latest.apk --repo WWPOL/harmony-android \
+  --signer-workflow WWPOL/harmony-android/.github/workflows/android.yml \
+  --source-digest <the commit>
+```
+
+The package is attested the same way, by its manifest digest (the tags move, the digest does
+not). GitHub also computes a digest of every release asset it stores, which is a check of the
+stored bytes that does not come from this build at all.
+
 **As a package.** GitHub Packages serves npm, Maven, Gradle, NuGet, RubyGems and container
 images, and has no APK registry, so the APK is published to the container registry as an OCI
 artifact: a file with metadata, not a container image. It appears under the repository's

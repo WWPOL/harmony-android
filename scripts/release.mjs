@@ -126,6 +126,28 @@ export function sha256File(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex');
 }
 
+// GitHub computes a SHA-256 digest of every asset it stores and reports it as
+// `sha256:<hex>`. It is the only digest of the stored file this workflow did not compute
+// itself, so it is the only independent check that what a downloader will get is the bytes
+// that were uploaded: a proxy, a truncated upload or a wrong file shows up here and not in
+// the checksum written beside the file.
+//
+// An API that reports no digest (GitHub Enterprise before it was added, or a stand-in that
+// does not model it) leaves nothing to compare, and the upload is taken as it came back.
+// A digest that differs is always an error, and is raised before the caller does anything
+// else with the asset.
+export function checkAssetDigest(asset, sha256, { name = asset?.name } = {}) {
+  const reported = typeof asset?.digest === 'string' ? asset.digest.trim().toLowerCase() : '';
+  if (!reported) return { checked: false, digest: null };
+  const expected = `sha256:${String(sha256).toLowerCase()}`;
+  if (reported !== expected) {
+    throw new PublishError(
+      `GitHub stored ${name} as ${reported}, but the file hashes to ${expected}; refusing to publish it`,
+    );
+  }
+  return { checked: true, digest: reported };
+}
+
 export function client({
   token = process.env.GITHUB_TOKEN,
   repository = process.env.GITHUB_REPOSITORY,
@@ -281,13 +303,18 @@ async function listAssets(gh, releaseId) {
 // GitHub's upload endpoint replaces nothing: a second upload of a name that is already
 // there is a 422. Every upload here carries the ownership label, so a later run can tell
 // its own assets from anyone else's.
+//
+// What GitHub stored is then compared with what was sent (checkAssetDigest): the digest in
+// the response is computed by GitHub over the bytes it holds, so a mismatch means the file
+// a downloader would get is not the file this run built.
 async function uploadFile(gh, { releaseId, file, name, label }) {
   if (!existsSync(file)) throw new PublishError(`no such file: ${file}`);
   const release = await gh.json('GET', `/releases/${releaseId}`);
   const base = release.upload_url.replace(/\{.*\}$/, '');
   const query = new URLSearchParams({ name, ...(label ? { label } : {}) });
+  let asset;
   try {
-    return await gh.json('POST', `${base}?${query}`, {
+    asset = await gh.json('POST', `${base}?${query}`, {
       body: readFileSync(file),
       contentType: 'application/octet-stream',
     });
@@ -297,6 +324,8 @@ async function uploadFile(gh, { releaseId, file, name, label }) {
     }
     throw error;
   }
+  checkAssetDigest(asset, sha256File(file), { name });
+  return asset;
 }
 
 // Adds this run's build under its own name. A re-run of the same commit with the same
@@ -308,7 +337,13 @@ export async function publishBuild(gh, { releaseId, file, name, attempt = 1 }) {
   const existing = (await listAssets(gh, releaseId)).filter((a) => a.name === name);
   if (existing.length) {
     const same = existing.find((a) => ownedSha256(a) === sha256);
-    if (same) return { asset: same, uploaded: false, sha256, name };
+    if (same) {
+      // Already these bytes: nothing to upload, but GitHub's own digest of what is stored
+      // still has to be these bytes. A label is this workflow's claim; the digest is the
+      // registry's.
+      checkAssetDigest(same, sha256);
+      return { asset: same, uploaded: false, sha256, name };
+    }
     if (!existing.every(isOwned)) {
       throw new PublishError(`asset ${name} was not uploaded by this workflow; refusing to replace it`);
     }
@@ -334,6 +369,11 @@ export async function replaceStable(gh, { releaseId, file, name, label }) {
   // id a download link resolves through stays the same. The label, not the file's own
   // hash, is what says which bytes are there: the checksum file's label names the APK.
   if (current.length === 1 && current[0].label === label) {
+    // The label is this workflow's own claim about the bytes; GitHub's digest of the
+    // stored asset is the check that the claim is true, and is compared whenever it is
+    // reported. The expected digest is the local file's, so it holds for the checksum
+    // file as well as for the APK.
+    checkAssetDigest(current[0], sha256File(file));
     return { asset: current[0], replaced: 0 };
   }
   for (const a of current) {

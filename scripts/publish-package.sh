@@ -90,6 +90,7 @@ command -v "$oras" > /dev/null 2>&1 || {
 # directory and pushed from there by relative name.
 file=$(basename "$apk")
 stage=$(mktemp -d)
+push_log="$stage/push.log"
 trap 'rm -rf "$stage"' EXIT
 cp -- "$apk" "$stage/$file"
 cd "$stage"
@@ -158,14 +159,31 @@ fi
 # One push, every tag: oras accepts a comma-separated tag list after the repository, and
 # pushing once means the manifest and its blob are uploaded once however many tags name
 # them.
+#
+# The push prints the digest of the manifest it created. That digest is what the package
+# *is* -- the tags are names that point at it -- and it is what a provenance attestation of
+# the package is made about, so it is written to GITHUB_OUTPUT for the step that attests.
 "$oras" push "$package:$(IFS=,; printf '%s' "${tags[*]}")" \
   --artifact-type application/vnd.brapmony.android.apk \
   "${annotations[@]}" \
   "${plain[@]}" \
   --no-tty \
-  "$file:application/vnd.android.package-archive"
+  "$file:application/vnd.android.package-archive" | tee "$push_log"
 
-echo "published $file to $package as: ${tags[*]}"
+# `oras` reports the manifest it pushed on a line of its own ("Digest: sha256:..."), and
+# that is the only place it is printed. Without it there is nothing to attest, so its
+# absence fails the publish rather than silently skipping the attestation.
+manifest_digest=$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$push_log" | tail -1)
+if [ -z "$manifest_digest" ]; then
+  echo "$0: oras did not report the digest of the manifest it pushed" >&2
+  exit 1
+fi
+echo "published $file to $package as: ${tags[*]} (manifest $manifest_digest)"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  printf 'digest=%s\n' "$manifest_digest" >>"$GITHUB_OUTPUT"
+  printf 'image=%s\n' "$package" >>"$GITHUB_OUTPUT"
+  printf 'tags=%s\n' "$(IFS=,; printf '%s' "${tags[*]}")" >>"$GITHUB_OUTPUT"
+fi
 
 # Whether the package can actually be fetched is not something to assume. GitHub creates a
 # first-published package **private** whatever the repository's visibility is, and no REST
