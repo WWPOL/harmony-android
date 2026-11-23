@@ -106,6 +106,21 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
   gesture composable directly, which is the point of the capture: the direction
   is what it records. A row dragged the other way would put the arrow on the
   leading edge, and the same test asserts where it lands.
+- `keyboard-composer-before-*.png`, `keyboard-composer-after-*.png` -- a room
+  with the keyboard up, drawn before the frame counted the IME twice and after
+  it stopped. The keyboard is a **synthetic** 300dp strip drawn at the bottom:
+  Robolectric runs no input method, so the strip is what the system keyboard
+  would cover, and it is painted pink so the space it owns is unmistakable.
+  `before-single` and `after-single` are one line typed; `before-banners` and
+  `after-banners` add the reply and connection banners of the reported
+  screenshot. In the "before" pair the space bar is squeezed into a strip above
+  the keyboard and the message list loses that height; in the "after" pair the
+  bar has stood down and the list keeps it. `after-multiline` is a four-line
+  draft, where the field is taller and the buttons stay on its last line, and
+  `after-keyboard-down` is the same room with no keyboard, where the bar is back.
+  These are the pictures behind `KeyboardInsetTest`; `ComposerKeyboardRenderTest`
+  draws them, and the "before" case is the old arithmetic expressed through the
+  frame's own parameters rather than a mutation of the source.
 
 ## The account's own look
 

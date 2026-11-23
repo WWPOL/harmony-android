@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -572,7 +573,32 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     val rows = room.rows
     val reactions = room.reactions
 
-    Column(Modifier.fillMaxSize().imePadding()) {
+    // The keyboard is the frame's inset, not this screen's: [HarmonyShell] measures it once and
+    // gives the content the height above it. Padding for it here as well is what put the
+    // composer under the app bar with a blank strip below it -- the room shrank by the keyboard's
+    // height twice, and the second time it was already inside the space the frame had given it.
+    //
+    // The room's own height is measured so the composer can be bounded by it: with a reply
+    // banner and a connection banner above it and the keyboard below, a composer that grew
+    // without a ceiling took the message list's height and left it unreadable.
+    var roomHeight by remember { mutableIntStateOf(0) }
+    val composerCap = with(androidx.compose.ui.platform.LocalDensity.current) {
+        // Before the first layout pass there is no height to take a fraction of, and a cap of
+        // zero would collapse the field. The cap only applies once the room has been measured.
+        //
+        // The floor is one line: a landscape window with the keyboard up can be short enough that
+        // a third of it is less than the field's own height, and clipping the line being typed is
+        // worse than the composer taking a little more than its share.
+        if (roomHeight > 0) {
+            (roomHeight * COMPOSER_MAX_FRACTION).toDp().coerceAtLeast(COMPOSER_MIN_HEIGHT)
+        } else {
+            androidx.compose.ui.unit.Dp.Unspecified
+        }
+    }
+    Column(
+        Modifier.fillMaxSize()
+            .onSizeChanged { roomHeight = it.height },
+    ) {
         // One app bar, with the title and its kind stacked, and the two actions a person uses
         // while reading kept: search and the overflow. Refresh, pins and threads are in the
         // overflow rather than four icons competing with the channel's name, which is what the
@@ -745,10 +771,23 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 // character, the counter turns red, and Send waits. Swallowing the keystrokes
                 // instead would look like a broken keyboard, and the instance would refuse the
                 // message in a trigger anyway -- which reads as a network failure.
+                //
+                // The field grows with the draft up to [composerMaxLines] and then scrolls
+                // inside itself, which is what makes a multi-line message usable: the box the
+                // person is writing in is as tall as what they wrote, the message list above
+                // gives up the height instead of the draft being clipped, and once it is full
+                // the caret still follows the text rather than the field growing off the top of
+                // the screen. It used to be capped at five lines with the caret free to sit on
+                // a line the box had scrolled past, which is the "hard to use" half of the
+                // report.
                 OutlinedTextField(
                     draft, { draft = it },
                     placeholder = { Text("Message " + (if (direct) title else "#" + title)) },
-                    modifier = Modifier.weight(1f).testTag("message-composer"), maxLines = 5,
+                    modifier = Modifier.weight(1f).testTag("message-composer")
+                        // Never more than a third of the room: a pasted essay scrolls inside
+                        // the field instead of pushing the message list out of the window.
+                        .heightIn(max = composerCap),
+                    minLines = 1, maxLines = composerMaxLines,
                     shape = HarmonyShape.large,
                     colors = OutlinedTextFieldDefaults.colors(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -1067,6 +1106,35 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
 }
 
 private const val ChatRepositoryPage = 50
+
+/**
+ * How tall the composer grows before it scrolls inside itself.
+ *
+ * Seven lines is about the most a phone keyboard leaves room for on a 640dp screen with the app
+ * bar above: the field is roughly 24dp a line, so the composer takes ~190dp and the message list
+ * keeps the rest. A larger cap would let a pasted draft push the list off the screen, which is
+ * the shape of the bug this was fixed with; a smaller one makes a normal multi-line message
+ * scroll while it is still comfortable to read.
+ */
+internal const val composerMaxLines = 7
+
+/**
+ * The most of a room's height the composer may take.
+ *
+ * A third leaves the message list two thirds of the room even when a reply banner, a connection
+ * banner, an attachment strip and a seven-line draft are all on screen at once -- which is the
+ * combination the report's third screenshot shows, with the list gone entirely.
+ */
+internal const val COMPOSER_MAX_FRACTION = 1f / 3f
+
+/**
+ * The least the composer may be capped to: one line's worth of field plus its padding.
+ *
+ * A landscape window with the keyboard up can be short enough that a third of it is less than a
+ * single line, and a cap that clips the line being typed is worse than a composer that takes a
+ * little more than its share of a very short screen.
+ */
+internal val COMPOSER_MIN_HEIGHT = 72.dp
 
 /** `1 message`, `2 messages`: a count and its noun, as the web client writes it. */
 internal fun countLabel(count: Int, noun: String): String =

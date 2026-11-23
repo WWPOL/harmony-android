@@ -166,12 +166,69 @@ what the bug already was: a restart forgot it. Posting only rows newer than the 
 timestamp fails on an instance whose clock or row order differs, and on two rows created in the
 same second; the cutoff is a moment, and an id that has been dealt with is remembered as such.
 
+## 7. A keyboard-sized deadspace under the composer, and a composer squeezed out of the room
+
+The report came with three screenshots and two complaints that turned out to be one bug:
+**"a huge deadspace where I think the ui thinks the keyboard is"** below the composer, and a
+**multi-line message being hard to use** -- worse once a reply banner or a connection banner was
+on screen, until the message list itself was gone.
+
+The cause was one inset counted twice and one bar drawn where nothing could see it.
+
+`WindowInsets.safeDrawing` is not "the system bars". It is `systemBars ∪ ime ∪ displayCutout`:
+the keyboard is folded into the same bottom edge as the navigation bar. `HarmonyShell` handed the
+whole safe drawing area to the bottom bar (`SpaceRail`), so while a field had focus:
+
+1. **The bar padded itself by the keyboard's height** and drew a surface that tall. Every pixel of
+   it was behind the keyboard -- the deadspace, which also swallowed the space bar's taps.
+2. **The room above lost that height**, because the bar was a sibling in the frame's `Column`.
+3. **The room then padded for the keyboard again**, with its own `imePadding()`, inside the space
+   the frame had already given it.
+
+On a 640dp-tall phone with a 300dp keyboard that leaves roughly 150dp for the app bar, a reply
+banner and a composer. Adding a connection banner left a sliver, which is the third screenshot.
+
+**Fix.** The frame measures the keyboard once and owns it, and no destination does:
+
+- The keyboard is taken *out* of the bar's insets (`safeArea.exclude(ime)`), so a bar that is
+  drawn is never padded for a keyboard that is covering it.
+- The bar **stands down while the keyboard is up**. A bar behind the keyboard is not navigation:
+  it cannot be seen and cannot be tapped, and its height was the room's.
+- The content is inset by the bars *plus* the keyboard, exactly once, in both layouts. The
+  keyboard becomes a parameter (`ime`) defaulting to `WindowInsets.ime`, the way `safeArea` is, so
+  a test can pass a synthetic keyboard and assert bounds without an input method.
+- `RoomScreen` drops its own `imePadding()`.
+
+The composer's own half: it now grows from one line to `composerMaxLines` (seven) and then scrolls
+inside itself, bounded at `COMPOSER_MAX_FRACTION` (a third) of the room's measured height. Before,
+it was capped at five lines with no ceiling relative to the room, so a pasted draft took the
+message list's height -- and with the keyboard and two banners also competing, the list went to
+nothing.
+
+**Alternatives rejected.** Keeping the bar and letting it *not* draw while still occupying its
+height fixes the deadspace but not the squeeze: the room would still be short by a keyboard it
+already has. Padding the room with `consumeWindowInsets` instead of measuring the frame would work
+in this one layout and leave every future destination to remember the rule -- which is exactly how
+this bug arose. Hiding only the bar's *padding* and keeping the bar visible behind the keyboard
+would leave an untappable control on screen.
+
 ## How this is verified, and what is not
 
 - **JVM render and interaction tests** (`ShellRailTest`, `ReactionGestureTest`,
   `ServerBrandingRenderTest`) draw the real composables under Robolectric's native graphics,
   inject real touches, and assert pixels and node bounds. Each was mutation-checked: reverting
   the inset padding, the collapse rule, the gesture mapping or the bucket names fails them.
+- **The keyboard's place is pinned by `KeyboardInsetTest`**, which passes a synthetic 300dp IME
+  on a 640dp screen and asserts the content's real bounds: that it ends at the keyboard's top
+  edge rather than above it, that the space bar is not drawn behind the keyboard and comes back
+  when it goes, that the composer sits at the room's bottom with the list above it, and that the
+  list still has height with a reply banner and a connection banner also on screen. It was
+  mutation-checked: restoring the old arithmetic -- the full safe drawing area given to the bar
+  and the bar kept while the keyboard is up -- fails three of its five cases, and the failure
+  reads `the content ends at y=1102.0, not at the keyboard's top edge y=680.0`.
+  `ComposerKeyboardRenderTest` draws the same cases as pictures, before and after
+  (`docs/evidence/render/keyboard-composer-*.png`); the "before" half is the old arithmetic
+  expressed through the frame's own parameters, so the two halves cannot drift apart.
 - **Notification delivery** is pinned twice. `NotificationDeliveryTest` covers the rule as a pure
   function: a fresh install delivers nothing, a days-old unread row is never delivered, a row is
   delivered once, a row read elsewhere withdraws its entry, and an unreadable timestamp is not
