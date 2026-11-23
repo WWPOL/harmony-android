@@ -56,6 +56,11 @@ rotation, system appearance or device rendering.
   the thread it opens, which is the transition that used to crash the app.
 - `pinned-sheet.png`, `actions-sheet.png` -- the pinned-messages sheet and the
   message-actions sheet, both of which read the same cleared nullable.
+- `reply-reference-above-username.png` -- one row that answers an earlier message:
+  the `Reply` reference first, then the author's name and time, then the body.
+  Unlike the captures above it needs no instance -- `ReplyReferencePlacementTest`
+  builds the row from a `Message` -- and it measures the drawn order as well as
+  drawing it, so a reference put back between the name and the body fails the test.
 - `connection-reconnecting.png` -- a room whose live connection dropped: the banner
   says the app is putting it back, counts the attempt, and offers to skip the wait.
   `connection-unavailable.png` is the other banner state, an instance that refused

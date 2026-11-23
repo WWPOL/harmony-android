@@ -793,7 +793,7 @@ internal fun showsAuthorHeader(message: Message, previous: Message?): Boolean {
  * is not locked out of it.
  */
 @Composable
-private fun MessageRow(
+internal fun MessageRow(
     row: RoomRow, author: MessageAuthor, showHeader: Boolean, baseUrl: String?,
     appearance: VisualThemeSettings, reactions: List<Reaction>, emojis: Map<String, Emoji>, myId: String,
     onActions: () -> Unit, onReact: (String) -> Unit, onAuthor: (String?) -> Unit,
@@ -838,20 +838,25 @@ private fun MessageRow(
                 Spacer(Modifier.width(16.dp))
             }
             Column(Modifier.weight(1f)) {
-                if (showHeader) Row(verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(name, fontWeight = FontWeight.Medium, fontSize = 16.sp, maxLines = 1,
-                        modifier = Modifier.combinedClickable(onClick = { onAuthor(author.profileId) }, onLongClick = onActions))
-                    if (author.isBot) BotBadge()
-                    if (message.isPinned) Icon(Icons.Default.PushPin, "Pinned", Modifier.size(12.dp))
-                    if (appearance.showTimestamps) Text(time, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (message.replyTo != null) Row(verticalAlignment = Alignment.CenterVertically) {
+                // The reply reference goes first, above the name: a message that answers
+                // something says so before it says who wrote it, so it reads as the context
+                // the message answers rather than as its opening line.
+                if (message.replyTo != null) Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.testTag("reply-reference")) {
                     Icon(Icons.AutoMirrored.Filled.Reply, null, Modifier.size(12.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(4.dp))
                     Text("Reply", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (showHeader) Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(name, fontWeight = FontWeight.Medium, fontSize = 16.sp, maxLines = 1,
+                        modifier = Modifier.testTag("message-author-name")
+                            .combinedClickable(onClick = { onAuthor(author.profileId) }, onLongClick = onActions))
+                    if (author.isBot) BotBadge()
+                    if (message.isPinned) Icon(Icons.Default.PushPin, "Pinned", Modifier.size(12.dp))
+                    if (appearance.showTimestamps) Text(time, style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 MessageContent(message, sizes.messageSp, baseUrl = baseUrl, emojis = emojis,
