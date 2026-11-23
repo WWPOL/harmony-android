@@ -137,14 +137,24 @@ object HarmonyNotifications {
             } else NotificationCompat.CATEGORY_SOCIAL)
         copy.context?.let { builder.setSubText(it) }
         return runCatching {
-            NotificationManagerCompat.from(context).notify(tagOf(notification), notification.id.hashCode(), builder.build())
+            NotificationManagerCompat.from(context).notify(TAG, notification.id.hashCode(), builder.build())
             true
         }.getOrDefault(false)
     }
 
     /** Withdraws a notification that was read or deleted elsewhere, so the tray stays truthful. */
-    fun cancel(context: Context, notification: Notification) {
-        NotificationManagerCompat.from(context).cancel(tagOf(notification), notification.id.hashCode())
+    fun cancel(context: Context, notification: Notification) = cancel(context, notification.id)
+
+    /**
+     * Withdraws one row's notification by its id.
+     *
+     * The tag is a constant, so the id alone is enough to find what was posted. It used to be
+     * derived from the row's type, which meant a withdrawal that had only an id -- the case when a
+     * row was read on another device and is no longer in the unread page -- built a tag nothing
+     * had been posted under and silently withdrew nothing.
+     */
+    fun cancel(context: Context, notificationId: String) {
+        NotificationManagerCompat.from(context).cancel(TAG, notificationId.hashCode())
     }
 
     fun cancelAll(context: Context) { NotificationManagerCompat.from(context).cancelAll() }
@@ -193,7 +203,14 @@ object HarmonyNotifications {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
-    private fun tagOf(notification: Notification): String = "harmony:" + notification.type
+    /**
+     * The tag every notification is posted under.
+     *
+     * A constant rather than the row's type: the id is what identifies the tray entry, and a
+     * withdrawal is often made with nothing but an id -- a row read on another device is gone from
+     * the unread page, so its type is not there to rebuild a tag from.
+     */
+    private const val TAG = "harmony"
 
     private fun createdAtMillis(iso: String): Long =
         runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrDefault(System.currentTimeMillis())

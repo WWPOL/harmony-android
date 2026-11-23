@@ -1,8 +1,10 @@
-# System bars, the collapsing rail, reaction gestures, server branding
+# System bars, the collapsing rail, reaction gestures, server branding, repeat notifications
 
-Four reports from using the built APK, and what each one turned out to be. They are recorded
+Reports from using the built APK, and what each one turned out to be. The first four are recorded
 together because three of them share a cause worth naming: **the app drew itself as if the
-phone's window were the whole screen and as if every stored image were an absolute URL.**
+phone's window were the whole screen and as if every stored image were an absolute URL.** The
+last two were found by using that same build: a preferences file that bricked the app, and a
+notification the tray would not stop repeating.
 
 ## 1. The rail sat under the status bar and the cutout
 
@@ -105,12 +107,78 @@ in the app could clear it. The store now replaces an undecodable file with an em
 cost is a sign-in, and what it buys is an app that starts. The reasoning and the alternatives
 are in [preferences-recovery.md](preferences-recovery.md).
 
+## 6. A sign-in notification kept coming back after it was dismissed
+
+The report: **a "New sign-in to your account" notice the person had already viewed days ago kept
+reappearing.** It was not one notification surviving a restart; it was one unread row being
+posted again, and alerting again, on every poll.
+
+`NotificationCoordinator.poll()` read the newest unread rows and posted **every one of them**:
+
+```kotlin
+for (notification in unread) HarmonyNotifications.post(context, notification)
+```
+
+`seen` was maintained but used only to decide what to *withdraw*. So a row that stayed unread on
+the server -- and dismissing a notification does not mark its row read -- was posted again every
+thirty seconds, for as long as the row was unread. Three separate faults made one report:
+
+1. **Every poll re-posted the whole unread page.** There was no memory of what had already been
+   shown, so the tray could not tell news from history.
+2. **Nothing recorded what existed before this device started watching.** A fresh install, or an
+   update that cleared the process, posted the entire unread backlog at once -- including the
+   sign-in notice from days earlier.
+3. **Tapping a notification never marked it read.** The deep link navigated, and the row stayed
+   unread, so the next poll called it new. The inbox screen marked a row clicked when it was
+   opened *there*; the tap path did not.
+
+There was a fourth, smaller one in the same code: `cancel` built its tag from the row's **type**
+(`"harmony:" + notification.type`), and a withdrawal made with only an id built `"harmony:"`,
+which matches nothing that was posted. A row read on another device was therefore never taken
+out of the tray.
+
+**Fix.** Delivery is now a decision with a memory, and the rule is a pure function,
+`NotificationDelivery.plan`, so every case is testable without a device:
+
+- **`DeliveryRecord`**, kept per instance and profile in `PreferencesDeliveryRecords`, holds the
+  rows already dealt with and the account's **cutoff** -- the moment this device started watching.
+  A row at or before the cutoff is history and is never delivered; a row already in the record is
+  never delivered twice, however long it stays unread.
+- The **first poll primes the account** and delivers nothing. That is what stops an install or an
+  update replaying the backlog.
+- A row read, expired, or gone from a page that holds the whole inbox **withdraws** its tray entry
+  and is forgotten. A page that was cut short withdraws only what it can see has been read,
+  because an old row can simply have been pushed off the page by newer ones.
+- **Tapping a notification marks it read and clicked** (`NotificationCoordinator.opened`, called
+  from `MainActivity.handle`), so a notice someone opened stops being new on the server too.
+- The tag is now the constant `"harmony"`, so a withdrawal needs only the id.
+- One poll runs at a time (`pollMutex`), so two interleaved polls cannot each deliver the rows the
+  other missed.
+
+The record is deliberately **not** the inbox's read state. A person can dismiss a notification
+without the row becoming read, and that dismissal has to be final; the record is the device's own
+memory of what it has already said, and it survives a restart, a sign-out and an APK update.
+
+**Alternatives rejected.** Marking the row read when a notification is posted would make
+"unread" mean "not yet seen on any device", which is not what the inbox means and would empty the
+inbox of everything the tray ever showed. Keeping the memory in the process (the old `seen`) is
+what the bug already was: a restart forgot it. Posting only rows newer than the newest seen row's
+timestamp fails on an instance whose clock or row order differs, and on two rows created in the
+same second; the cutoff is a moment, and an id that has been dealt with is remembered as such.
+
 ## How this is verified, and what is not
 
 - **JVM render and interaction tests** (`ShellRailTest`, `ReactionGestureTest`,
   `ServerBrandingRenderTest`) draw the real composables under Robolectric's native graphics,
   inject real touches, and assert pixels and node bounds. Each was mutation-checked: reverting
   the inset padding, the collapse rule, the gesture mapping or the bucket names fails them.
+- **Notification delivery** is pinned twice. `NotificationDeliveryTest` covers the rule as a pure
+  function: a fresh install delivers nothing, a days-old unread row is never delivered, a row is
+  delivered once, a row read elsewhere withdraws its entry, and an unreadable timestamp is not
+  news. `NotificationCoordinatorTest` drives the real coordinator against `FixtureInstance` and
+  reads the tray back from Robolectric's `NotificationManager`, so "not posted" means the system
+  would not have shown it. Both were mutation-checked: restoring the old "post every unread row"
+  rule fails seven of the fifteen.
 - **The branding test fetches over HTTP** from a local server that 404s the hyphenated bucket
   names, so a wrong bucket is a missing picture rather than a passing string comparison.
 - **Emulator evidence** is two runs, and they are worth different things.

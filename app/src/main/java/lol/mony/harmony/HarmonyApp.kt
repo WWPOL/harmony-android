@@ -18,7 +18,7 @@ class HarmonyApp : Application() {
      * had no channels at all.
      */
     val notifications: NotificationCoordinator by lazy {
-        NotificationCoordinator(this, container.auth) { rest -> NotificationRepository(rest) }
+        NotificationCoordinator(this, container.auth, { rest -> NotificationRepository(rest) })
     }
 
     override fun onCreate() {

@@ -63,6 +63,20 @@ data class Notification(
             )
         }
 
+    /**
+     * When the row was created, or null when its timestamp cannot be read.
+     *
+     * The column is a text timestamp from the instance, so a row written by an older service can
+     * carry something this build cannot parse. A null is treated as "age unknown" by delivery,
+     * which does not deliver it: guessing would put a row from an unknown day in the tray.
+     */
+    val createdInstant: java.time.Instant?
+        get() = runCatching { java.time.Instant.parse(createdAt) }.getOrNull()
+
+    /** Whether the row's own expiry has passed, so it is no longer something to notify about. */
+    fun hasExpired(now: java.time.Instant = java.time.Instant.now()): Boolean =
+        expiresAt?.let { runCatching { java.time.Instant.parse(it) }.getOrNull()?.isBefore(now) } ?: false
+
     val target: NotificationTarget?
         get() {
             if (type == "activitypub_follow" || isFollowRequest) {

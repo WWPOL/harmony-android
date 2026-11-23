@@ -72,6 +72,10 @@ class MainActivity : ComponentActivity() {
             else -> NotificationDestination.Chats
         }
         state.pendingDestination.value = destination
+        // The notification was tapped, so it has been seen: its row becomes read and its tray
+        // entry goes, whether or not the destination opens an inbox. Without this a tapped
+        // notice stayed unread on the server and the next poll treated it as new again.
+        (application as HarmonyApp).notifications.opened(param("notification"))
         // The intent is consumed, so a configuration change cannot replay it.
         intent.data = null
     }
