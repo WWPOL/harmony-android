@@ -19,17 +19,13 @@
 //     Attaches files to an existing release, replacing assets of the same name and
 //     nothing else.
 //
-// The same APK is also pushed to GitHub Packages as an OCI artifact by
-// scripts/publish-package.sh, which is what makes it a package on the repository as well
-// as a release asset.
-//
 // What this refuses to do, because a published download link is somebody's:
 //
 //   * touch a release whose tag is not a rolling tag it computed itself;
 //   * publish into a release at that tag that carries none of its own assets (somebody
 //     else's release, or an empty one), rather than rewriting what it says;
-//   * overwrite an asset this workflow did not upload (assets carry an ownership
-//     label, and only labelled ones are ever replaced or pruned);
+//   * overwrite an asset this workflow did not upload (ownership is read from the asset's
+//     uploader, and only this workflow's own files are ever replaced or pruned);
 //   * replace a build asset whose bytes differ, which would silently change what an
 //     existing name means (the new bytes go under a distinct name instead);
 //   * delete the stable `latest` name before the replacement has been uploaded;
@@ -41,7 +37,7 @@
 // release of a tag is the archive, and nothing here touches it.
 //
 // Environment: GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_API_URL, GITHUB_OUTPUT.
-import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -63,23 +59,43 @@ export const ROLLING_TAG_PREFIX = 'android-rolling-';
 // How many of a branch's own builds a rolling release keeps.
 export const DEFAULT_KEEP = 10;
 
-// Written into every asset's label by this workflow. An asset without it was put there
-// by somebody else, and is never replaced or deleted.
-export const OWNER = 'brapmony-android';
-export const ownerLabel = (sha256) => `${OWNER} sha256:${sha256}`;
-export function isOwned(asset) {
-  return typeof asset.label === 'string' && asset.label.startsWith(`${OWNER} `);
-}
-export function ownedSha256(asset) {
-  const m = /sha256:([0-9a-f]{64})/.exec(asset.label || '');
-  return m ? m[1] : null;
-}
+// The account GitHub attributes a workflow's uploads to. An asset uploaded by a workflow
+// carries this login, and one somebody attached to the release by hand carries theirs, so
+// it is how a file of a workflow's is told from a file of somebody else's. It is not on its
+// own proof that this workflow uploaded it -- another workflow in this repository uploads
+// with the same account -- so a name this workflow generates has to go with it.
+export const BOT_LOGIN = 'github-actions[bot]';
+// Releases published before this changed wrote an ownership label into every asset. GitHub
+// shows an asset's label **in place of its file name**, so those releases list
+// `brapmony-android sha256:…` where the download names should be: nothing writes a label
+// now, and the assets that already carry one are still read as this workflow's so they can
+// be replaced and pruned rather than left behind.
+export const LEGACY_OWNER = 'brapmony-android';
 // The asset names this workflow publishes: `Brapmony-<version>...` today, and
-// `Brapmony_Android_<version>...` from before the name scheme was flattened. Naming is
-// how these are told apart on a release whose assets predate the ownership label.
+// `Brapmony_Android_<version>...` from before the name scheme was flattened. Naming is how
+// these are told apart on a release whose assets predate the ownership label, and it is what
+// keeps a file another workflow uploaded from being taken for this one's.
 export function ownName(name) {
   return /^Brapmony[_-]/.test(name);
 }
+export function isOwned(asset) {
+  if (typeof asset?.label === 'string' && asset.label.startsWith(`${LEGACY_OWNER} `)) return true;
+  return asset?.uploader?.login === BOT_LOGIN && ownName(asset?.name);
+}
+
+// Whether the bytes GitHub already holds are the file in hand. GitHub computes a SHA-256
+// over every asset it stores and reports it as `digest`, so that is the comparison; the
+// byte count is the fallback for an API that does not report a digest (GitHub Enterprise
+// before it was added). Both are GitHub's, not this script's claim about itself.
+export function storedBytes(asset, sha256, size) {
+  const digest = typeof asset?.digest === 'string' ? asset.digest.trim().toLowerCase() : '';
+  if (digest) return digest === `sha256:${String(sha256).toLowerCase()}`;
+  return Number.isFinite(size) && asset?.size === size;
+}
+
+// The asset names this workflow publishes: `Brapmony-<version>...` today, and
+// `Brapmony_Android_<version>...` from before the name scheme was flattened. Naming is
+// how these are told apart on a release whose assets predate the ownership label.
 export function ownsAsset(asset) {
   return isOwned(asset) || ownName(asset.name);
 }
@@ -162,7 +178,7 @@ export function client({
   const headers = {
     authorization: `Bearer ${token}`,
     'x-github-api-version': '2022-11-28',
-    'user-agent': OWNER,
+    'user-agent': LEGACY_OWNER,
   };
 
   async function request(method, url, { body, accept = 'application/vnd.github+json', contentType } = {}) {
@@ -301,17 +317,22 @@ async function listAssets(gh, releaseId) {
 }
 
 // GitHub's upload endpoint replaces nothing: a second upload of a name that is already
-// there is a 422. Every upload here carries the ownership label, so a later run can tell
-// its own assets from anyone else's.
+// there is a 422.
+//
+// No label is sent. GitHub shows an asset's label **in place of its file name** on the
+// release page, so a label here made the release list `brapmony-android sha256:…` where
+// `Brapmony-latest.apk` should be, and a person looking for the APK found no file names at
+// all. The label was only ever this workflow's note to itself about which bytes an asset
+// held; GitHub's own `digest` says that, and says it without hiding the name.
 //
 // What GitHub stored is then compared with what was sent (checkAssetDigest): the digest in
 // the response is computed by GitHub over the bytes it holds, so a mismatch means the file
 // a downloader would get is not the file this run built.
-async function uploadFile(gh, { releaseId, file, name, label }) {
+async function uploadFile(gh, { releaseId, file, name }) {
   if (!existsSync(file)) throw new PublishError(`no such file: ${file}`);
   const release = await gh.json('GET', `/releases/${releaseId}`);
   const base = release.upload_url.replace(/\{.*\}$/, '');
-  const query = new URLSearchParams({ name, ...(label ? { label } : {}) });
+  const query = new URLSearchParams({ name });
   let asset;
   try {
     asset = await gh.json('POST', `${base}?${query}`, {
@@ -334,14 +355,12 @@ async function uploadFile(gh, { releaseId, file, name, label }) {
 // existing name resolves to.
 export async function publishBuild(gh, { releaseId, file, name, attempt = 1 }) {
   const sha256 = sha256File(file);
+  const size = statSync(file).size;
   const existing = (await listAssets(gh, releaseId)).filter((a) => a.name === name);
   if (existing.length) {
-    const same = existing.find((a) => ownedSha256(a) === sha256);
+    const same = existing.find((a) => storedBytes(a, sha256, size));
     if (same) {
-      // Already these bytes: nothing to upload, but GitHub's own digest of what is stored
-      // still has to be these bytes. A label is this workflow's claim; the digest is the
-      // registry's.
-      checkAssetDigest(same, sha256);
+      // Already these bytes, by GitHub's own digest of what it stores: nothing to upload.
       return { asset: same, uploaded: false, sha256, name };
     }
     if (!existing.every(isOwned)) {
@@ -351,10 +370,10 @@ export async function publishBuild(gh, { releaseId, file, name, attempt = 1 }) {
     // build's link keeps resolving to the earlier bytes.
     const suffix = `.r${attempt}`;
     const renamed = name.replace(/\.apk$/, `${suffix}.apk`);
-    const asset = await uploadFile(gh, { releaseId, file, name: renamed, label: ownerLabel(sha256) });
+    const asset = await uploadFile(gh, { releaseId, file, name: renamed });
     return { asset, uploaded: true, sha256, name: renamed };
   }
-  const asset = await uploadFile(gh, { releaseId, file, name, label: ownerLabel(sha256) });
+  const asset = await uploadFile(gh, { releaseId, file, name });
   return { asset, uploaded: true, sha256, name };
 }
 
@@ -362,18 +381,14 @@ export async function publishBuild(gh, { releaseId, file, name, attempt = 1 }) {
 // are uploaded under a staging name first, then the names are swapped by rename, and only
 // then is the previous file deleted. If anything fails before the swap, the previous
 // `latest` is still there and still downloadable.
-export async function replaceStable(gh, { releaseId, file, name, label }) {
+export async function replaceStable(gh, { releaseId, file, name }) {
   const assets = await listAssets(gh, releaseId);
   const current = assets.filter((a) => a.name === name);
   // Already these bytes: leave the asset alone, so a re-run changes nothing and the
-  // id a download link resolves through stays the same. The label, not the file's own
-  // hash, is what says which bytes are there: the checksum file's label names the APK.
-  if (current.length === 1 && current[0].label === label) {
-    // The label is this workflow's own claim about the bytes; GitHub's digest of the
-    // stored asset is the check that the claim is true, and is compared whenever it is
-    // reported. The expected digest is the local file's, so it holds for the checksum
-    // file as well as for the APK.
-    checkAssetDigest(current[0], sha256File(file));
+  // id a download link resolves through stays the same. What is compared is GitHub's own
+  // digest of the stored asset against the local file, so it holds for the checksum file
+  // as well as for the APK.
+  if (current.length === 1 && storedBytes(current[0], sha256File(file), statSync(file).size)) {
     return { asset: current[0], replaced: 0 };
   }
   for (const a of current) {
@@ -383,7 +398,7 @@ export async function replaceStable(gh, { releaseId, file, name, label }) {
   }
   const staging = `${name}.staging-${process.pid}`;
   const previous = `${name}.previous-${process.pid}`;
-  const uploaded = await uploadFile(gh, { releaseId, file, name: staging, label });
+  const uploaded = await uploadFile(gh, { releaseId, file, name: staging });
   try {
     const moved = [];
     for (const a of current) {
@@ -422,9 +437,39 @@ export async function replaceStable(gh, { releaseId, file, name, label }) {
   }
 }
 
+// Clears the ownership label off assets an earlier version of this workflow published.
+// GitHub shows a label in place of the file name, so those assets are listed as
+// `brapmony-android sha256:…` and a person looking for `Brapmony-latest.apk` finds no such
+// name on the page. The label is no longer needed -- ownership is read from the uploader --
+// so it is removed, and the read-back says whether it went: an API that ignores an empty
+// label leaves the name hidden, and the run says so instead of reporting a page that is
+// still unreadable.
+export async function clearLegacyLabels(gh, { releaseId, log = () => {} }) {
+  const cleared = [];
+  const stubborn = [];
+  for (const asset of await listAssets(gh, releaseId)) {
+    if (typeof asset.label !== 'string' || !asset.label.startsWith(`${LEGACY_OWNER} `)) continue;
+    if (!isOwned(asset)) continue;
+    await gh.json('PATCH', `/releases/assets/${asset.id}`, {
+      contentType: 'application/json',
+      body: JSON.stringify({ label: '' }),
+    });
+    cleared.push(asset.name);
+  }
+  if (!cleared.length) return { cleared, stubborn };
+  // Read back what the page will show, rather than trusting the request to have worked.
+  for (const asset of await listAssets(gh, releaseId)) {
+    if (cleared.includes(asset.name) && asset.label) stubborn.push(asset.name);
+  }
+  if (stubborn.length) {
+    log(`::warning::the label on ${stubborn.join(', ')} did not clear, so those assets still show a hash where their name should be. They are pruned like any other build.`);
+  }
+  return { cleared, stubborn };
+}
+
 // Deletes assets this workflow published under a name it no longer uses, so a download
 // does not stay under a name nothing updates. Only this workflow's own assets are ever
-// removed: an unlabelled file somebody attached by hand is left exactly where it is.
+// removed: a file somebody attached by hand is left exactly where it is.
 export async function retireAssets(gh, { releaseId, names = RETIRED_ASSETS }) {
   const retired = [];
   for (const asset of await listAssets(gh, releaseId)) {
@@ -437,8 +482,8 @@ export async function retireAssets(gh, { releaseId, names = RETIRED_ASSETS }) {
 }
 
 // Deletes the oldest of a rolling release's own builds, keeping [keep] newest. Only
-// assets this workflow uploaded under a versioned name are candidates: unlabelled assets
-// (attached by hand), the stable names, and the checksum are all left alone, and so is
+// assets this workflow uploaded under a versioned name are candidates: a file somebody
+// attached by hand, the stable names, and the checksum are all left alone, and so is
 // every other release.
 export async function pruneRollingAssets(gh, { releaseId, keep = DEFAULT_KEEP, protect = [] }) {
   if (!(keep > 0)) throw new PublishError(`--keep must be positive: ${keep}`);
@@ -457,6 +502,40 @@ export async function pruneRollingAssets(gh, { releaseId, keep = DEFAULT_KEEP, p
     pruned.push(a.name);
   }
   return pruned;
+}
+
+// A rolling tag names the newest build of a branch, so it moves with every publish. The
+// release page shows the commit its tag points at, and a tag left where the release was
+// first created would show the first build's commit beside assets from the newest one --
+// which is exactly what a person checks to know what they are downloading.
+//
+// Only a rolling tag is ever moved: a version tag is a fixed point, and this refuses to
+// touch one. The move is forced, because the old value is the one being replaced.
+export async function moveRollingTag(gh, { tag, commit }) {
+  if (!tag.startsWith(ROLLING_TAG_PREFIX)) {
+    throw new PublishError(`refusing to move ${tag}: not a rolling tag`);
+  }
+  if (!commit) throw new PublishError('a commit is required to move a rolling tag');
+  let current = null;
+  try {
+    current = await gh.json('GET', `/git/ref/tags/${tag}`);
+  } catch (error) {
+    // A release created from a branch rather than a tag has no tag ref yet; this makes one.
+    if (error.status !== 404) throw error;
+  }
+  if (current && current.object && current.object.sha === commit) return { moved: false, sha: commit };
+  if (current) {
+    await gh.json('PATCH', `/git/refs/tags/${tag}`, {
+      contentType: 'application/json',
+      body: JSON.stringify({ sha: commit, force: true }),
+    });
+    return { moved: true, sha: commit };
+  }
+  await gh.json('POST', '/git/refs', {
+    contentType: 'application/json',
+    body: JSON.stringify({ ref: `refs/tags/${tag}`, sha: commit }),
+  });
+  return { moved: true, created: true, sha: commit };
 }
 
 function required(values, keys) {
@@ -513,13 +592,24 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
     // The stable name is only touched once the run's own asset is safely there, so a
     // failed build upload cannot disturb the build people are already downloading.
     const sha256 = build.sha256;
-    await replaceStable(gh, { releaseId: id, file: values.apk, name: LATEST_ASSET, label: ownerLabel(sha256) });
+    await replaceStable(gh, { releaseId: id, file: values.apk, name: LATEST_ASSET });
     log(`Updated ${LATEST_ASSET} on ${tag}`);
     const checksum = stableText(`${sha256}  ${LATEST_ASSET}\n`, LATEST_SHA256_ASSET);
-    await replaceStable(gh, { releaseId: id, file: checksum, name: LATEST_SHA256_ASSET, label: ownerLabel(sha256) });
+    await replaceStable(gh, { releaseId: id, file: checksum, name: LATEST_SHA256_ASSET });
     log(`Updated ${LATEST_SHA256_ASSET} on ${tag}`);
+    // The tag is moved onto this build once everything it names is in place, so the page
+    // shows the commit these assets came from rather than the one the release was created
+    // at. A publish that failed before this point leaves the previous commit's tag alone.
+    let moved = null;
+    if (values.commit) {
+      const tagMove = await moveRollingTag(gh, { tag, commit: values.commit });
+      moved = tagMove.moved ? values.commit : null;
+      log(`${tagMove.moved ? 'Moved' : 'Kept'} tag ${tag} at ${values.commit}`);
+    }
     const retired = await retireAssets(gh, { releaseId: id });
     if (retired.length) log(`Retired ${retired.join(', ')} from ${tag}`);
+    const { cleared } = await clearLegacyLabels(gh, { releaseId: id, log });
+    if (cleared.length) log(`Cleared the old label from ${cleared.join(', ')}, so their names show again`);
     const pruned = await pruneRollingAssets(gh, {
       releaseId: id,
       keep: Number(values.keep ?? DEFAULT_KEEP),
@@ -529,7 +619,7 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
     if (process.env.GITHUB_OUTPUT) {
       appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\nrelease-id=${id}\nsha256=${sha256}\n`);
     }
-    return { id, tag, uploaded: build.uploaded ? build.name : null, sha256, pruned, retired, prerelease: !published };
+    return { id, tag, uploaded: build.uploaded ? build.name : null, sha256, pruned, retired, cleared, moved, prerelease: !published };
   }
 
   if (command === 'tag') {
@@ -562,14 +652,14 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       const name = basename(file);
       const same = assets.filter((a) => a.name === name);
       for (const a of same) {
-        // A tag's release can carry this name from a run before assets were labelled,
-        // which is still this workflow's own file; anything else is not.
+        // A tag's release can carry this name from an earlier run of this workflow, which
+        // is still its own file; anything else is not.
         if (!isOwned(a) && !ownName(a.name)) {
           throw new PublishError(`asset ${name} was not uploaded by this workflow; refusing to replace it`);
         }
         await gh.json('DELETE', `/releases/assets/${a.id}`);
       }
-      uploaded.push(await uploadFile(gh, { releaseId, file, name, label: ownerLabel(sha256File(file)) }));
+      uploaded.push(await uploadFile(gh, { releaseId, file, name }));
     }
     for (const a of uploaded) log(`Uploaded ${a.name} to release ${releaseId}`);
     return uploaded;

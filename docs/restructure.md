@@ -166,9 +166,10 @@ Two, where there were six.
 it, runs the unit tests and lint, names the APK, checks the package, version and signing
 certificate against the file itself, uploads it as an immutable per-run artifact, and publishes
 the newest build of each branch -- as the repository's release for the default branch, as a
-prerelease for any other, and as a package on GitHub Packages. The trust split is unchanged and
-is what the tests assert: the build job holds no write permission, and the publishing job has
-`contents: write` and `packages: write` and runs only on a push to this repository.
+prerelease for any other. The trust split is unchanged and is what the tests assert: the build
+job holds no write permission, and the publishing job has `contents: write` and runs only on a
+push to this repository. It published a container package as well until that was removed: an
+APK is not an image, and a package is not a download a phone can use.
 
 **`release.yml`** runs on a `v*` tag. It stamps `VERSION` from the tag, builds the release
 variant, names the APK for the signing state it actually carries, checks the package, version

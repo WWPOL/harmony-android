@@ -10,6 +10,9 @@ import { createHash } from 'node:crypto';
 const port = Number(process.argv[2] || 8099);
 const repo = process.env.GITHUB_REPOSITORY || 'WWPOL/brapmony';
 const releases = [];
+// Tag refs, by tag name: what a rolling tag points at. Empty here, because this stand-in
+// starts with no release; the first publish creates the tag it names.
+const refs = new Map();
 let nextId = 100;
 
 const server = http.createServer(async (req, res) => {
@@ -70,7 +73,11 @@ const server = http.createServer(async (req, res) => {
     const asset = {
       id: nextId++,
       name,
+      // The publisher sends no label, because GitHub shows one in place of the file name.
       label: url.searchParams.get('label') || '',
+      // A workflow's uploads are attributed to this account, and that is how the publisher
+      // tells its own files from ones somebody attached by hand.
+      uploader: { login: 'github-actions[bot]', type: 'Bot' },
       size: body.length,
       state: 'uploaded',
       // GitHub computes a SHA-256 over every asset it stores and reports it; the publisher
@@ -85,12 +92,20 @@ const server = http.createServer(async (req, res) => {
   }
   m = /^\/repos\/(.+)\/releases\/assets\/(\d+)$/.exec(url.pathname);
   if (m && req.method === 'PATCH') {
-    const { name } = JSON.parse(body.toString());
+    const payload = JSON.parse(body.toString());
     for (const r of releases) {
       const a = r.assets.find((x) => x.id === Number(m[2]));
       if (a) {
-        a.name = name;
-        console.log(`renamed asset ${a.id} to ${name}`);
+        if (payload.name !== undefined) {
+          a.name = payload.name;
+          console.log(`renamed asset ${a.id} to ${a.name}`);
+        }
+        // An empty label is how the ones an earlier version labelled stop hiding their
+        // names on the release page.
+        if (payload.label !== undefined) {
+          a.label = payload.label;
+          console.log(`labelled asset ${a.id} ${JSON.stringify(a.label)}`);
+        }
         return send(200, a);
       }
     }
@@ -100,6 +115,33 @@ const server = http.createServer(async (req, res) => {
     for (const r of releases) r.assets = r.assets.filter((a) => a.id !== Number(m[2]));
     console.log(`deleted asset ${m[2]}`);
     return send(204);
+  }
+  // The tag refs a rolling tag is moved with. A release created from a branch has no tag
+  // ref, which is a 404 here as it is on GitHub.
+  m = /^\/repos\/(.+)\/git\/ref\/tags\/(.+)$/.exec(url.pathname);
+  if (m && req.method === 'GET') {
+    const name = decodeURIComponent(m[2]);
+    return refs.has(name)
+      ? send(200, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: refs.get(name) } })
+      : send(404, { message: 'Not Found' });
+  }
+  m = /^\/repos\/(.+)\/git\/refs\/tags\/(.+)$/.exec(url.pathname);
+  if (m && req.method === 'PATCH') {
+    const name = decodeURIComponent(m[2]);
+    const payload = JSON.parse(body.toString());
+    if (!refs.has(name)) return send(422, { message: 'Reference does not exist' });
+    refs.set(name, payload.sha);
+    console.log(`moved tag ${name} to ${payload.sha}`);
+    return send(200, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
+  }
+  if (/\/git\/refs$/.test(url.pathname) && req.method === 'POST') {
+    const payload = JSON.parse(body.toString());
+    const name = String(payload.ref || '').replace(/^refs\/tags\//, '');
+    if (!name) return send(422, { message: 'ref is required' });
+    if (refs.has(name)) return send(422, { message: 'Reference already exists' });
+    refs.set(name, payload.sha);
+    console.log(`created tag ${name} at ${payload.sha}`);
+    return send(201, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
   }
   return send(404, { message: `unhandled ${req.method} ${url.pathname}` });
 });

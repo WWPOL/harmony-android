@@ -1,0 +1,18 @@
+BEFORE — what the page shows:
+   "brapmony-android sha256:baf1c5ee9cd9ff9890c84a6853cb1f233b8ab0dcfd32c5feb497a912573b9dce"
+   "brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d"
+   "brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d"
+   "brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d"
+   "brapmony-android sha256:baff2c7d57cdf9e0656b77f99dbf48a63c04da7b697b328e21536e31a100a47b"
+
+retired: (none)
+cleared: Brapmony-1.9.6-85332c5-debug.apk, Brapmony-1.9.6-e5b7aec-debug.apk, Brapmony_Android_V1.9.6_debug-main-606ab10.apk
+tag:     moved to abc1234
+
+AFTER — what the page shows:
+   "Brapmony-1.9.6-85332c5-debug.apk"
+   "Brapmony-1.9.6-e5b7aec-debug.apk"
+   "Brapmony_Android_V1.9.6_debug-main-606ab10.apk"
+   "Brapmony-1.9.6-abc1234-debug.apk"
+   "Brapmony-latest.apk"
+   "Brapmony-latest.apk.sha256"

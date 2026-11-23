@@ -36,12 +36,11 @@ client. Do not treat a green build as a claim of parity.
 
 # Download
 
-Every push to `main` publishes an installable APK as **the repository's release**, and the
-same file as a **package**. Either route downloads the newest build of `main`:
+Every push to `main` publishes an installable APK as **the repository's release**. That is
+the only place it is published, and the only route you need:
 
 **[Download the latest APK](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony-latest.apk)**
 · **[the release](https://github.com/WWPOL/harmony-android/releases/latest)**
-· **[the package](https://github.com/WWPOL/harmony-android/pkgs/container/harmony-android)**
 
 1. Open that link on the Android device and tap the downloaded file, or run
    `adb install -r Brapmony-latest.apk`.
@@ -68,10 +67,10 @@ exactly what is published where and which build installs over which.
 > The rolling release is a window on `main`, not an archive: it keeps the newest ten builds
 > of the branch and drops older ones. The version release of a tag is the archive.
 
-**What you downloaded, and which commit it came from.** Every APK published here -- on a
-release, as an artifact, or as a package -- carries a signed **build provenance attestation**.
-GitHub signs a statement that this exact file was produced by this repository's workflow at a
-particular commit, so the file can be checked without trusting the download page:
+**What you downloaded, and which commit it came from.** Every APK published here carries a
+signed **build provenance attestation**. GitHub signs a statement that this exact file was
+produced by this repository's workflow at a particular commit, so the file can be checked
+without trusting the download page:
 
 ```sh
 gh attestation verify Brapmony-latest.apk --repo WWPOL/harmony-android
@@ -85,26 +84,13 @@ gh attestation verify Brapmony-latest.apk --repo WWPOL/harmony-android \
   --source-digest <the commit>
 ```
 
-The package is attested the same way, by its manifest digest (the tags move, the digest does
-not). GitHub also computes a digest of every release asset it stores, which is a check of the
+GitHub also computes a digest of every release asset it stores, which is a check of the
 stored bytes that does not come from this build at all.
 
-**As a package.** GitHub Packages serves npm, Maven, Gradle, NuGet, RubyGems and container
-images, and has no APK registry, so the APK is published to the container registry as an OCI
-artifact: a file with metadata, not a container image. It appears under the repository's
-Packages, tagged with the branch, the version and the commit:
-
-```sh
-oras pull ghcr.io/wwpol/harmony-android:latest
-```
-
-GitHub creates a package **private** the first time it is published, whatever the
-repository's visibility is, and only a package admin can make it public — there is no API
-for it. The run says which it is and links the settings page when it is private, so the
-package is never described as a public download until it is one. Pulling a private package
-needs `GITHUB_TOKEN` or a token with `read:packages`. The release is the route that always
-works for a person installing the app; the package is the one a script can pull and pin to
-a commit.
+There is deliberately **no container package**. The APK is a file on a release, which is what
+a phone can download and install; pushing it to a container registry made a `docker pull`-style
+package appear on the repository for something that is not an image and that no phone can
+fetch, so that is gone.
 
 # Development
 ## Build
@@ -186,7 +172,7 @@ See [docs/builds.md](docs/builds.md#signing) for what each signing configuration
 | Screen-by-screen parity matrix | [docs/parity-matrix.md](docs/parity-matrix.md) |
 | Message body decoding and drawing | [docs/message-content.md](docs/message-content.md) |
 | Captured screens and logs | [docs/evidence/](docs/evidence/) |
-| What the published release and package look like | [docs/evidence/release/](docs/evidence/release/) |
+| The release page as it was, and the asset names the fix produces | [docs/evidence/release/](docs/evidence/release/) |
 | How the repository was restructured to hold the app alone | [docs/restructure.md](docs/restructure.md) |
 
 ## Contributing

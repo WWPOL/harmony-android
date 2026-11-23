@@ -1,11 +1,14 @@
 name: Android build and checks
 
 # The app. Every push builds it, whatever the branch, and publishes what it built: the
-# per-run APK as an Actions artifact, the newest build of each branch on a rolling
-# prerelease, and the same bytes as a package. Every published copy carries a signed
-# build-provenance attestation naming the commit it was built from, which `gh attestation
-# verify` checks. A version tag additionally puts the APK on that tag's release
-# (release.yml).
+# per-run APK as an Actions artifact, and the newest build of each branch on a rolling
+# release -- a release for the default branch, a prerelease for any other. Every published
+# copy carries a signed build-provenance attestation naming the commit it was built from,
+# which `gh attestation verify` checks. A version tag additionally puts the APK on that
+# tag's release (release.yml).
+#
+# The release is the only published copy. Nothing here pushes a container package: an APK
+# is not an image, and a package is not a download a phone can use.
 #
 # Trust: build and publish are separate jobs. The build job runs on pull requests too
 # and holds no write permission. The publish job has contents: write and runs only on a
@@ -48,9 +51,9 @@ permissions:
   contents: read
 
 env:
-  # The branch whose build is published as a release and tagged `latest` in the package.
-  # Every other branch's build is a prerelease, which the repository's Releases page and
-  # /releases/latest do not offer.
+  # The branch whose build is published as the repository's release. Every other branch's
+  # build is a prerelease, which the repository's Releases page and /releases/latest do not
+  # offer.
   DEFAULT_BRANCH: main
 
 jobs:
@@ -262,9 +265,12 @@ jobs:
 
   # Publishes the newest build of each branch, as a release of the default branch and as
   # a prerelease of any other. The default branch's is what the repository offers as its
-  # release -- the Releases box on the repository page and /releases/latest both reach a
-  # release and skip a prerelease -- and it is also pushed to GitHub Packages, so the app
-  # is a package on the repository as well as a file on a release.
+  # release: the Releases box on the repository page and /releases/latest both reach a
+  # release and skip a prerelease.
+  #
+  # A release is the whole of what this publishes. There is no package: an APK is not a
+  # container image, and a package would only be a second place to look for the same file,
+  # reachable with `oras` or `docker` rather than by tapping a link on a phone.
   #
   # What it publishes is attested: a signed build-provenance statement says which commit
   # and which workflow produced these bytes, and it is stored against the repository where
@@ -272,7 +278,7 @@ jobs:
   # is created here rather than in the build job because signing is a write, and the build
   # job runs on pull requests.
   publish:
-    name: Publish the release, the package and their provenance
+    name: Publish the release and its provenance
     needs: build
     # A push to a branch of this repository, and nothing else: a pull request from a fork
     # runs the build job only, with no token that can write.
@@ -286,18 +292,11 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      # Pushing to GitHub Packages needs this and nothing else of its own. It is granted
-      # on this job alone: the build job, which a pull request runs, holds no write
-      # permission at all.
-      packages: write
       # The provenance attestation: id-token mints the short-lived Sigstore signing
-      # certificate from this run's OIDC identity, attestations stores the signed
-      # statement against the repository, and artifact-metadata is what lets the package's
-      # attestation leave a storage record (the organization's Linked Artifacts page).
-      # None of the three is granted to the build job.
+      # certificate from this run's OIDC identity, and attestations stores the signed
+      # statement against the repository. Neither is granted to the build job.
       id-token: write
       attestations: write
-      artifact-metadata: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -305,12 +304,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
-      # The CLI that pushes an OCI artifact. GitHub Packages has no APK registry, so the
-      # APK is published to the container registry, and `oras` is the client that does
-      # that for a file rather than for a container image.
-      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
-        with:
-          version: 1.4.0
       # The artifact is read-only evidence of what the build job produced; publishing
       # reads it back rather than rebuilding, so the published bytes are the checked bytes.
       # The download is checked against the digest GitHub recorded when the build uploaded
@@ -344,6 +337,9 @@ jobs:
           fi
           # What the attestation in this job is made about, and what the summary links to.
           echo "apk=$apk" >> "$GITHUB_OUTPUT"
+          # The tag of the release this build goes on, from the one function that computes
+          # it, so the download link in the release's own body names the release it is on.
+          tag=$(node -e "import('./scripts/release.mjs').then(m => console.log(m.rollingTag(process.env.BRANCH)))")
           # The default branch's build is published as a release, which is what the
           # repository's Releases page and /releases/latest offer. Another branch's is a
           # prerelease: a branch build is not an offer to anybody.
@@ -352,6 +348,11 @@ jobs:
             --default-branch "$DEFAULT_BRANCH" --version "$VERSION" \
             --body "$(printf '%s\n' \
               "The newest build of \`$BRANCH\` for the Android client." \
+              "" \
+              "**[Download Brapmony-latest.apk](https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/Brapmony-latest.apk)**" \
+              "" \
+              "That link always names the newest build of this branch, so it can be bookmarked." \
+              "The assets below are the same file under its own name." \
               "" \
               "| | |" \
               "| --- | --- |" \
@@ -377,79 +378,29 @@ jobs:
               "of every stored asset, shown on this release's asset list and returned by the" \
               "API, so \`sha256sum -c Brapmony-latest.apk.sha256\` and the API's \`digest\`" \
               "should agree.")"
-      # The same APK, as a package: GitHub Packages serves no APK registry, so it goes to
-      # the container registry (ghcr.io) as an OCI artifact. This is what makes the build
-      # a package on the repository as well as a file on a release. The step reports the
-      # digest of the manifest it pushed, which is what the package's attestation is made
-      # about and what a puller can pin.
-      - name: Publish the package
-        id: package
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          PACKAGE_DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
-          VERSION: ${{ needs.build.outputs.version }}
-          COMMIT: ${{ github.sha }}
-        run: |
-          # One APK, already hash-checked against what the build reported. The package is
-          # pushed from those same bytes, so a package tag and a release asset of the same
-          # commit are the same file.
-          set -- android-apk/*.apk
-          if [ $# -ne 1 ] || [ ! -f "$1" ]; then
-            echo "::error::Expected one downloaded APK, found: $*"
-            exit 1
-          fi
-          bash scripts/publish-package.sh "$1" "$VERSION" "$COMMIT"
       # Provenance. The attestation is what binds these bytes to this commit: GitHub signs
       # a statement that this digest was produced by this workflow, in this repository, at
       # this commit, and keeps it where a downloader can check it. The subject is the APK
-      # itself, so the check works on the file a person downloads from the release or
-      # pulls from the package.
-      #
-      # `actions/attest` pushes the package's attestation to the registry itself, and reads
-      # the credentials for that from ~/.docker/config.json. The package push above logs in
-      # with `oras`, which writes exactly that file, so the order of these steps matters:
-      # this checks the file is there rather than letting the action fail with a message
-      # about a missing credential file.
-      - name: Check the registry credentials the attestation needs
-        run: |
-          if [ ! -s "$HOME/.docker/config.json" ]; then
-            echo '::error::no registry credentials at ~/.docker/config.json, so the package attestation cannot be pushed to the registry. The package step logs in with oras; this means it did not run, or ran without a token.'
-            exit 1
-          fi
+      # itself, so the check works on the file a person downloads.
       - name: Attest the APK's provenance
         id: attest-apk
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.publish.outputs.apk }}
-      # The same statement about the package, as the registry holds it: the subject is the
-      # manifest digest, so it survives the tags moving. It is attached to the package in
-      # the registry as well, and the storage record it creates is what lists the package
-      # on the organization's Linked Artifacts page.
-      - name: Attest the package's provenance
-        id: attest-package
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ${{ steps.package.outputs.image }}
-          subject-digest: ${{ steps.package.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: true
-      # The attestations are checked back from outside, the way a downloader checks them:
-      # by their signature, the repository and workflow they name, and the commit they were
-      # built from. A run that cannot produce an attestation that verifies fails here
-      # rather than publishing a summary that claims provenance it does not have.
+      # The attestation is checked back from outside, the way a downloader checks it: by
+      # its signature, the repository and workflow it names, and the commit it was built
+      # from. A run that cannot produce an attestation that verifies fails here rather than
+      # publishing a summary that claims provenance it does not have.
       #
       # A freshly created attestation can take a moment to be readable from the API, so
       # each check is retried a few times; anything else -- a signature that does not
       # verify, a different repository, workflow or commit -- is a failure that a retry
       # cannot fix, and it is retried anyway rather than parsed for, because the command's
       # exit status is the only thing this needs to know.
-      - name: Verify the attestations
+      - name: Verify the attestation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APK: ${{ steps.publish.outputs.apk }}
-          IMAGE: ${{ steps.package.outputs.image }}
-          DIGEST: ${{ steps.package.outputs.digest }}
           COMMIT: ${{ github.sha }}
           WORKFLOW: ${{ github.repository }}/.github/workflows/android.yml
         run: |
@@ -469,8 +420,7 @@ jobs:
             return 1
           }
           verify "$APK" "$(basename "$APK")"
-          verify "oci://$IMAGE@$DIGEST" "the package $DIGEST"
-          echo "- Verified the provenance of \`$(basename "$APK")\` and of the package \`$DIGEST\`: signed for commit \`$COMMIT\` by \`$WORKFLOW\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Verified the provenance of \`$(basename "$APK")\`: signed for commit \`$COMMIT\` by \`$WORKFLOW\`." >> "$GITHUB_STEP_SUMMARY"
       # The link people are given is the tag-specific one -- it names the release, which
       # a browser can follow whether or not the release is the repository's newest. This
       # step fetches it back over the same path a browser would and checks that what
@@ -528,10 +478,9 @@ jobs:
             echo ""
             echo "- [Brapmony-latest.apk](https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony-latest.apk) (newest build of this branch)"
             echo "- [The release](https://github.com/${{ github.repository }}/releases/tag/$tag)"
-            echo "- [The package](https://github.com/${{ github.repository }}/pkgs/container/${GITHUB_REPOSITORY#*/})"
             echo "- [This run's artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo "- [The commit it was built from](https://github.com/${{ github.repository }}/commit/$COMMIT)"
-            echo "- [The provenance attestations](https://github.com/${{ github.repository }}/attestations)"
+            echo "- [The provenance attestation](https://github.com/${{ github.repository }}/attestations)"
             echo ""
             echo "Debug-signed with the test key; not a production release."
           } >> "$GITHUB_STEP_SUMMARY"

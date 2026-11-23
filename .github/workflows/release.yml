@@ -1,7 +1,6 @@
 name: Release
 
-# Publishes the APK for a version tag, with a signed build-provenance attestation for the
-# APK and for the package it is also pushed to.
+# Publishes the APK for a version tag, with a signed build-provenance attestation for it.
 # Trigger: push a version tag (e.g. `git tag v1.9.6 && git push --tags`),
 # or run manually and pass an existing tag.
 on:
@@ -32,15 +31,11 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: write
-      # The tag's APK is published to GitHub Packages as well as attached to its release.
-      packages: write
-      # The tag's APK and package carry a signed build-provenance attestation, made from
-      # this run's OIDC identity and stored against the repository: id-token mints the
-      # signing certificate, attestations stores the statement, artifact-metadata lets the
-      # package's attestation leave a storage record.
+      # The tag's APK carries a signed build-provenance attestation, made from this run's
+      # OIDC identity and stored against the repository: id-token mints the signing
+      # certificate, attestations stores the statement.
       id-token: write
       attestations: write
-      artifact-metadata: write
     env:
       # Production signing is configured outside the tree. Absent, the build is
       # test-signed and its file name carries -debug, so a test-signed APK is never
@@ -233,24 +228,6 @@ jobs:
           fi
           ( cd "$(dirname "$apk")" && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256" )
           cat "$apk.sha256"
-      # The CLI that pushes an OCI artifact. GitHub Packages has no APK registry, so the
-      # APK is published to the container registry, and `oras` is the client that does
-      # that for a file rather than for a container image.
-      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
-        with:
-          version: 1.4.0
-      # The same APK, as a package, tagged with the version: this is what a version
-      # release leaves behind that can be found by version rather than by asset name. The
-      # step reports the digest of the manifest it pushed, which is what the package's
-      # attestation is made about.
-      - name: Publish the package
-        id: package
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
-        run: |
-          bash .ci/scripts/publish-package.sh "${{ steps.name.outputs.path }}" \
-            "${{ steps.version.outputs.version }}" "${{ github.sha }}" --version-release
       # A tag's release is created or found by this job alone, so nothing races it. Uploads
       # replace only the two names this workflow owns.
       - name: Create or find the release
@@ -285,45 +262,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.release.outputs.id }}
         run: node .ci/scripts/release.mjs upload --release-id "$RELEASE_ID" "${{ steps.name.outputs.path }}" "${{ steps.name.outputs.path }}.sha256"
-      # Provenance, for the same bytes the release and the package carry: the subject is
-      # the APK file, so the check works on what a person downloads. GitHub signs a
-      # statement that this digest was produced by this workflow, in this repository, at
-      # this tag's commit, and keeps it against the repository.
-      #
-      # The package's attestation is pushed to the registry by the action, which reads its
-      # credentials from ~/.docker/config.json -- the file the package step's `oras login`
-      # wrote. That is why the check below exists rather than a failure from inside the
-      # action.
-      - name: Check the registry credentials the attestation needs
-        run: |
-          if [ ! -s "$HOME/.docker/config.json" ]; then
-            echo '::error::no registry credentials at ~/.docker/config.json, so the package attestation cannot be pushed to the registry. The package step logs in with oras; this means it did not run, or ran without a token.'
-            exit 1
-          fi
+      # Provenance, for the same bytes the release carries: the subject is the APK file, so
+      # the check works on what a person downloads. GitHub signs a statement that this
+      # digest was produced by this workflow, in this repository, at this tag's commit, and
+      # keeps it against the repository.
       - name: Attest the APK's provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.name.outputs.path }}
-      # The package's, about the manifest digest the push reported, attached in the
-      # registry as well so it travels with the package.
-      - name: Attest the package's provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ${{ steps.package.outputs.image }}
-          subject-digest: ${{ steps.package.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: true
       # Read back from outside, as a downloader would: the signature, the repository, the
       # workflow and the commit are all checked, so a release whose attestation does not
       # verify fails here rather than being described as attested. Retried a few times,
       # because a freshly created attestation can take a moment to be readable from the
       # API; a statement that names something else fails all the same.
-      - name: Verify the attestations
+      - name: Verify the attestation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APK: ${{ steps.name.outputs.path }}
-          IMAGE: ${{ steps.package.outputs.image }}
-          DIGEST: ${{ steps.package.outputs.digest }}
           COMMIT: ${{ github.sha }}
           WORKFLOW: ${{ github.repository }}/.github/workflows/release.yml
         run: |
@@ -343,8 +298,7 @@ jobs:
             return 1
           }
           verify "$APK" "$(basename "$APK")"
-          verify "oci://$IMAGE@$DIGEST" "the package $DIGEST"
           {
-            echo "- Attested and verified the provenance of \`$(basename "$APK")\` and of the package \`$DIGEST\`: signed for commit \`$COMMIT\` by \`$WORKFLOW\`."
-            echo "- [The release](https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG) · [the package](https://github.com/$GITHUB_REPOSITORY/pkgs/container/${GITHUB_REPOSITORY#*/}) · [the attestations](https://github.com/$GITHUB_REPOSITORY/attestations)"
+            echo "- Attested and verified the provenance of \`$(basename "$APK")\`: signed for commit \`$COMMIT\` by \`$WORKFLOW\`."
+            echo "- [The release](https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG) · [the attestations](https://github.com/$GITHUB_REPOSITORY/attestations)"
           } >> "$GITHUB_STEP_SUMMARY"

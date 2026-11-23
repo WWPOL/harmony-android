@@ -21,10 +21,13 @@ import {
   LATEST_SHA256_ASSET,
   RETIRED_ASSETS,
   ROLLING_TAG_PREFIX,
+  BOT_LOGIN,
+  LEGACY_OWNER,
   client,
   ensureRollingRelease,
   ensureTagRelease,
   isPublishedRelease,
+  moveRollingTag,
   pruneRollingAssets,
   publishBuild,
   releaseTitle,
@@ -32,7 +35,6 @@ import {
   retireAssets,
   rollingTag,
   rollingName,
-  ownerLabel,
 } from './release.mjs';
 
 const run = promisify(execFile);
@@ -40,10 +42,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const OWNER_REPO = 'acme/harmony-android';
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 
-// Release REST subset: list/create/get releases, list assets, upload with a name and
-// label, rename (PATCH) and delete assets. Two items per page, so pagination is
-// exercised. failUploads makes an upload whose name matches fail with a 500, which is how
-// a network or quota failure during a publish is reproduced.
+// Release REST subset: list/create/get releases, list assets, upload with a name, rename
+// (PATCH) and delete assets, and the tag refs a rolling tag is moved with. Two items per
+// page, so pagination is exercised. failUploads makes an upload whose name matches fail
+// with a 500, which is how a network or quota failure during a publish is reproduced.
 // Every stand-in server this file starts. `fetch` keeps its connections alive, so a plain
 // `server.close()` would wait for a socket nobody is going to close; the suite closes them
 // itself, and each server is unref'd so a test that forgets cannot hold the process open.
@@ -60,10 +62,14 @@ const fails = (matcher, name) =>
 
 async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUploads = null } = {}) {
   const releases = structuredClone(seed);
+  // Tag refs, by tag name: what a rolling tag points at. Seeded from a release's own tag
+  // so a release that exists has the ref it would have on GitHub.
+  const refs = new Map();
+  for (const r of releases) if (r.tag_name) refs.set(r.tag_name, r.target_commitish || 'f'.repeat(40));
   const calls = [];
   // `digests: false` makes the stand-in answer without a digest, the way an API that does
   // not model the field does; a test then sees that a publish still works.
-  const state = { failUploads, corruptUploads, digests: true };
+  const state = { failUploads, corruptUploads, digests: true, uploader: null, ignoresLabel: false };
   let nextId = 900;
   const server = http.createServer(async (req, res) => {
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -71,7 +77,7 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
-    calls.push({ method: req.method, path: url.pathname, name: url.searchParams.get('name') });
+    calls.push({ method: req.method, path: url.pathname, name: url.searchParams.get('name'), label: url.searchParams.get('label') });
     const send = (status, data, headers = {}) => {
       res.writeHead(status, { 'content-type': 'application/json', ...headers });
       res.end(data === undefined ? '' : JSON.stringify(data));
@@ -132,7 +138,12 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
       const asset = {
         id: nextId++,
         name,
+        // No label: this workflow does not send one, because GitHub shows a label in place
+        // of the file name. An asset uploaded through this API is attributed to the account
+        // the token belongs to, which is what ownership is read from; `state.uploader`
+        // makes an upload somebody else's, the way a file attached by hand is.
         label: url.searchParams.get('label') || '',
+        uploader: state.uploader ?? { login: BOT_LOGIN, type: 'Bot' },
         size: body.length,
         state: 'uploaded',
         // GitHub computes a SHA-256 over every asset it stores and reports it; the
@@ -153,14 +164,20 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
     }
     m = match(new RegExp(`^/repos/${OWNER_REPO}/releases/assets/(\\d+)$`));
     if (m && req.method === 'PATCH') {
-      const { name } = JSON.parse(body.toString());
+      const payload = JSON.parse(body.toString());
       for (const r of releases) {
         const a = r.assets.find((x) => x.id === Number(m[1]));
         if (a) {
-          if (r.assets.some((x) => x.name === name && x.id !== a.id)) {
-            return send(422, { message: 'Validation Failed', errors: [{ code: 'already_exists' }] });
+          if (payload.name !== undefined) {
+            if (r.assets.some((x) => x.name === payload.name && x.id !== a.id)) {
+              return send(422, { message: 'Validation Failed', errors: [{ code: 'already_exists' }] });
+            }
+            a.name = payload.name;
           }
-          a.name = name;
+          // GitHub takes an empty label as "clear it", which is how the assets an earlier
+          // version labelled stop hiding their names. `state.ignoresLabel` models an API
+          // that leaves the label where it was, which the publisher must report.
+          if (payload.label !== undefined && !state.ignoresLabel) a.label = payload.label;
           return send(200, a);
         }
       }
@@ -169,6 +186,35 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
     if (m && req.method === 'DELETE') {
       for (const r of releases) r.assets = r.assets.filter((a) => a.id !== Number(m[1]));
       return send(204);
+    }
+    // The tag endpoints the publisher moves a rolling tag with. A ref is
+    // `refs/tags/<name>`; the object it points at is the commit. A release created from a
+    // branch has no tag ref, which is a 404 here as it is on GitHub.
+    m = match(/^\/repos\/[^/]+\/[^/]+\/git\/ref\/tags\/(.+)$/);
+    if (m && req.method === 'GET') {
+      const ref = refs.get(decodeURIComponent(m[1]));
+      return ref
+        ? send(200, { ref: `refs/tags/${decodeURIComponent(m[1])}`, object: { type: 'commit', sha: ref } })
+        : send(404, { message: 'Not Found' });
+    }
+    m = match(/^\/repos\/[^/]+\/[^/]+\/git\/refs\/tags\/(.+)$/);
+    if (m && req.method === 'PATCH') {
+      const name = decodeURIComponent(m[1]);
+      const payload = JSON.parse(body.toString());
+      if (!refs.has(name)) return send(422, { message: 'Reference does not exist' });
+      if (!payload.force && refs.get(name) !== payload.sha) {
+        return send(422, { message: 'Update is not a fast forward' });
+      }
+      refs.set(name, payload.sha);
+      return send(200, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
+    }
+    if (url.pathname.endsWith('/git/refs') && req.method === 'POST') {
+      const payload = JSON.parse(body.toString());
+      const name = String(payload.ref || '').replace(/^refs\/tags\//, '');
+      if (!name) return send(422, { message: 'ref is required' });
+      if (refs.has(name)) return send(422, { message: 'Reference already exists' });
+      refs.set(name, payload.sha);
+      return send(201, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
     }
     return send(404, { message: `unhandled ${req.method} ${url.pathname}` });
   });
@@ -181,6 +227,7 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
   return {
     url,
     releases,
+    refs,
     calls,
     state,
     ...client({ token: 'test-token', repository: OWNER_REPO, apiUrl: url }),
@@ -285,9 +332,13 @@ test('a publish creates one release and uploads the build plus the stable names'
       LATEST_ASSET,
       LATEST_SHA256_ASSET,
     ].sort());
-    // Every asset this workflow uploaded says so, and says which bytes it holds.
+    // No asset carries a label: GitHub shows a label in place of the file name, so a
+    // labelled asset is one a person cannot find by its name on the release page.
+    for (const a of release.assets) {
+      assert.equal(a.label, '', `${a.name} must have no label, or its name is hidden`);
+      assert.equal(a.uploader.login, BOT_LOGIN, 'every upload is attributed to the workflow');
+    }
     const expected = sha(readFileSync(ws.apk));
-    for (const a of release.assets) assert.equal(a.label, ownerLabel(expected));
     const stable = release.assets.find((a) => a.name === LATEST_ASSET);
     assert.equal(stable.content, release.assets.find((a) => a.name.endsWith('-abc1234-debug.apk')).content);
     const checksum = release.assets.find((a) => a.name === LATEST_SHA256_ASSET);
@@ -368,13 +419,16 @@ test('an asset this workflow did not upload is never replaced', async () => {
   try {
     const gh = await fakeGitHub();
     const { id } = await seedRolling(gh);
-    // Somebody attached a file under the stable name by hand.
+    // Somebody attached a file under the stable name by hand: it carries their account, not
+    // the workflow's.
+    gh.state.uploader = { login: 'a-person', type: 'User' };
     await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(LATEST_ASSET)}`, {
       body: Buffer.from('hand made'),
       contentType: 'application/octet-stream',
     });
+    gh.state.uploader = null;
     await assert.rejects(
-      replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET, label: ownerLabel(sha(readFileSync(ws.apk))) }),
+      replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET }),
       /was not uploaded by this workflow; refusing to replace it/,
     );
     const asset = gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
@@ -391,10 +445,12 @@ test('a collision with a foreign build name is refused rather than overwritten',
     const gh = await fakeGitHub();
     const { id } = await seedRolling(gh);
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
+    gh.state.uploader = { login: 'a-person', type: 'User' };
     await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
       body: Buffer.from('not ours'),
       contentType: 'application/octet-stream',
     });
+    gh.state.uploader = null;
     await assert.rejects(
       publishBuild(gh, { releaseId: id, file: ws.apk, name }),
       /was not uploaded by this workflow; refusing to replace it/,
@@ -484,7 +540,8 @@ test('the asset GitHub stored is checked against the file that was uploaded', as
 // The digest is compared, not recorded: an API that reports none leaves nothing to
 // compare, and the upload is accepted as it came back. GitHub reports one for every
 // asset, so this is what keeps the check from becoming a failure of the publish on a
-// server that does not model it (an older GitHub Enterprise, the local stand-in).
+// server that does not model it (an older GitHub Enterprise, the local stand-in). The
+// byte count is what is left to compare then, and it is GitHub's too.
 test('a stored asset without a digest is not a failure', async () => {
   const ws = workspace();
   try {
@@ -492,7 +549,7 @@ test('a stored asset without a digest is not a failure', async () => {
     gh.state.digests = false;
     const { id } = await seedRolling(gh);
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
-    const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(ownerLabel(sha(readFileSync(ws.apk))))}`, {
+    const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
       body: readFileSync(ws.apk),
       contentType: 'application/octet-stream',
     });
@@ -502,12 +559,10 @@ test('a stored asset without a digest is not a failure', async () => {
     const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name });
     assert.equal(build.uploaded, false);
     assert.equal(build.asset.id, uploaded.id);
-    // The stable name, too: the label says which bytes are there, and no digest is
-    // reported to contradict it.
-    const label = ownerLabel(sha(readFileSync(ws.apk)));
-    const stable = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET, label });
+    // The stable name, too: the same bytes and no digest to contradict it.
+    const stable = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET });
     assert.ok(stable.asset, 'the stable name was published');
-    const replaced = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET, label });
+    const replaced = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET });
     assert.equal(replaced.replaced, 0, 'a second call is a no-op, as a re-run must be');
     assert.equal(replaced.asset.id, stable.asset.id, 'the stable asset is the same one, not a new upload');
     await gh.close();
@@ -516,28 +571,35 @@ test('a stored asset without a digest is not a failure', async () => {
   }
 });
 
-// A label is this workflow's claim about the bytes; GitHub's digest is the registry's.
-// A re-run that finds its own label but different stored bytes must not report success.
-test('a re-run whose stored bytes are not the label is refused', async () => {
+// A re-run finds its own asset by name and compares it with the file in hand using
+// GitHub's digest of the stored bytes. When they differ, the bytes already published are
+// not the ones this run built, so the publish must not report "kept": the new bytes go
+// under their own name, and the name a link already points at keeps resolving to what it
+// resolved to before.
+test('a re-run whose stored bytes are not the build gets its own name, not a silent success', async () => {
   const ws = workspace();
   try {
     const gh = await fakeGitHub();
     const { id } = await seedRolling(gh);
-    const sha256 = sha(readFileSync(ws.apk));
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
-    const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(ownerLabel(sha256))}`, {
+    const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
       body: readFileSync(ws.apk),
       contentType: 'application/octet-stream',
     });
-    assert.equal(uploaded.label, ownerLabel(sha256), 'the stored asset claims these bytes');
-    // What is stored is not what the label claims: the digest GitHub computed says so.
-    // The asset list the publisher reads is where the digest comes from, so the stored
-    // asset is what carries the wrong one.
+    assert.equal(uploaded.uploader.login, BOT_LOGIN, 'the stored asset is this workflow\'s');
+    // What is stored is not what this run built: the digest GitHub computed says so. The
+    // asset list the publisher reads is where the digest comes from.
     gh.releases[0].assets.find((a) => a.id === uploaded.id).digest = `sha256:${'c'.repeat(64)}`;
-    await assert.rejects(
-      publishBuild(gh, { releaseId: id, file: ws.apk, name }),
-      /refusing to publish it/,
-    );
+    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name, attempt: 2 });
+    assert.equal(build.uploaded, true, 'the bytes in hand are published, not assumed to be there');
+    assert.equal(build.name, 'Brapmony-1.9.6-abc1234-debug.r2.apk', 'under a name of their own');
+    // The earlier name was not replaced, so whatever a link to it resolves to still does.
+    const earlier = gh.releases[0].assets.find((a) => a.id === uploaded.id);
+    assert.equal(earlier.name, name);
+    assert.equal(earlier.content, uploaded.content);
+    // And GitHub's digest of the new asset is the file that was uploaded.
+    const fresh = gh.releases[0].assets.find((a) => a.name === build.name);
+    assert.equal(fresh.digest, `sha256:${sha(readFileSync(ws.apk))}`);
     await gh.close();
   } finally {
     await ws.cleanup();
@@ -548,16 +610,16 @@ test('pruning keeps the newest builds and only ever deletes this workflow own as
   const gh = await fakeGitHub();
   try {
     const { id } = await seedRolling(gh);
-    const label = ownerLabel('a'.repeat(64));
     for (let i = 0; i < 12; i += 1) {
       const name = `Brapmony-1.9.6-${String(i).padStart(7, '0')}-debug.apk`;
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(label)}`, {
+      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
         body: Buffer.from(`build ${i}`),
         contentType: 'application/octet-stream',
       });
     }
     // A hand-attached APK, the stable names, the retired names, and a stray file: none is
-    // a pruning candidate.
+    // a pruning candidate. They are attached by a person, not uploaded by the workflow.
+    gh.state.uploader = { login: 'a-person', type: 'User' };
     for (const name of ['Brapmony-1.9.6-handmade.apk', LATEST_ASSET, LATEST_SHA256_ASSET,
                         ...RETIRED_ASSETS, 'notes.txt']) {
       await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
@@ -565,6 +627,7 @@ test('pruning keeps the newest builds and only ever deletes this workflow own as
         contentType: 'application/octet-stream',
       });
     }
+    gh.state.uploader = null;
     const pruned = await pruneRollingAssets(gh, { releaseId: id, keep: 10 });
     assert.equal(pruned.length, 2);
     assert.deepEqual(pruned.sort(), [
@@ -582,19 +645,60 @@ test('pruning keeps the newest builds and only ever deletes this workflow own as
   }
 });
 
+// Ownership without a label: the uploader says a workflow put the file there, and the name
+// says which workflow. The account alone is not enough -- every workflow in this repository
+// uploads as the same bot -- so a file another workflow uploaded must not be pruned or
+// replaced by this one, even though it is a bot's.
+test('a bot upload under a name this workflow does not generate is not its own', async () => {
+  const gh = await fakeGitHub();
+  const ws = workspace();
+  try {
+    const { id } = await seedRolling(gh);
+    // Uploaded by a workflow (so by the bot), but not a name this one ever publishes.
+    for (const name of ['Release-Tool-1.0.0.apk', 'checksums.txt']) {
+      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
+        body: Buffer.from('another workflow\'s file'),
+        contentType: 'application/octet-stream',
+      });
+    }
+    // Fill the window so pruning has work to do.
+    for (let i = 0; i < 12; i += 1) {
+      const name = `Brapmony-1.9.6-${String(i).padStart(7, '0')}-debug.apk`;
+      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
+        body: Buffer.from(`build ${i}`),
+        contentType: 'application/octet-stream',
+      });
+    }
+    const pruned = await pruneRollingAssets(gh, { releaseId: id, keep: 10 });
+    assert.equal(pruned.length, 2);
+    const names = gh.releases[0].assets.map((a) => a.name);
+    for (const kept of ['Release-Tool-1.0.0.apk', 'checksums.txt']) {
+      assert.ok(names.includes(kept), `${kept} belongs to another workflow and must survive pruning`);
+    }
+    // And the same rule holds when it is a name this workflow would replace.
+    await assert.rejects(
+      publishBuild(gh, { releaseId: id, file: ws.apk, name: 'Release-Tool-1.0.0.apk' }),
+      /was not uploaded by this workflow; refusing to replace it/,
+    );
+  } finally {
+    await ws.cleanup();
+    await gh.close();
+  }
+});
+
 // The names an earlier version of this workflow published under are retired, so a
 // download does not sit under a name the documentation no longer mentions, holding bytes
 // nothing updates. Only this workflow's own assets are removed: a file somebody attached
 // by hand is never deleted, whatever it is called.
 //
 // The fixture is the release `main` actually had before this change, asset for asset and
-// label for label (read from the GitHub API): the two old stable names and one old build.
-// This is the first push after the change merges, so the result is what a downloader will
-// find there.
+// label for label (read from the GitHub API): the two old stable names and one old build,
+// and the labelled assets the labelled publish left. This is the first push after the
+// change merges, so the result is what a downloader will find there.
 test('the first publish after the change turns the old release into the new one', async () => {
   const ws = workspace();
   try {
-    const old = ownerLabel('b'.repeat(64));
+    const old = `${LEGACY_OWNER} sha256:${'b'.repeat(64)}`;
     const gh = await fakeGitHub({
       releases: [{
         id: 453200307,
@@ -603,10 +707,13 @@ test('the first publish after the change turns the old release into the new one'
         body: 'Rolling build of `main` for the Android client.',
         draft: false,
         prerelease: true,
+        target_commitish: '606ab10ff2c37b983d482607303d53d19ff31845',
         assets: [
           { id: 1, name: 'Brapmony_Android_latest.apk', label: old, size: 9, state: 'uploaded' },
           { id: 2, name: 'Brapmony_Android_latest.apk.sha256', label: old, size: 9, state: 'uploaded' },
           { id: 3, name: 'Brapmony_Android_V1.9.6_debug-main-606ab10.apk', label: old, size: 9, state: 'uploaded' },
+          // The labelled assets the release has today: their names are hidden on the page.
+          { id: 4, name: 'Brapmony-1.9.6-85332c5-debug.apk', label: old, size: 9, state: 'uploaded' },
         ],
       }],
     });
@@ -623,6 +730,7 @@ test('the first publish after the change turns the old release into the new one'
     // The names it published are gone; the new ones are there.
     const names = release.assets.map((a) => a.name).sort();
     assert.deepEqual(names, [
+      'Brapmony-1.9.6-85332c5-debug.apk',
       'Brapmony-1.9.6-abc1234-debug.apk',
       LATEST_ASSET,
       LATEST_SHA256_ASSET,
@@ -632,7 +740,13 @@ test('the first publish after the change turns the old release into the new one'
     ]);
     assert.match(stdout, /Retired Brapmony_Android_latest\.apk, Brapmony_Android_latest\.apk\.sha256/);
     assert.match(stdout, /Updated android-rolling-main: prerelease, name, body/);
-    // The bytes under the new stable name are this build's.
+    // Every asset on the page shows its own name, including the ones the labelled publish
+    // left there: that is what was wrong with the page, and it is what this fixes.
+    for (const a of release.assets) assert.equal(a.label, '', `${a.name} still has a label, so its name is hidden`);
+    assert.match(stdout, /Cleared the old label from .*Brapmony-1\.9\.6-85332c5-debug\.apk/);
+    // And the tag names the commit these assets came from, not the one the release was
+    // created at.
+    assert.equal(gh.refs.get(`${ROLLING_TAG_PREFIX}main`), 'abc1234');
     const stable = release.assets.find((a) => a.name === LATEST_ASSET);
     assert.equal(stable.content, release.assets.find((a) => a.name.endsWith('-abc1234-debug.apk')).content);
   } finally {
@@ -645,18 +759,19 @@ test('the previous stable names are retired, and nothing else is', async () => {
   try {
     const gh = await fakeGitHub();
     const { id } = await seedRolling(gh);
-    const label = ownerLabel('b'.repeat(64));
     for (const name of RETIRED_ASSETS) {
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(label)}`, {
+      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
         body: Buffer.from('stale'),
         contentType: 'application/octet-stream',
       });
     }
-    // A hand-attached file under a retired-looking name: not labelled, so not ours.
+    // A hand-attached file under a retired-looking name: attached by a person, so not ours.
+    gh.state.uploader = { login: 'a-person', type: 'User' };
     await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent('Brapmony_Android_latest_handmade.apk')}`, {
       body: Buffer.from('hand made'),
       contentType: 'application/octet-stream',
     });
+    gh.state.uploader = null;
     const { stdout } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
     assert.match(stdout, new RegExp(`Retired ${RETIRED_ASSETS.map((n) => n.replace(/\./g, '\\.')).join(', ')}`));
     const names = gh.releases[0].assets.map((a) => a.name);
@@ -672,12 +787,15 @@ test('a retired name that is not this workflow\'s is refused, not deleted', asyn
   const gh = await fakeGitHub();
   try {
     const { id } = await seedRolling(gh);
+    // A person attached these under the retired names, not the workflow.
+    gh.state.uploader = { login: 'a-person', type: 'User' };
     for (const name of RETIRED_ASSETS) {
       await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
         body: Buffer.from('somebody else put this here'),
         contentType: 'application/octet-stream',
       });
     }
+    gh.state.uploader = null;
     const retired = await retireAssets(gh, { releaseId: id });
     assert.deepEqual(retired, []);
     const names = gh.releases[0].assets.map((a) => a.name);
@@ -813,6 +931,109 @@ test('a failed publish does not change what the release says', async () => {
     assert.equal(release.body, 'the build that is there');
   } finally {
     await ws.cleanup();
+  }
+});
+
+// GitHub shows an asset's label **in place of its file name** on the release page. A
+// labelled asset is therefore one a person cannot find by name: the live release listed
+// `brapmony-android sha256:baf1c5…` five times and no `Brapmony-latest.apk` at all, which
+// is the whole of "the apk doesn't seem to be showing up". Nothing this workflow uploads
+// may carry a label, and the ones an earlier version labelled have it cleared.
+test('no asset this workflow publishes carries a label, so every name is visible', async () => {
+  const ws = workspace();
+  try {
+    const legacy = `${LEGACY_OWNER} sha256:${'d'.repeat(64)}`;
+    const gh = await fakeGitHub({
+      releases: [{
+        id: 71,
+        tag_name: `${ROLLING_TAG_PREFIX}master`,
+        name: 'Android (rolling) master',
+        draft: false,
+        prerelease: true,
+        assets: [{ id: 7101, name: 'Brapmony-1.9.6-0ldc0de-debug.apk', label: legacy, size: 9, state: 'uploaded' }],
+      }],
+    });
+    await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
+    const release = gh.releases[0];
+    for (const a of release.assets) {
+      assert.equal(a.label, '', `${a.name} carries a label, which hides its name on the page`);
+    }
+    // And the name that was hidden is readable again.
+    assert.ok(
+      release.assets.some((a) => a.name === 'Brapmony-1.9.6-0ldc0de-debug.apk'),
+      'the earlier build is still there, now under a visible name',
+    );
+    // Nothing the publisher sends asks for a label in the first place.
+    const uploads = gh.calls.filter((c) => c.method === 'POST' && c.name);
+    assert.ok(uploads.length, 'the publish uploaded something');
+    for (const call of uploads) assert.equal(call.label, null, `${call.name} was uploaded with a label`);
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// A label that an API refuses to clear cannot be fixed by this workflow, but it must not be
+// reported as fixed either: the run says the names are still hidden rather than publishing
+// a summary that says the page is readable.
+test('a label that will not clear is reported rather than passed over', async () => {
+  const ws = workspace();
+  try {
+    const legacy = `${LEGACY_OWNER} sha256:${'e'.repeat(64)}`;
+    const gh = await fakeGitHub({
+      releases: [{
+        id: 72,
+        tag_name: `${ROLLING_TAG_PREFIX}master`,
+        name: 'Android (rolling) master',
+        draft: false,
+        prerelease: true,
+        assets: [{ id: 7201, name: 'Brapmony-1.9.6-0ldc0de-debug.apk', label: legacy, size: 9, state: 'uploaded' }],
+      }],
+    });
+    gh.state.ignoresLabel = true;
+    const { stdout } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
+    assert.match(stdout, /::warning::the label on Brapmony-1\.9\.6-0ldc0de-debug\.apk did not clear/);
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// The release page shows the commit its tag points at. A rolling tag left where the
+// release was created would name the first build's commit beside the newest build's
+// assets, so every publish moves it.
+test('a publish moves the rolling tag onto the commit it built', async () => {
+  const ws = workspace();
+  try {
+    const first = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234']);
+    assert.equal(first.gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'abc1234', 'the tag names this build');
+    assert.match(first.stdout, /Moved tag android-rolling-master at abc1234/);
+    // The next build moves it again.
+    const second = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'def5678'], { gh: first.gh });
+    assert.equal(second.gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'def5678');
+    // A re-run of the same commit leaves it where it is, and says so.
+    const again = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'def5678'], { gh: first.gh });
+    assert.equal(again.gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'def5678');
+    assert.match(again.stdout, /Kept tag android-rolling-master at def5678/);
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+test('only a rolling tag is ever moved, and a version tag is refused', async () => {
+  const gh = await fakeGitHub({ releases: [versionRelease()] });
+  try {
+    await assert.rejects(
+      moveRollingTag(gh, { tag: 'v1.9.6', commit: 'abc1234' }),
+      /refusing to move v1\.9\.6: not a rolling tag/,
+    );
+    await assert.rejects(
+      moveRollingTag(gh, { tag: `${ROLLING_TAG_PREFIX}master`, commit: '' }),
+      /a commit is required/,
+    );
+    const before = gh.refs.get('v1.9.6');
+    assert.equal(before, 'f'.repeat(40), 'the version tag was there before');
+    assert.equal(gh.refs.get('v1.9.6'), before, 'and the version tag was not created or moved');
+  } finally {
+    await gh.close();
   }
 });
 

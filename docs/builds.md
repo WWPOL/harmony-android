@@ -1,9 +1,12 @@
 # Builds
 
 How the app is built and where its APKs are published: every-push artifacts, a release of
-the default branch and a prerelease of any other, the APK on each version tag, the same APK
-as a package, the signed provenance that binds each of them to its commit, what is signed
-with what, and which build updates which.
+the default branch and a prerelease of any other, the APK on each version tag, the signed
+provenance that binds each of them to its commit, what is signed with what, and which build
+updates which.
+
+There is one place an APK is published for people: **a release**. Nothing is pushed to a
+container registry; see [There is no package](#there-is-no-package).
 
 ## Names
 
@@ -42,8 +45,7 @@ rather than leave an older one standing.
 | Actions artifact `Brapmony-<version>-<sha7>-debug` | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 90 days, never overwritten |
 | Release `android-rolling-main` (the default branch) | This run's APK under its own name, plus `Brapmony-latest.apk` and that file's `.sha256` | The release stays; builds older than the newest ten of that branch are pruned |
 | Prerelease `android-rolling-<other branch>` | The same, for a branch that is not the default | The same |
-| Package `ghcr.io/<owner>/<repo>` | The same APK as an OCI artifact, tagged `<sha7>`, `<branch>`, and `latest` on the default branch | The newest tags move; the `<sha7>` tag never does |
-| Attestation, for the APK and for the package | A signed build-provenance statement naming this repository, this workflow and this commit | As long as the repository keeps it |
+| Attestation, for the APK | A signed build-provenance statement naming this repository, this workflow and this commit | As long as the repository keeps it |
 | The run's summary | Links to all of it | With the run |
 
 Each run's APK is named after its version and commit (`Brapmony-1.9.6-606ab10-debug.apk`),
@@ -72,48 +74,64 @@ build reported, and a signing certificate. A link that is not independently down
 broken link, and the run says so instead of publishing a summary that looks fine.
 
 Publishing needs no secret of its own: the APK is test-signed, and the workflow's
-`GITHUB_TOKEN` writes the release and the package. Whether two runs' APKs install over each
+`GITHUB_TOKEN` writes the release. Whether two runs' APKs install over each
 other depends on a stable test key, which is optional; see [Signing](#signing) and
 [Which build installs over which](#which-build-installs-over-which).
 
-## The package
+## There is no package
 
-GitHub Packages has no registry for an APK. It serves npm, Maven, Gradle, NuGet, RubyGems and
-container images, so the APK is published to the **container registry** (`ghcr.io`) as an
-**OCI artifact**: the container registry's own model for a file with metadata that is not an
-image. Nothing about it is a container image — the artifact type is
-`application/vnd.brapmony.android.apk` and the layer's media type is
-`application/vnd.android.package-archive` — and `oras pull` gives back the bytes that were
-pushed.
+The APK was also pushed to the container registry (`ghcr.io`) as an OCI artifact, which made
+it a package on the repository beside the release. That is gone, for three reasons:
 
-`scripts/publish-package.sh` does it, from the same file the release gets:
+- **It is not a container image.** GitHub Packages serves no APK registry, so the only way to
+  put an APK there was to pretend it was an OCI artifact. The repository then advertised
+  `docker pull ghcr.io/<owner>/<repo>` on its page, for an Android app.
+- **A phone cannot use it.** The release's download URL is a tap on a phone and an install.
+  A package needs `oras pull` or `docker pull` and a token, and it is not a file Android can
+  open.
+- **It was a second place to look.** Two published copies of one file is a second thing that
+  can disagree with the first, and a person who found the package page instead of the
+  release had no way to install what they found.
 
-| Tag | What it names |
-| --- | --- |
-| `<sha7>` | One build, immutably |
-| `<branch>` | The newest build of that branch |
-| `<version>` | The APK of a version-tag release |
-| `latest` | The newest build of the default branch, and only that |
+The release is the one published copy. `packages: write` and `artifact-metadata: write` are
+granted to no job in either workflow, and `npm test` asserts that.
 
-The package is linked to the repository by the `org.opencontainers.image.source` annotation,
-which is what makes it appear on the repository's page and lets it inherit the repository's
-access permissions.
+A package published before this change is still on the repository until somebody deletes it:
+the registry has no API for that from here, so it is one action in the package's settings
+page (Package settings → Delete this package). Nothing pushes to it any more.
 
-**It is private until somebody makes it public.** GitHub creates a first-published package
-private whatever the repository's visibility is, and no REST endpoint changes that: a package
-admin does, once, in the package's settings. A private package still appears under the
-repository's Packages, so a push that succeeded says nothing about whether a downloader can
-pull it. The package step therefore asks the registry anonymously, with a registry config of
-its own so the credentials the push used are not in it, and reports which of the two the
-package is — `public` or a warning with the settings page to visit. It does not fail the run:
-the package was published, and the release is the route that always works.
+## Every asset shows its own name
 
-```sh
-oras pull ghcr.io/wwpol/harmony-android:latest      # public: no token needed
+GitHub shows a release asset's **label in place of its file name**. Every asset this
+workflow used to upload carried `label=brapmony-android sha256:<hash>`, which was meant to
+record which bytes the file held — and which turned the release page into a list of
+
+```
+brapmony-android sha256:baf1c5ee9cd9ff9890c84a6853cb1f233b8ab0dcfd32c5feb497a912573b9dce
+brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d
+…
 ```
 
-`packages: write` is granted to the two publishing jobs and to nothing else. The build job,
-which a pull request runs, holds no write permission at all.
+with no `Brapmony-latest.apk` anywhere on it. The download URL worked the whole time, which
+is why nothing failed: what was broken was the page, not the file. So:
+
+- **No upload carries a label.** `scripts/release.mjs` sends the name and nothing else.
+- **Ownership is read from the uploader and the name.** GitHub attributes a workflow's
+  uploads to `github-actions[bot]`, and a file somebody attaches by hand carries their
+  account. Because every workflow in this repository uploads as that same bot, the name has
+  to be one this workflow generates as well; only then is a file replaced or pruned. A file
+  attached by hand, or uploaded by another workflow, is left exactly where it is.
+- **"The same bytes" is GitHub's own digest.** Every asset's `digest` field is GitHub's
+  SHA-256 of what it stored; that is compared with the file in hand, and the byte count is
+  the fallback where an API reports no digest. A re-run that finds different bytes under its
+  name publishes them under their own name rather than reporting success.
+- **The labels already written are cleared.** The first publish after this change sends an
+  empty label for every asset that carries the old one and reads the list back: a label that
+  did not clear is reported as a warning naming the asset, so a page whose names are still
+  hidden is never described as fixed.
+
+The release's tag also moves with each publish, so the commit the page names is the commit
+the assets were built from rather than the one the release was first created at.
 
 ## Provenance: what was built, from which commit
 
@@ -128,16 +146,13 @@ Every build this repository publishes is attested, in the job that publishes it:
 | Subject | What it is about | Where it is stored |
 | --- | --- | --- |
 | The APK file | The bytes on the release and the artifact | The repository's attestations, by the file's digest |
-| The package | The OCI manifest digest, which its tags point at | The repository's attestations, and in the registry attached to the manifest |
 
 The attestation is created with
 [`actions/attest`](https://github.com/actions/attest) (pinned by commit), which needs
 `id-token: write` to mint the signing certificate and `attestations: write` to store the
-statement; the package's also gets `artifact-metadata: write`, which is what lets it leave a
-storage record for the organization's Linked Artifacts page. All three are granted to the
-publishing job alone -- never to the build job, which a pull request's code runs: a pull
-request must not be able to obtain a signed statement that GitHub's workflow produced its
-code.
+statement. Both are granted to the publishing job alone -- never to the build job, which a
+pull request's code runs: a pull request must not be able to obtain a signed statement that
+GitHub's workflow produced its code.
 
 A person who downloaded an APK checks it with the GitHub CLI:
 
@@ -154,13 +169,6 @@ gh attestation verify Brapmony-latest.apk \
   --repo WWPOL/harmony-android \
   --signer-workflow WWPOL/harmony-android/.github/workflows/android.yml \
   --source-digest "$(git rev-parse HEAD)"
-```
-
-The package is verified by its digest, which is what the tags point at and what never moves:
-
-```sh
-gh attestation verify "oci://ghcr.io/wwpol/harmony-android@sha256:…" \
-  --repo WWPOL/harmony-android
 ```
 
 The workflows check their own work the same way before they finish: after publishing, they
@@ -198,12 +206,12 @@ claim, and the API's `digest` and the attestation are GitHub's.
   Enabling it would fail every publish. A version tag's release could be immutable, but the
   setting is per repository, not per release, so it is off. What it would add -- a signed
   statement that these assets belong to that tag -- the provenance attestation already says,
-  and says it about the package too.
+  and says it about the file a phone installs.
 - **Actions artifacts as a download route.** The artifact is kept because it is the record of
   what a run built, with the `.sha256` and the metadata file beside it, and because the
   publish job reads it back instead of rebuilding. It is not a route to offer people: it
-  expires after 90 days and needs a GitHub login to download. The release and the package are
-  the routes that outlive a run.
+  expires after 90 days and needs a GitHub login to download. The release is the route that
+  outlives a run.
 - **A cache of the Gradle build between runs.** It would make a build faster, and it is a
   separate change with its own risk (a stale cache producing a different APK from the same
   commit, which the per-commit artifact name would then not be able to tell apart). The
@@ -225,11 +233,11 @@ release for that tag:
 Both are accompanied by a `.sha256`. The job creates the tag's release if it does not exist
 and finds it if it does, so re-running a tag attaches to the same release instead of creating
 a second one, and it replaces only the two names it owns. It never touches another release.
-The same APK is pushed to the package under its version tag, so a version can be pulled by
-version as well as downloaded from the release. The release's body names the commit the tag
-resolved to, with a link to it, and how to verify the asset; the APK and the package are
-both attested, in the job that publishes them, and both attestations are verified before the
-run finishes (see [Provenance](#provenance-what-was-built-from-which-commit)).
+The release's body names the commit the tag resolved to, with a link to it, and how to
+verify the asset. The APK is attested in the job that publishes it, and the attestation is
+verified before the run finishes (see
+[Provenance](#provenance-what-was-built-from-which-commit)). Nothing is pushed to a
+container registry for a version tag either.
 
 ## Signing
 
@@ -431,23 +439,25 @@ failed publish that leaves the last good build downloadable and the page describ
 retention bounded to this workflow's own builds, a version release left entirely alone, a
 default branch's release moved out of the prereleases, another branch's left a prerelease, a
 tag release created once and found again on a re-run, a stored asset whose digest is not the
-file that was uploaded refused, a re-run whose stored bytes are not what its label claims
-refused, and an API that reports no digest not turned into a failure.
+file that was uploaded given its own name rather than reported as kept, an asset that carries
+a label (which would hide its name on the page) cleared and a label that will not clear
+reported, a rolling tag moved onto each build and a version tag refused, and an API that
+reports no digest not turned into a failure.
 
 The workflow tests assert that every action is pinned to a commit SHA, that
-`pull_request_target` is not used, that `contents: write`, `packages: write`, `id-token:
-write`, `attestations: write` and `artifact-metadata: write` appear only on the publishing
-jobs and never on the build job a pull request runs, that the branch publisher runs only for a
-push to this repository, that a push has no path filter, that the stable test key is
-configured from a secret and its absence reported, that the tag job stamps `VERSION` from the
-tag and attaches by release id, that the APK namer is called with a profile it accepts and
-really renames the file to the name the scheme says, that a re-run's artifact does not land on
-the first attempt's name, that `latest` in the package is only ever the default branch's
-build, that no step pipes `aapt2` or `apksigner` into `head` (which fails the step with
-SIGPIPE under `pipefail`), that each publishing job attests both the APK (by path) and the
-package (by the manifest digest its push reported), that both attestations are read back with
-`gh attestation verify` pinned to the repository, the signer workflow and the commit, that the
-download the publish job reads is checked against the digest GitHub recorded
+`pull_request_target` is not used, that `contents: write`, `id-token: write` and
+`attestations: write` appear only on the publishing jobs and never on the build job a pull
+request runs, that `packages: write` and `artifact-metadata: write` appear nowhere, that the
+branch publisher runs only for a push to this repository, that a push has no path filter, that
+the stable test key is configured from a secret and its absence reported, that the tag job
+stamps `VERSION` from the tag and attaches by release id, that the APK namer is called with a
+profile it accepts and really renames the file to the name the scheme says, that a re-run's
+artifact does not land on the first attempt's name, that no upload carries a label and the old
+ones are cleared, that the publish moves the rolling tag onto the commit it built, that no
+step pipes `aapt2` or `apksigner` into `head` (which fails the step with SIGPIPE under
+`pipefail`), that each publishing job attests the APK (by path) and reads the attestation back
+with `gh attestation verify` pinned to the repository, the signer workflow and the commit,
+that the download the publish job reads is checked against the digest GitHub recorded
 (`digest-mismatch: error`), and that the repository holds the Android app and nothing else.
 
 To run a step as GitHub would, after a local build:
@@ -510,8 +520,8 @@ rolling release, uploaded this run's APK, moved the stable APK name and its `.sh
 those bytes, fetched the download back and checked it, and printed the links. So the runner's
 environment — the `sdkmanager` package names, the `aapt2` and `apksigner` paths,
 `upload-artifact` and `download-artifact`, and the token's permission to create a release — is
-demonstrated, not assumed. That run predates the name scheme and the package push described
-here, so it proves the mechanism, not the current names.
+demonstrated, not assumed. That run predates the name scheme described here, so it proves the
+mechanism, not the current names.
 
 That run carried both fixes in this change, so it proves more than the environment. Its build
 job called `scripts/name-artifact.sh debug "$1"` (the call `main` still gets wrong, see below),
@@ -529,10 +539,17 @@ nothing was published.
 **What the repository actually offered.** `main`'s rolling release existed after the merge of
 that run, but it was a **prerelease**, so `api.github.com/repos/WWPOL/harmony-android/releases/latest`
 answered 404 and the repository page showed no Releases at all; only the tag-specific download
-URL resolved. Nothing was on GitHub Packages either. That is what this change fixes: the
-default branch's build is a release, so the Releases box and `/releases/latest` reach it, and
-the same file is pushed to the container registry as a package. The first push to `main` after
-this merges publishes both.
+URL resolved. That was fixed: the default branch's build is a release, so the Releases box and
+`/releases/latest` reach it.
+
+**What it offered after that was unreadable.** The release existed, the download URL worked,
+and the page listed `brapmony-android sha256:…` five times and not one file name, because
+every asset carried a label and GitHub shows the label instead of the name. A person looking
+for `Brapmony-latest.apk` on that page found nothing to tap. That is what this change fixes;
+[Every asset shows its own name](#every-asset-shows-its-own-name) says how. The screenshot of
+the page as it was is in
+[`docs/evidence/release/`](evidence/release/), beside the asset list the fixed publisher
+produces.
 
 **What has been checked here, and what has not.** The naming, the published/prerelease
 decision and the retirement of the old names are checked by `npm test` against an in-process
@@ -542,16 +559,17 @@ its `.sha256`, and `Brapmony_Android_V1.9.6_debug-main-606ab10.apk`, read from t
 — publishes one build, and asserts that it becomes a release named `Brapmony 1.9.6` with the
 new names, the old stable names retired, and the old build left for pruning.
 
-The package push is run against a **real OCI registry** on this machine with the real `oras`
-binary: pushed, pulled back, and the bytes compared, including that the `latest` tag is only
-ever moved by a default-branch build. The APK used for the step runs below is a real one,
-from `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`, which was
+The `Publish` step is also run as the workflow runs it, with `scripts/workflow-steps.mjs`
+against `scripts/fake-github-api.mjs`, and the release it produces is read back: every asset
+name present, no label on any of them, and the tag pointing at the commit that was published.
+The APK used for the step runs is a real one, from
+`./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`, which was
 `BUILD SUCCESSFUL`.
 
-What has **not** been exercised is GitHub itself: the `GITHUB_TOKEN`'s `packages: write`
-permission, the package's default visibility on its first push, and the re-download of the
-published link, which needs a real release to exist. The workflow is written so that a
-failure in any of those fails the run and publishes no summary that looks fine.
+What has **not** been exercised is GitHub itself: that its API clears a label on a `PATCH`
+(the run reads the list back and warns if it does not), and the re-download of the published
+link, which needs a real release to exist. The workflow is written so that a failure in
+either fails the run or is reported, and never publishes a summary that looks fine.
 
 **Provenance has not run on a runner either.** The attestation steps are pinned actions and
 their inputs are asserted by `npm test`, and the verification step's two outcomes — a check
@@ -560,9 +578,7 @@ locally with a stand-in `gh` that records its arguments. What that cannot show i
 only GitHub can do: minting the OIDC signing certificate, storing the attestation, and the
 attestations API answering `gh attestation verify`. The first push to `main` after this
 merges is what produces the first real attestation; until then, treat the provenance section
-as the mechanism, checked where it can be, rather than as an observed one. The same is true of
-`artifact-metadata: write`: the permission is granted, and whether the organization's Linked
-Artifacts page shows the storage record is something the first run will answer.
+as the mechanism, checked where it can be, rather than as an observed one.
 
 A version tag's release (`release.yml`) has still not been run on a runner: no `vX.Y.Z` tag has
 been pushed, so its steps are exercised locally only. That now includes the tag build's

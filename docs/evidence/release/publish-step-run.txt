@@ -1,0 +1,12 @@
+run   Publish
+Created rolling release android-rolling-main (100)
+Uploaded Brapmony-1.9.6-e5b7aec-debug.apk on android-rolling-main (sha256 aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d)
+Updated Brapmony-latest.apk on android-rolling-main
+Updated Brapmony-latest.apk.sha256 on android-rolling-main
+Moved tag android-rolling-main at e5b7aec558f4ee52d8cb6a9850750d64751484d2
+ran 1 step(s) of .github/workflows/android.yml publish
+GITHUB_OUTPUT:
+apk=android-apk/Brapmony-1.9.6-e5b7aec-debug.apk
+tag=android-rolling-main
+release-id=100
+sha256=aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d
