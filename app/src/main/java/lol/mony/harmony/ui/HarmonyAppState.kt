@@ -240,6 +240,44 @@ class AppState(
     private val _threadsByChannel = MutableStateFlow<Map<String, List<Thread>>>(emptyMap())
     val threadsByChannel: StateFlow<Map<String, List<Thread>>> = _threadsByChannel.asStateFlow()
 
+    // ---- private attachments --------------------------------------------------------------
+
+    /**
+     * Signed URLs for the `message_media` objects already asked for, keyed by object name.
+     *
+     * An attachment part carries a `path` into the instance's private bucket, and that path
+     * resolves for nobody without a token. Signing is a network call, so one page of history is
+     * signed in one batch and every row that names an object reads its answer here; a path that
+     * could not be signed is remembered as a failure with the time it happened, so a channel of
+     * gone pictures does not retry on every recomposition.
+     */
+    private val _signedMedia = MutableStateFlow<Map<String, SignedMedia>>(emptyMap())
+    val signedMedia: StateFlow<Map<String, SignedMedia>> = _signedMedia.asStateFlow()
+
+    /**
+     * Signs every object in [paths] that is not already signed, in one request.
+     *
+     * A path signed within the last [SIGNED_MEDIA_REUSE_MS] is left alone: a channel refresh
+     * must not re-sign a page it already has. A path that failed is retried after
+     * [SIGNED_MEDIA_RETRY_MS], so a URL that merely expired is picked up again.
+     */
+    suspend fun signMedia(endpoint: lol.mony.harmony.data.api.Endpoint, token: String, paths: Collection<String>) {
+        val now = System.currentTimeMillis()
+        val wanted = paths.filter { path ->
+            val known = _signedMedia.value[path]
+            known == null ||
+                (known.url != null && now - known.at > SIGNED_MEDIA_REUSE_MS) ||
+                (known.url == null && now - known.at > SIGNED_MEDIA_RETRY_MS)
+        }.distinct()
+        if (wanted.isEmpty()) return
+        val signed = runCatching { container.media.sign(endpoint, token, wanted) }.getOrDefault(emptyMap())
+        _signedMedia.update { current ->
+            current + wanted.associateWith { path ->
+                SignedMedia(signed[path], System.currentTimeMillis())
+            }
+        }
+    }
+
     fun rememberThread(thread: Thread) {
         _threadsByChannel.update { current ->
             val existing = current[thread.channelId].orEmpty()
@@ -250,6 +288,7 @@ class AppState(
     /** Forgets every cached list, so nothing from one account can show under another. */
     fun forgetCachedLists() {
         _threadsByChannel.value = emptyMap()
+        _signedMedia.value = emptyMap()
         channelsByServer.value = emptyMap()
         serverTrees.value = emptyMap()
         conversations.value = null
@@ -448,6 +487,22 @@ sealed interface LiveStatus {
      */
     data class Unavailable(val reason: String) : LiveStatus
 }
+
+/**
+ * One `message_media` object's signing result.
+ *
+ * [url] is null when the instance would not sign it, which is the honest answer for a file that
+ * was deleted, whose room this account left, or whose URL has expired. [at] is when the answer
+ * arrived, so a failure is retried after a while and a success is reused until it is nearly
+ * expired.
+ */
+data class SignedMedia(val url: String?, val at: Long)
+
+/** How long a signed URL is reused; the reference's refresh margin, in reverse. */
+internal const val SIGNED_MEDIA_REUSE_MS = 5L * 60 * 60 * 1000
+
+/** How long a failed signing is left alone before it is tried again. */
+internal const val SIGNED_MEDIA_RETRY_MS = 60L * 1000
 
 data class UnreadBadges(
     val channels: Map<String, Int> = emptyMap(),

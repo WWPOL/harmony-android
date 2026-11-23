@@ -7,9 +7,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -31,6 +39,7 @@ import coil.request.ImageRequest
 import lol.mony.harmony.data.model.ContentPart
 import lol.mony.harmony.data.model.Emoji
 import lol.mony.harmony.data.model.Message
+import lol.mony.harmony.data.repo.MessageMedia
 import lol.mony.harmony.ui.theme.LocalSizes
 
 /**
@@ -51,6 +60,17 @@ fun MessageContent(
     encryptedNotice: String? = null,
     /** The instance an attachment's or emoji's relative URL resolves against. */
     baseUrl: String? = null,
+    /**
+     * The URL a private attachment's `path` resolves to, when the caller has signed it.
+     *
+     * A `message_media` part carries an object name that resolves for nobody without a token, so
+     * a part with a `path` draws from this and never from the `url` it also carries: that URL
+     * expired seven days after the upload. Null means "not signed yet, or not readable", which
+     * draws a placeholder rather than a broken picture.
+     */
+    signedUrl: ((String) -> String?)? = null,
+    /** What tapping a non-image attachment does; a picture is opened the same way when given. */
+    onOpenAttachment: ((ContentPart) -> Unit)? = null,
     /** The `emojis` rows the room resolved, so an id-only emoji part still draws its picture. */
     emojis: Map<String, Emoji> = emptyMap(),
 ) {
@@ -74,7 +94,7 @@ fun MessageContent(
     Column(modifier = modifier) {
         for (run in runs(message.content)) {
             if (run.block) {
-                BlockPart(run.parts.first(), style, muted, baseUrl)
+                BlockPart(run.parts.first(), style, muted, baseUrl, signedUrl, onOpenAttachment)
             } else {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -293,12 +313,18 @@ fun EmojiPart(part: ContentPart, messageSp: Double, modifier: Modifier = Modifie
 
 /** A part that stands on its own line: an attachment, a sticker, a poll, a system event. */
 @Composable
-private fun BlockPart(part: ContentPart, style: androidx.compose.ui.text.TextStyle,
-                       muted: androidx.compose.ui.graphics.Color, baseUrl: String?) {
+private fun BlockPart(
+    part: ContentPart,
+    style: androidx.compose.ui.text.TextStyle,
+    muted: androidx.compose.ui.graphics.Color,
+    baseUrl: String?,
+    signedUrl: ((String) -> String?)?,
+    onOpenAttachment: ((ContentPart) -> Unit)?,
+) {
     val caption = MaterialTheme.typography.bodySmall.copy(color = muted)
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
         when (part.type) {
-            "file" -> FilePart(part, style, muted, baseUrl)
+            "file" -> FilePart(part, style, muted, baseUrl, signedUrl, onOpenAttachment)
             "sticker" -> {
                 if (!part.url.isNullOrBlank()) {
                     AsyncImage(model = part.url, contentDescription = part.description ?: part.name ?: "Sticker",
@@ -323,17 +349,47 @@ private fun BlockPart(part: ContentPart, style: androidx.compose.ui.text.TextSty
  * The web client draws images inline, sized to a maximum, with the alt text beneath; a video
  * or a document gets a card naming it. Announcing every attachment as a sentence -- which this
  * client used to do -- makes a channel of pictures unreadable.
+ *
+ * A private attachment (`path` set) draws from [signedUrl] and never from its own `url`, which
+ * expired seven days after it was uploaded. While that URL is missing the picture is a
+ * placeholder that says it is loading or unreadable, which is what a person needs to know: a
+ * blank box is indistinguishable from a channel of nothing.
  */
 @Composable
-private fun FilePart(part: ContentPart, style: androidx.compose.ui.text.TextStyle,
-                     muted: androidx.compose.ui.graphics.Color, baseUrl: String?) {
-    val url = AvatarUrl.resolve(baseUrl, part.url)
+private fun FilePart(
+    part: ContentPart,
+    style: androidx.compose.ui.text.TextStyle,
+    muted: androidx.compose.ui.graphics.Color,
+    baseUrl: String?,
+    signedUrl: ((String) -> String?)?,
+    onOpenAttachment: ((ContentPart) -> Unit)?,
+) {
+    val isPrivate = MessageMedia.isPath(part.path)
+    val url = if (isPrivate) part.path?.let { path -> signedUrl?.invoke(path) }
+              else AvatarUrl.resolve(baseUrl, part.url)
     val isImage = part.fileType == "image" || part.mimeType?.startsWith("image/") == true ||
         part.url?.let { path -> IMAGE_EXTENSIONS.any { ext -> path.substringBefore('?').endsWith(ext, ignoreCase = true) } } == true
     val alt = part.altText?.takeIf { it.isNotBlank() }
+    val open = onOpenAttachment?.let { callback -> { callback(part) } }
+
+    if (isPrivate && url == null) {
+        // Not signed yet, or the instance will not sign it for this account: say which, without
+        // pretending the file is a picture that failed to load.
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
+            Icon(Icons.Default.AttachFile, null, Modifier.size(16.dp), tint = muted)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                (part.fileName ?: alt ?: "Attachment") + " · " +
+                    if (part.fileType == "image" || part.fileType == "video") "loading picture…" else "private file",
+                style = MaterialTheme.typography.bodySmall, color = muted,
+                modifier = Modifier.testTag("attachment-private-" + (part.path ?: "")),
+            )
+        }
+        return
+    }
 
     if (url != null && isImage) {
-        Column(Modifier.padding(vertical = 4.dp)) {
+        val picture: @Composable () -> Unit = {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current).data(url).crossfade(true).build(),
                 contentDescription = alt ?: part.fileName ?: "Image attachment",
@@ -344,6 +400,13 @@ private fun FilePart(part: ContentPart, style: androidx.compose.ui.text.TextStyl
                     .clip(MaterialTheme.shapes.medium)
                     .testTag("attachment-image"),
             )
+        }
+        Column(Modifier.padding(vertical = 4.dp)) {
+            if (open != null) {
+                Surface(onClick = open, color = androidx.compose.ui.graphics.Color.Transparent, shape = MaterialTheme.shapes.medium) {
+                    picture()
+                }
+            } else picture()
             if (alt != null) Text(alt, style = MaterialTheme.typography.bodySmall.copy(color = muted),
                 modifier = Modifier.widthIn(max = 280.dp).padding(top = 2.dp))
         }
@@ -355,11 +418,24 @@ private fun FilePart(part: ContentPart, style: androidx.compose.ui.text.TextStyl
         part.fileType == "audio" || part.mimeType?.startsWith("audio/") == true -> "Audio"
         else -> "File"
     }
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
-        Text(kind + ": " + label, style = style, color = muted,
-            modifier = Modifier.testTag("attachment-" + label))
-        part.fileSize?.let { Text("  " + humanSize(it), style = MaterialTheme.typography.labelSmall, color = muted) }
+    val card: @Composable (Modifier) -> Unit = { modifier ->
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier.padding(vertical = 2.dp)) {
+            Icon(
+                when (kind) {
+                    "Video" -> Icons.Default.PlayCircle
+                    "Audio" -> Icons.Default.Audiotrack
+                    else -> Icons.Default.AttachFile
+                },
+                contentDescription = null, tint = muted, modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(kind + ": " + label, style = style, color = muted,
+                modifier = Modifier.testTag("attachment-" + label))
+            part.fileSize?.let { Text("  " + humanSize(it), style = MaterialTheme.typography.labelSmall, color = muted) }
+        }
     }
+    if (open != null) Surface(onClick = open, color = androidx.compose.ui.graphics.Color.Transparent) { card(Modifier) }
+    else card(Modifier)
 }
 
 /** The extensions an image attachment may carry when the part does not say it is one. */

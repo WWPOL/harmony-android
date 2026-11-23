@@ -7,6 +7,7 @@ import lol.mony.harmony.data.api.NetworkMonitor
 import lol.mony.harmony.data.api.Realtime
 import lol.mony.harmony.data.api.RestApi
 import lol.mony.harmony.data.repo.BotRepository
+import lol.mony.harmony.data.repo.MessageMediaRepository
 import lol.mony.harmony.data.repo.ChatRepository
 import lol.mony.harmony.data.repo.ProfileRepository
 import lol.mony.harmony.data.repo.ServerRepository
@@ -28,6 +29,7 @@ class AppContainer(context: Context, store: SessionStore = SessionStore(context.
     val profiles: ProfileRepository = ProfileRepository(rest)
     val servers: ServerRepository = ServerRepository(rest)
     val chats: ChatRepository = ChatRepository(rest)
+    val media: MessageMediaRepository = MessageMediaRepository(rest)
     val bots: BotRepository = BotRepository(rest)
     val settings: SettingsRepository = SettingsRepository(rest)
 

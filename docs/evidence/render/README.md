@@ -54,6 +54,19 @@ rotation, system appearance or device rendering.
   is the other half of the same bug.
 - `thread-sheet-open.png`, `thread-opened.png` -- the room's Threads sheet, and
   the thread it opens, which is the transition that used to crash the app.
+- `attachment-composer.png` -- the composer's attachment strip with three files:
+  one still uploading (45%, with its bar), one whose photo details were removed
+  ("location removed", with the keep switch), and one the instance's upload limit
+  refused, in its own numbers. Each row previews the bytes that will be sent --
+  the pictures are the test's own JPEGs, decoded by the app's image pipeline, so
+  a preview that failed to draw would fail the test rather than look like a grey
+  box here. The line under them says what to do about the refused file, because
+  Send waits for every file; the location warning appears only when the bytes
+  being sent still carry a position.
+- `attachment-message.png` -- a message whose attachment is a `message_media`
+  object: the picture is drawn from the URL its `path` was signed to, not from
+  the seven-day `url` the part also carries. Before that URL arrives the same
+  row says it is loading rather than showing a broken picture.
 - `pinned-sheet.png`, `actions-sheet.png` -- the pinned-messages sheet and the
   message-actions sheet, both of which read the same cleared nullable.
 - `reply-reference-above-username.png` -- one row that answers an earlier message:

@@ -46,24 +46,24 @@ class ChatRepository(private val rest: RestApi) {
 
     suspend fun sendChannelMessage(endpoint: Endpoint, token: String, channelId: String,
                                    text: String, replyTo: String? = null, threadId: String? = null,
-                                   nonce: String? = null): Result<Message> = runCatching {
+                                   nonce: String? = null, attachments: List<ContentPart> = emptyList()): Result<Message> = runCatching {
         // Fail closed until this client implements Harmony's own encrypted envelope.
         val encryption = rest.rpcValue(endpoint, token, "effective_channel_encryption",
             buildJsonObject { put("p_channel_id", channelId) }.toString(), JsonElement.serializer()).getOrThrow()
         if (requiresEncryption(encryption)) error("This channel requires encryption. Encrypted messaging is not implemented in this client yet; nothing was sent.")
-        insertMessage(endpoint, token, text, channelId, null, replyTo, threadId, nonce)
+        insertMessage(endpoint, token, text, channelId, null, replyTo, threadId, nonce, attachments)
     }
 
     suspend fun sendDirectMessage(endpoint: Endpoint, token: String, conversationId: String,
                                   text: String, replyTo: String? = null, threadId: String? = null,
-                                  nonce: String? = null): Result<Message> = runCatching {
+                                  nonce: String? = null, attachments: List<ContentPart> = emptyList()): Result<Message> = runCatching {
         val encryption = rest.select(endpoint, token, "conversation_encryption_settings",
             filters = listOf("conversation_id" to "eq.$conversationId"),
             serializer = ListSerializer(JsonObject.serializer())).getOrThrow()
         if (encryption.any { (it["encryption_enabled"] as? JsonPrimitive)?.booleanOrNull == true }) {
             error("This conversation requires encryption. Encrypted messaging is not implemented in this client yet; nothing was sent.")
         }
-        insertMessage(endpoint, token, text, null, conversationId, replyTo, threadId, nonce)
+        insertMessage(endpoint, token, text, null, conversationId, replyTo, threadId, nonce, attachments)
     }
 
     /**
@@ -72,11 +72,30 @@ class ChatRepository(private val rest: RestApi) {
      * The nonce is what lets a retry be recognised as the same message: the reference's outbox
      * reads `metadata.client_nonce` back to match an acknowledged row to the row it drew while
      * the send was in flight.
+     *
+     * [attachments] are the `file` parts of an upload that has already finished. The instance's
+     * own guard refuses a part whose `path` is not an object of this message's room, so a wrong
+     * room is an error here rather than an attachment nobody can open later. A message may carry
+     * text, attachments, or both -- but not neither.
      */
     private suspend fun insertMessage(endpoint: Endpoint, token: String, text: String,
                                       channelId: String?, conversationId: String?, replyTo: String?,
-                                      threadId: String?, nonce: String?): Message {
-        require(text.isNotBlank()) { "Write a message first." }
+                                      threadId: String?, nonce: String?,
+                                      attachments: List<ContentPart> = emptyList()): Message {
+        val files = attachments.filter { it.type == "file" }
+        require(text.isNotBlank() || files.isNotEmpty()) { "Write a message first." }
+        require(files.size <= MessageMedia.MAX_ATTACHMENTS) {
+            "A message may carry at most " + MessageMedia.MAX_ATTACHMENTS + " attachments."
+        }
+        if (files.isNotEmpty()) {
+            val room = MessageMedia.room(channelId, conversationId)
+                ?: error("Attachments need a channel or conversation.")
+            for (part in files) {
+                require(MessageMedia.isPathInRoom(part.path, room)) {
+                    "An attachment names an object outside this " + (if (conversationId != null) "conversation" else "channel") + "."
+                }
+            }
+        }
         // Postgres text cannot hold a NUL, and the instance answers such a send with
         // `unsupported Unicode escape sequence` rather than storing it.
         require('\u0000' !in text) { "That message contains a character the instance cannot store. Remove it and send again." }
@@ -97,7 +116,10 @@ class ChatRepository(private val rest: RestApi) {
                     put("client_nonce", value)
                 })
             }
-            put("content", buildJsonArray { add(buildJsonObject { put("type", "text"); put("text", text) }) })
+            put("content", buildJsonArray {
+                if (text.isNotBlank()) add(buildJsonObject { put("type", "text"); put("text", text) })
+                for (part in files) add(HarmonyJson.encodeToJsonElement(ContentPart.serializer(), part))
+            })
         }
         val stored = rest.insert(endpoint, token, "messages", body.toString(),
             serializer = ListSerializer(Message.serializer())).getOrThrow()

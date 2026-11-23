@@ -23,6 +23,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -33,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
@@ -105,6 +108,131 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     // person scrolls away from it.
     var focusId by remember(cacheKey) { mutableStateOf(state.focusMessageId.value) }
     var highlighted by remember(cacheKey) { mutableStateOf<String?>(null) }
+    // Attachments are per room and per thread, like the draft they travel with.
+    var attachments by remember(draftKey) { mutableStateOf<List<Attachment>>(emptyList()) }
+    var attachMenu by remember { mutableStateOf(false) }
+    var attachFailure by remember(cacheKey) { mutableStateOf<String?>(null) }
+    var viewing by remember(cacheKey) { mutableStateOf<ContentPart?>(null) }
+    val media by state.signedMedia.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+    // One job per attachment, keyed by its id, so removing a file cancels exactly that upload.
+    val uploadJobs = remember(draftKey) { mutableMapOf<String, kotlinx.coroutines.Job>() }
+    fun upload(attachment: Attachment) {
+        val job = scope.launch {
+            try {
+                val token = state.auth.freshToken() ?: error("Sign in again.")
+                val authUserId = state.auth.authUserId() ?: error("Your account id is not available. Sign in again.")
+                val roomPrefix = lol.mony.harmony.data.repo.MessageMedia.room(
+                    if (direct) null else roomId, if (direct) roomId else null,
+                ) ?: error("Attachments need a channel or conversation.")
+                val uploaded = state.container.media.upload(
+                    endpoint = session.endpoint, token = token, uploaderAuthId = authUserId,
+                    room = roomPrefix, picked = attachment.picked, keepMetadata = attachment.keepDetails,
+                    onProgress = { fraction ->
+                        attachments = attachments.map {
+                            if (it.id == attachment.id) it.copy(progress = fraction) else it
+                        }
+                    },
+                )
+                // The new object's URL is already signed by the upload, so the row can draw the
+                // picture the instant the send is acknowledged.
+                runCatching { state.signMedia(session.endpoint, token, listOf(uploaded.path)) }
+                attachments = attachments.map {
+                    if (it.id == attachment.id) it.copy(
+                        state = AttachmentState.Ready, uploaded = uploaded, progress = 1f,
+                    ) else it
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val reason = error.message ?: "That file was not uploaded."
+                attachments = attachments.map {
+                    if (it.id == attachment.id) it.copy(state = AttachmentState.Failed(reason)) else it
+                }
+            } finally {
+                uploadJobs.remove(attachment.id)
+            }
+        }
+        uploadJobs[attachment.id] = job
+    }
+
+    /** Reads a picked URI, refuses what cannot be sent, and starts its upload. */
+    fun addPicked(uri: android.net.Uri) {
+        scope.launch {
+            attachFailure = null
+            try {
+                if (attachments.count { !it.isFailed } >= lol.mony.harmony.data.repo.MessageMedia.MAX_ATTACHMENTS) {
+                    attachFailure = "A message may carry at most " +
+                        lol.mony.harmony.data.repo.MessageMedia.MAX_ATTACHMENTS + " attachments."
+                    return@launch
+                }
+                val read = PickedFile.read(context, uri).getOrThrow()
+                val picked = PickedFile.asPicked(read)
+                val token = state.auth.freshToken() ?: error("Sign in again.")
+                state.container.media.refuseReason(session.endpoint, token, picked)?.let { reason ->
+                    attachFailure = reason
+                    return@launch
+                }
+                val prepared = state.container.media.prepare(picked, keepMetadata = false)
+                val attachment = Attachment(
+                    id = java.util.UUID.randomUUID().toString(),
+                    original = picked,
+                    picked = picked.copy(bytes = prepared.bytes, size = prepared.bytes.size.toLong()),
+                    details = prepared.details,
+                    stripped = prepared.stripped,
+                )
+                attachments = attachments + attachment
+                upload(attachment)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                attachFailure = error.message ?: "That file could not be read."
+            }
+        }
+    }
+
+    /** Re-prepares a file after the person changes their mind about its photo details. */
+    fun setKeepDetails(attachment: Attachment, keep: Boolean) {
+        uploadJobs.remove(attachment.id)?.cancel()
+        // The object of the upload being replaced names nothing yet, and the server's own sweep
+        // would only find it after its window; deleting it here keeps the bucket honest.
+        attachment.uploaded?.path?.let { old ->
+            scope.launch {
+                val token = state.auth.freshToken() ?: return@launch
+                state.container.media.discard(session.endpoint, token, listOf(old))
+            }
+        }
+        scope.launch {
+            // Re-derived from the bytes as they were picked: stripping is not reversible, so a
+            // file cannot be "un-stripped" and has to be prepared again from the original.
+            val prepared = state.container.media.prepare(attachment.original, keepMetadata = keep)
+            val replaced = attachment.copy(
+                picked = attachment.original.copy(bytes = prepared.bytes, size = prepared.bytes.size.toLong()),
+                state = AttachmentState.Uploading, progress = 0f, uploaded = null,
+                details = prepared.details, stripped = prepared.stripped, keepDetails = keep,
+            )
+            attachments = attachments.map { if (it.id == attachment.id) replaced else it }
+            upload(replaced)
+        }
+    }
+
+    fun removeAttachment(attachment: Attachment) {
+        uploadJobs.remove(attachment.id)?.cancel()
+        attachments = attachments.filterNot { it.id == attachment.id }
+        val stored = attachment.uploaded?.path ?: return
+        scope.launch {
+            val token = state.auth.freshToken() ?: return@launch
+            state.container.media.discard(session.endpoint, token, listOf(stored))
+        }
+    }
+
+    val imagePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> if (uri != null) addPicked(uri) }
+    val documentPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) addPicked(uri) }
     LaunchedEffect(cacheKey) {
         val wanted = state.focusMessageId.value ?: return@LaunchedEffect
         state.focusMessageId.value = null
@@ -141,6 +269,12 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 )
             }
             state.resolveAuthors(session.endpoint, token, page)
+            // One signing call for every private object the page names, so a channel of
+            // pictures draws as it scrolls rather than one request per row.
+            val mediaPaths = lol.mony.harmony.data.repo.privateMediaPaths(
+                state.rooms.snapshot(key)?.rows.orEmpty().map { it.message } + page,
+            )
+            if (mediaPaths.isNotEmpty()) runCatching { state.signMedia(session.endpoint, token, mediaPaths) }
             // A message part that names an emoji by id alone gets its picture from here, so a
             // bridged or round-tripped emoji is not the one shape that draws nothing.
             state.resolveMessageEmojis(session.endpoint, token, page)
@@ -210,13 +344,20 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
      * Puts the message in the list and sends it. The row is the person's own until the instance
      * answers; a failure leaves it in place with Retry rather than deleting what they wrote.
      */
-    fun send(text: String, parent: String?, nonce: String, retryKey: String?) {
+    fun send(text: String, parent: String?, nonce: String, retryKey: String?,
+             attachments: List<ContentPart> = emptyList()) {
         val key = state.roomKey(roomId, direct, thread?.id)
         val threadId = thread?.id
+        // The optimistic row draws the same parts the instance will store, so a picture is on
+        // screen the moment Send is tapped rather than appearing when the send is acknowledged.
+        val content = buildList {
+            if (text.isNotBlank()) add(ContentPart.text(text))
+            addAll(attachments)
+        }.ifEmpty { listOf(ContentPart.text(text)) }
         val draftMessage = Message(
             id = retryKey ?: nonce, channelId = if (direct) null else roomId,
             conversationId = if (direct) roomId else null, threadId = threadId, userId = myId,
-            replyTo = parent, content = listOf(ContentPart.text(text)), createdAt = Instant.now().toString(),
+            replyTo = parent, content = content, createdAt = Instant.now().toString(),
         )
         if (retryKey == null) {
             state.rooms.appendPending(key, RoomRow(nonce, draftMessage, RowState.Sending, nonce))
@@ -245,8 +386,8 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     return@launch
                 }
                 val sent = if (direct)
-                    state.chats.sendDirectMessage(session.endpoint, token, roomId, text, parent, threadId, nonce)
-                else state.chats.sendChannelMessage(session.endpoint, token, roomId, text, parent, threadId, nonce)
+                    state.chats.sendDirectMessage(session.endpoint, token, roomId, text, parent, threadId, nonce, attachments)
+                else state.chats.sendChannelMessage(session.endpoint, token, roomId, text, parent, threadId, nonce, attachments)
                 val acknowledged = sent.getOrThrow()
                 state.rooms.update(key) { current ->
                     current.copy(rows = current.rows
@@ -349,6 +490,8 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     // crashed: the row's click set `threads = null`, and the list's next recomposition then
     // dereferenced it.
     val openFailure = failure
+    val openAttachFailure = attachFailure
+    val openViewing = viewing
     val openReply = reply
     val openSelected = selected
     val openEdit = edit
@@ -435,8 +578,16 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                         onAuthor = { profileId -> selectedProfile = profileId },
                         onShowReactors = { key -> reactors = row.message to key },
                         onReply = { reply = row.message },
-                        onRetry = { if (row.isFailed) send(row.message.plainText, row.message.replyTo, row.nonce ?: row.key, row.key) },
+                        onRetry = {
+                            if (row.isFailed) {
+                                val files = row.message.content.filter { it.type == "file" }
+                                send(row.message.content.filter { it.type == "text" }.joinToString("") { it.text.orEmpty() },
+                                    row.message.replyTo, row.nonce ?: row.key, row.key, files)
+                            }
+                        },
                         highlighted = highlighted == row.message.id,
+                        signedUrl = { path -> media[path]?.url },
+                        onOpenAttachment = { part -> viewing = part },
                     )
                 }
             }
@@ -461,10 +612,66 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
             tonalElevation = 3.dp,
             modifier = Modifier.fillMaxWidth().testTag("composer-surface"),
         ) {
+            Column(Modifier.fillMaxWidth()) {
+                // The files waiting to go with this message sit above the field they belong to,
+                // not in a separate screen: a send is one thing, and what is in it has to be
+                // visible while the sentence about it is being written.
+                if (attachments.isNotEmpty()) {
+                    Box(Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 8.dp)) {
+                        AttachmentStrip(
+                            attachments = attachments,
+                            onRemove = { removeAttachment(it) },
+                            onKeepDetails = { attachment, keep -> setKeepDetails(attachment, keep) },
+                        )
+                    }
+                }
+                if (openAttachFailure != null) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Default.ErrorOutline, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(6.dp))
+                        Text(openAttachFailure, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.weight(1f).testTag("attachment-failure"))
+                        TextButton(onClick = { attachFailure = null }) { Text("Dismiss") }
+                    }
+                }
             Row(
-                Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
+                // Attaching is one tap away from the field, not buried in a menu: a picture is
+                // the reason a message is being written as often as a sentence is.
+                Box {
+                    IconButton(
+                        onClick = { attachMenu = true },
+                        enabled = attachments.size < lol.mony.harmony.data.repo.MessageMedia.MAX_ATTACHMENTS,
+                        modifier = Modifier.size(52.dp).testTag("message-attach"),
+                    ) {
+                        Icon(Icons.Default.AddCircleOutline, "Attach a file")
+                    }
+                    if (attachMenu) AttachMenu(
+                        onPick = { kind ->
+                            attachMenu = false
+                            when (kind) {
+                                PickKind.Image -> imagePicker.launch(
+                                    androidx.activity.result.PickVisualMediaRequest(
+                                        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo,
+                                    ),
+                                )
+                                PickKind.Video -> imagePicker.launch(
+                                    androidx.activity.result.PickVisualMediaRequest(
+                                        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.VideoOnly,
+                                    ),
+                                )
+                                PickKind.Any -> documentPicker.launch(arrayOf("*/*"))
+                            }
+                        },
+                        onDismiss = { attachMenu = false },
+                    )
+                }
                 // A long message is not truncated as it is typed: pasting one keeps every
                 // character, the counter turns red, and Send waits. Swallowing the keystrokes
                 // instead would look like a broken keyboard, and the instance would refuse the
@@ -489,20 +696,29 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 // list is the progress and keeping the button usable is what lets a second
                 // message be written.
                 Spacer(Modifier.width(8.dp))
+                // Send waits for the files: a message that named an object still being uploaded
+                // would arrive with a broken attachment, which is worse than a second of waiting.
+                // A failed file blocks it too, because the strip is cleared on send -- letting the
+                // message go would drop the file without a word, which is the silent failure this
+                // whole pipeline exists to end.
                 FilledIconButton(
-                    enabled = draft.isNotBlank() && draft.length <= ChatRepository.DEFAULT_MAX_LENGTH,
+                    enabled = (draft.isNotBlank() || attachments.any { it.isReady }) &&
+                        attachments.all { it.isReady } &&
+                        draft.length <= ChatRepository.DEFAULT_MAX_LENGTH,
                     onClick = {
                         val text = draft
                         val parent = reply?.id
-                        draft = ""; reply = null
+                        val files = attachments.mapNotNull { it.uploaded }.map { it.part() }
+                        draft = ""; reply = null; attachments = emptyList()
                         scope.launch { state.sessionStore.saveDraft(draftKey, "") }
-                        send(text, parent, UUID.randomUUID().toString(), null)
+                        send(text, parent, UUID.randomUUID().toString(), null, files)
                         scope.launch { if (rows.isNotEmpty()) list.animateScrollToItem(rows.lastIndex) }
                     },
                     modifier = Modifier.size(52.dp).testTag("message-send"),
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, "Send")
                 }
+            }
             }
         }
     }
@@ -591,7 +807,8 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     Column(Modifier.padding(16.dp)) {
                         Text(row.author(people, bots).name, style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold)
-                        MessageContent(row, sizes.messageSp)
+                        MessageContent(row, sizes.messageSp, signedUrl = { path -> media[path]?.url },
+                            onOpenAttachment = { part -> viewing = part })
                     }
                 }
             }
@@ -686,6 +903,56 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
             }
         }
     }
+    // An attachment, opened: the whole picture, its name and its size, and what can be done
+    // with it. A private object's URL is signed for six hours, so the sheet asks again when it
+    // is opened rather than trusting a URL that may have expired since the page was read.
+    if (openViewing != null) {
+        val part = openViewing
+        val path = part.path?.takeIf(lol.mony.harmony.data.repo.MessageMedia::isPath)
+        val url = path?.let { media[it]?.url } ?: AvatarUrl.resolve(session.endpoint.baseUrl, part.url)
+        LaunchedEffect(path) {
+            val wanted = path ?: return@LaunchedEffect
+            if (media[wanted]?.url == null) {
+                val token = state.auth.freshToken() ?: return@LaunchedEffect
+                state.signMedia(session.endpoint, token, listOf(wanted))
+            }
+        }
+        ModalBottomSheet(onDismissRequest = { viewing = null }) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                if (url != null && (part.fileType == "image" || part.mimeType?.startsWith("image/") == true)) {
+                    AsyncImage(
+                        model = url, contentDescription = part.altText ?: part.fileName ?: "Attachment",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.widthIn(max = 360.dp).heightIn(max = 480.dp)
+                            .clip(MaterialTheme.shapes.medium).testTag("attachment-sheet-image"),
+                    )
+                } else if (url != null) {
+                    Text("Open in your browser", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    Text(
+                        if (path != null) "This file is not available to your account."
+                        else "This attachment has no file.",
+                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(part.fileName ?: part.altText ?: "Attachment",
+                    style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("attachment-sheet-name"))
+                part.fileSize?.let { Text(humanSize(it), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                if (!part.altText.isNullOrBlank()) Text(part.altText!!, style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp))
+                if (url != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = { viewing = null; runCatching { uriHandler.openUri(url) } }, modifier = Modifier.testTag("attachment-open")) {
+                        Text("Open")
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = { viewing = null }) { Text("Close") }
+            }
+        }
+    }
     if (openSearchOpen) ModalBottomSheet(onDismissRequest = { searchOpen = false }) {
         Column(Modifier.padding(16.dp)) {
             OutlinedTextField(query, { query = it }, label = { Text("Search") }, modifier = Modifier.fillMaxWidth())
@@ -696,7 +963,8 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 Column(Modifier.padding(vertical = 12.dp)) {
                     Text(row.author(people, bots).name, style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold)
-                    MessageContent(row, sizes.messageSp)
+                    MessageContent(row, sizes.messageSp, signedUrl = { path -> media[path]?.url },
+                        onOpenAttachment = { part -> viewing = part })
                 }
             }
                 if (openSearchRows?.isEmpty() == true) item { Text("No results") } }
@@ -799,6 +1067,8 @@ internal fun MessageRow(
     onActions: () -> Unit, onReact: (String) -> Unit, onAuthor: (String?) -> Unit,
     onShowReactors: (String) -> Unit, onReply: () -> Unit, onRetry: () -> Unit,
     highlighted: Boolean = false,
+    signedUrl: ((String) -> String?)? = null,
+    onOpenAttachment: ((ContentPart) -> Unit)? = null,
 ) {
     val message = row.message
     val sizes = LocalSizes.current
@@ -859,7 +1129,9 @@ internal fun MessageRow(
                     if (appearance.showTimestamps) Text(time, style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                MessageContent(message, sizes.messageSp, baseUrl = baseUrl, emojis = emojis,
+                MessageContent(message, sizes.messageSp, baseUrl = baseUrl,
+                    signedUrl = signedUrl, onOpenAttachment = onOpenAttachment,
+                    emojis = emojis,
                     encryptedNotice = if (message.encrypted) "Encrypted message. Keys are not available in this client." else null)
                 if (row.isPending) Text("Sending…", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("sending-label"))

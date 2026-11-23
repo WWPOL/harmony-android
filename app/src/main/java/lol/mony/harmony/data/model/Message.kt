@@ -373,10 +373,35 @@ internal object ContentPartSerializer : KSerializer<ContentPart> {
     override fun serialize(encoder: Encoder, value: ContentPart) {
         val output = encoder as? JsonEncoder ?: run { encoder.encodeString(value.asText); return }
         // The original part is the truth; a part this build built itself writes its own fields.
+        // Writing only text/url/name/emoji here is what made an uploaded attachment go out as a
+        // bare `{"type":"file"}` with no `path`: the instance accepted it and no client could
+        // ever open it.
         val body = if (value.raw.isNotEmpty()) value.raw else buildJsonObject {
             value.text?.let { put("text", it) }
             value.url?.let { put("url", it) }
+            value.path?.let { put("path", it) }
             value.name?.let { put("name", it) }
+            value.label?.let { put("label", it) }
+            value.fileType?.let { put("fileType", it) }
+            value.fileName?.let { put("fileName", it) }
+            value.fileSize?.let { put("fileSize", it) }
+            value.mimeType?.let { put("mimeType", it) }
+            value.altText?.let { put("altText", it) }
+            value.width?.let { put("width", it) }
+            value.height?.let { put("height", it) }
+            value.markdown?.let { put("markdown", it) }
+            value.preview?.let { put("preview", it) }
+            value.userId?.let { put("userId", it) }
+            value.username?.let { put("username", it) }
+            value.displayName?.let { put("displayName", it) }
+            value.domain?.let { put("domain", it) }
+            value.isLocal?.let { put("isLocal", it) }
+            value.roleId?.let { put("roleId", it) }
+            value.roleName?.let { put("roleName", it) }
+            value.channelId?.let { put("channelId", it) }
+            value.serverId?.let { put("serverId", it) }
+            value.messageId?.let { put("messageId", it) }
+            value.stickerId?.let { put("stickerId", it) }
             value.emoji?.let { put("emoji", EmojiSerializer.toJson(it)) }
         }
         output.encodeJsonElement(buildJsonObject {
