@@ -8,10 +8,12 @@ recorded, and nothing here moves an entry in it.
 
 The baseline was a working Compose client with a shell that fought the person using it.
 
-**One rail did two jobs.** A 76dp column carried the five destinations *and* every server, then
-collapsed to a menu button. Choosing a server hid the destinations; choosing a destination hid
-the servers. Every choice cost the other one, and on a tablet the whole width went to whichever
-of the two happened to be current.
+**One rail did two jobs, and then five destinations did three.** A 76dp column carried the five
+destinations *and* every server, then collapsed to a menu button. Choosing a server hid the
+destinations; choosing a destination hid the servers. The first redesign split the two apart --
+but it split them the wrong way round: the five destinations became the frame, and the servers
+became a strip *inside* one of them. So the thing a person uses constantly was the thing hidden,
+and the thing they visit now and then took half the navigation.
 
 **One column at every width.** The DM list, a server's channel list and the room were three
 mutually exclusive states of the same column. Opening a room *replaced* the list, so getting to
@@ -27,57 +29,102 @@ motion beyond a preference that nothing read, no dynamic colour.
 
 ## The frame
 
-`ui/navigation/HarmonyShell.kt` draws the app's frame from the window's width:
+`ui/navigation/HarmonyShell.kt` draws the app's frame from the window's width, and the frame's
+navigation is the **spaces**: Home and every server the account is in.
+
+### Why the servers, and not five destinations
+
+The previous frame had five equal destinations -- Chats, Social, Files, Alerts, You -- in a bar
+or a rail, and the servers were a strip *inside* Chats. That shape says the app is five things
+used equally, which is not how it is used: a person spends nearly all of their time inside one
+server, hops between two or three, and visits the feed, the drive, the inbox and their account
+now and then.
+
+So the servers are the navigation. Choosing one is one tap from **anywhere**, including while a
+room is open in a different server -- which is the case the old shape made expensive. An answer
+that arrives while you are reading somewhere else used to cost leaving the room, opening the
+list, and finding the strip; it is now the same single tap as changing channel.
 
 | Width | Frame | Why |
 |---|---|---|
-| under 600dp | `NavigationBar` at the bottom | a thumb reaches the bottom of a phone; the top is where the content's own controls go |
-| 600dp and wider | `NavigationRail` at the side | a pointer and a two-handed grip both find it, and a bottom bar would waste the height a wide window has most of |
+| under 600dp | a bar at the bottom | a thumb reaches the bottom of a phone; the top is where the content's own controls go |
+| 600dp and wider | a rail at the side | a pointer and a two-handed grip both find it, and a wide window has the width to list every server *by name* |
 
-Both are Material's own components, so selection, ripple, focus and the TalkBack role come from
-the platform rather than being re-implemented. What the file owns is *when* each is used, what
-each item says, and the insets.
+**The phone's bar** (`SpaceBar`) holds Home, the three servers most worth reaching, and a "More"
+control. It is ordered by *attention*, not recency: unread mentions first, then any unread, then
+the rest (`barSpaces`). A server with six unread messages should not sit behind one that was read
+this morning. The bar scrolls rather than compressing, so every item keeps its real size and its
+name; a bar of eight squeezed monograms is a memory test, and there is room for one short line
+under each face.
 
-The insets are the shell's, once, for the whole content. The app draws edge to edge, so a
+**The wide rail** (`SpaceColumn`) lists *every* server, by name, with its unread count, plus
+"Add a server" and "More". The names are the point: a 76dp column of monograms is a phone pattern
+a tablet does not need to repeat, and with the width to spell them a server is found by reading
+rather than by remembering which initials were which.
+
+**The selection is a shape, not a highlight.** A space's face morphs its corner radius as it
+becomes current (Material 3 Expressive's selected-item language), and the label goes bold. There
+is no second colour band and no tick, because the shape and the weight already say it.
+
+### The "More" sheet is the app's map
+
+The four rare destinations -- Social, Files, Alerts, You -- live behind the rail's "More"
+control, in `MoreSheet.kt`. It is deliberately **not** an overflow menu: it lists every server
+with its name and unread count, then the four places with a line saying what is inside each one.
+It is the only place a person can find a server they are not thinking about, which is what makes
+a bar of three safe, and it is one tap from anywhere.
+
+Nothing is lost against the old five-item bar: each of the four is still a single tap from
+anywhere, and the server list is *better* off, because it is no longer a strip inside one
+destination. Back from a rare destination returns to the conversation, which is the frame's rule
+rather than each page's.
+
+### The insets
+
+The insets are the frame's, once, for the whole content. The app draws edge to edge, so a
 destination's first row starts at y=0 unless something pads it; a device screenshot showed the
-space-switcher strip's "Home" pill with the clock drawn over it, because the strip was the first
-row and nothing had inset it. Padding each destination's first child is how an app acquires two
-margins and a screen that forgets. The shell now pads the content box by the status bar, the
-cutout and the horizontal edges, in both layouts, and each destination starts from a surface that
-is already inside the safe area. A rail or a bar pads itself for the edges it owns.
+old space strip's "Home" pill with the clock drawn over it, because the strip was the first row
+and nothing had inset it. Padding each destination's first child is how an app acquires two
+margins and a screen that forgets. The frame pads the content box by the status bar, the cutout
+and the horizontal edges, in both layouts, and each destination starts from a surface that is
+already inside the safe area. The bar and the rail pad themselves for the edges they own.
 
 The destinations are the frame and never move. Each one owns its own content, so a destination
-can be as different as Chats (a list beside a room) and Files (a folder tree) without the shell
-knowing what either looks like. The shell also provides the width it measured
+can be as different as Chats (a list beside a room) and Files (a folder tree) without the frame
+knowing what either looks like. The frame also provides the width it measured
 (`LocalWindowWidth`), so a destination can choose its own pane count from the same number the
 frame used.
 
+### It opens where you left off
+
+The server a person was last reading is remembered per account and instance
+(`SessionStore.lastSpace`) and reopened on the next launch, checked against the server list that
+comes back, so a server they have left cannot be reopened. An app that opened on Home every
+launch made a person find their server again every time.
+
 ## Chats
 
-`ui/screens/chat/ChatsDestination.kt` is the information-architecture change.
+`ui/screens/chat/ChatsDestination.kt` is the conversation itself, and it is now the *whole* of
+the primary surface rather than one of five equal destinations.
 
-The servers and direct messages became a **space switcher** *inside* the destination
-(`SpaceSwitcher.kt`): a scrolling strip of pills on a phone, a column with every name visible on
-a wide window. A server is content you are reading, not a place the app has, so it belongs in the
-destination rather than in the navigation.
+The space switcher that used to sit inside this destination is gone. It was a second navigation
+inside the content, competing with the frame's own; the frame now carries the spaces, so there is
+exactly one place a server is chosen and it is the same place at every width and on every screen.
 
 The channel list and the room are **two panes when there is room**:
 
 - **Compact** (under 600dp): one pane at a time. Choosing a channel slides the room in over the
   list and back returns; the room's own back arrow says the same thing as the gesture, so a
-  person who does not know the gesture is not stuck.
-- **Medium** (600dp to 839dp): the list keeps its width and the room takes the rest. Choosing a
-  channel is a *selection*, not a navigation, and the unread channels stay visible while reading.
-  The space switcher is still the strip here, above the list.
-- **Expanded** (840dp and up): a third pane. The switcher becomes a column beside the list,
-  because that is the first width at which it does not cost the room its reading width.
+  person who does not know the gesture is not stuck. Switching server is still one tap, because
+  the bar at the bottom is the frame and it does not go away when a room opens.
+- **Medium and expanded** (600dp and up): the list keeps its width and the room takes the rest.
+  Choosing a channel is a *selection*, not a navigation, and the unread channels stay visible
+  while reading. That is what a wide window is for.
 
-Three panes were the bug a 640dp capture caught: the switcher column is up to 260dp and the
-list is 340dp, so drawing all three at 600dp left the room a strip of pixels with the message
-text wrapping one letter per line. The pane count is now two decisions
-(`showsTwoPanesAt`, `showsSpaceColumnAt`) rather than one, and the width is measured once by
-the shell and provided to the destination, so the frame and the content cannot disagree about
-how wide the window is.
+The channel list's app bar carries the server's own face and name and its member count, so the
+choice the rail made is confirmed in the same picture the rail drew. The direct-message list's
+bar says how many conversations it holds, and "new message" is a filled tonal button rather than
+a third grey icon in a row of them.
 
 The room itself gained two things. Its app bar keeps the channel name and search, and moves
 refresh, pins and threads into an overflow instead of five icons competing with the title. Its
@@ -249,14 +296,21 @@ preview).
 
 The redesign's own tests:
 
-- `ShellRailTest` — the frame's width rule; every destination inside the status bar and the cutout
-  and at least 48dp tall; a tap reaching the caller and the frame following it; a badge's spoken
-  wording, including the 99+ cap; and the pane-count rule, that a third pane waits for 840dp.
-- `ChatsInsetTest` and `WideChatsInsetTest` — a destination's first row is below the status bar at
-  both widths. This is the bug a device capture caught: the switcher strip was drawn under the
-  clock, because nothing had inset the content.
-- `ExpandedChatsRenderTest` — 1000dp: the switcher column, the list and the room, with the room
-  measured as the widest pane; captured in the dark and light looks.
+- `SpaceRailTest` — the frame's width rule; every space inside the status bar and the cutout and
+  at least 48dp tall; a tap on a server reaching the caller and the frame following it; a badge's
+  spoken wording; the bar's *capacity* rule, that Home, the servers and "More" all fit at every
+  phone width (this is a bug that shipped in this change: the item width was the bar divided by
+  the spaces, which pushed "More" off the screen); the order of attention; and the pane-count
+  rule, that a list gets a room beside it from 600dp.
+- `ServerFirstNavigationRenderTest` and `WideServerFirstNavigationRenderTest` — the real
+  `SignedInShell` against the fixture instance: the phone's bar and the wide rail, a server
+  reached from the conversation in one tap, the map reaching the four destinations, and back
+  returning to the conversation. They produce `nav-*.png`.
+- `ChatsInsetTest` and `WideChatsInsetTest` — the bar (or the rail, at a wide width) and the
+  content are inside the status bar and the cutout at both widths. This is the bug a device
+  capture caught: a strip was drawn under the clock, because nothing had inset the content.
+- `ExpandedChatsRenderTest` — 1000dp: the rail, the list and the room, with the room measured as
+  the widest pane; captured in the dark and light looks.
 - `MediumChatsRenderTest` — 640dp: the room is still a reading column, not the strip of pixels the
   first version gave it.
 - `YouPageRenderTest` — the settings list and a section opened from it, drawn from the fixture
@@ -309,11 +363,13 @@ draws, which accessibility nodes it exposes, and the pane geometry at 320, 400, 
   which is what the device capture would have shown.
 - **Predictive back** is not wired to an animation yet. Back closes a room and returns to the list,
   which is correct, but the system's back-preview is not drawn.
-- **Expressive components that are not reachable.** This Compose BOM's material3 1.4.0 marks
-  `MaterialExpressiveTheme`, `MotionScheme` and the Flexible app bars `internal` to Kotlin — they
-  compile in the library's own Java bytecode but cannot be called from an app. The app therefore
-  builds its expressive type, shape and motion scale on `MaterialTheme` and verified-stable
-  components. When a stable release exposes them, `HarmonyTheme` is the one place to change.
+- **Some Expressive components are still unreachable.** material3 1.5.0 (pinned ahead of the
+  Compose BOM, which still manages the rest) makes `MaterialExpressiveTheme`, `MotionScheme`,
+  `LoadingIndicator`, `MaterialShapes`, `ShortNavigationBar`, `ToggleButton` and `ButtonGroup`
+  public, and the app uses the theme, the motion scheme and the loading indicator. The *flexible*
+  app bars (`LargeFlexibleTopAppBar` and its siblings) and `FloatingToolbar` are still `internal`
+  to Kotlin in 1.5.0, so the app keeps `TopAppBar`; when a stable release exposes them,
+  `HarmonyTheme` and the app bars are the places to change.
 - **The voice screen's video stage has no capture.** `CallStage` draws a shared screen and camera
   tiles only from a live `VideoTrack`, which needs a LiveKit room. Its roster, which is what a call
   without video shows, is captured; the tiles are not.

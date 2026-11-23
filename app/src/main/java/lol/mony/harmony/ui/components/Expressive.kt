@@ -18,7 +18,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -144,16 +145,39 @@ fun EmptyState(
  *
  * A centred spinner with a label under it is the shape every app uses; a label beside it reads
  * at a glance and takes less vertical space, which matters on a short window.
+ *
+ * The spinner is Material 3 Expressive's [LoadingIndicator]: a shape that morphs through a set
+ * of rounded polygons while it runs, instead of a ring sweeping a gap around. It is the same
+ * "something is happening" at a glance, and it reads as the app's own motion rather than as the
+ * platform's oldest progress control. It still takes its colour from the theme, and it still
+ * stops moving when the person asked for less motion -- the theme installs a motion scheme whose
+ * specs are all zero for that case.
  */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun LoadingState(label: String = "Loading") {
     Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            LoadingIndicator(
+                modifier = Modifier.size(28.dp),
+                color = MaterialTheme.colorScheme.primary,
+            )
             Spacer(Modifier.width(14.dp))
             Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/**
+ * The small in-line spinner: a bar or a row that is refreshing, not a screen that is loading.
+ *
+ * [LoadingState] is for a surface that has nothing to show yet; this is for one that has
+ * something and is fetching more, where a 28dp morph would move the thing the person is reading.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun InlineLoading(modifier: Modifier = Modifier, color: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.primary) {
+    LoadingIndicator(modifier = modifier.size(18.dp), color = color)
 }
 
 /** A failure with one way forward: retry. The message is the instance's own, not a rewording. */

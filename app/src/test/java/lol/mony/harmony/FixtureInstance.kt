@@ -75,12 +75,19 @@ internal class FixtureInstance : AutoCloseable {
 
             path.contains("/user_servers") -> USER_SERVERS
             path.contains("/server_settings") -> SERVER_SETTINGS
-            path.contains("/profiles") -> PROFILES
+            // The profiles table is the one the app reads by *filter* and expects one row from
+            // (`auth_user_id=eq.…`), so it is the one the fixture has to filter. Answering every
+            // profile request with every row made `singleOrNull()` return null and the account
+            // page report that the profile could not be found -- a fixture bug that reads like
+            // an app bug.
+            path.contains("/profiles") -> profilesFor(path)
             path.contains("/notifications") -> NOTIFICATIONS
             path.contains("/posts") -> POSTS
             path.contains("/drive_") || path.contains("/drive-") -> DRIVE_FILES
             path.contains("/servers") -> SERVERS
+            path.contains("/channel_categories") -> CHANNEL_CATEGORIES
             path.contains("/channels") -> CHANNELS
+            path.contains("/conversation_participants") -> CONVERSATION_PARTICIPANTS
             path.contains("/conversations") -> CONVERSATIONS
             path.contains("/messages") -> MESSAGES
             path.contains("/roles") -> ROLES
@@ -97,6 +104,32 @@ internal class FixtureInstance : AutoCloseable {
             .setResponseCode(200)
             .setHeader("Content-Type", "application/json")
             .setBody(body)
+    }
+
+    /**
+     * The profile rows a request actually asked for.
+     *
+     * PostgREST filters live in the query string (`auth_user_id=eq.…`, `id=in.(a,b)`), so this
+     * reads them and answers with the rows that match. Anything it does not understand gets every
+     * row, which is what a path-routing fixture did for all of them before there was more than
+     * one person in it.
+     */
+    private fun profilesFor(path: String): String {
+        val rows = PROFILES.trim().removePrefix("[").removeSuffix("]")
+            .split(Regex("(?<=\\}),\\s*(?=\\{)"))
+        val eq = Regex("auth_user_id=eq\\.([^&]+)").find(path)?.groupValues?.get(1)
+        val idEq = Regex("[?&]id=eq\\.([^&]+)").find(path)?.groupValues?.get(1)
+        val idIn = Regex("[?&]id=in\\.\\(([^)]*)\\)").find(path)?.groupValues?.get(1)
+        val wanted: Set<String>? = when {
+            eq != null -> setOf(eq)
+            idEq != null -> setOf(idEq)
+            idIn != null -> idIn.split(",").map { it.trim() }.toSet()
+            else -> null
+        }
+        val selected = if (wanted == null) rows else rows.filter { row ->
+            wanted.any { key -> row.contains("\"id\":\"$key\"") || row.contains("\"auth_user_id\":\"$key\"") }
+        }
+        return "[" + selected.joinToString(",") + "]"
     }
 
     private companion object {
@@ -119,6 +152,14 @@ internal class FixtureInstance : AutoCloseable {
          * The signed-in account, with an appearance the account itself stores -- the JSON shape
          * the web client writes -- so a capture shows the app honouring it.
          */
+        /**
+         * The account first, then the other people it talks to.
+         *
+         * The order matters: the app resolves *its own* profile by asking for the row that
+         * carries its auth user id, and a fixture that put somebody else first made the
+         * signed-in account Grace -- which is a fixture bug that looked exactly like a
+         * navigation bug, because every screen then drew the wrong person.
+         */
         val PROFILES = """
             [{"id":"$PROFILE_ID","auth_user_id":"$AUTH_ID","username":"ada",
               "display_name":"Ada Lovelace","bio":"Mathematics, engines, and the occasional channel.",
@@ -128,7 +169,19 @@ internal class FixtureInstance : AutoCloseable {
               "appearance_settings":{"theme":"dark","fontSize":15,"zoomLevel":100,
                                      "compactMode":false,"reduceMotion":false},
               "manually_approves_followers":false,"dm_policy":"everyone",
-              "created_at":"2024-01-02T03:04:05Z"}]
+              "created_at":"2024-01-02T03:04:05Z"},
+             {"id":"p2","auth_user_id":"33333333-3333-4333-8333-333333333333","username":"grace",
+              "display_name":"Grace Hopper","bio":"Compilers, and the occasional channel.",
+              "pronouns":null,"color":"#A855F7","avatar_url":null,"banner_url":null,
+              "profile_fields":[],"appearance_settings":null,
+              "manually_approves_followers":false,"dm_policy":"everyone",
+              "created_at":"2024-01-03T03:04:05Z"},
+             {"id":"p3","auth_user_id":"44444444-4444-4444-8444-444444444444","username":"alan",
+              "display_name":"Alan Turing","bio":"Machines that think.",
+              "pronouns":null,"color":"#22C55E","avatar_url":null,"banner_url":null,
+              "profile_fields":[],"appearance_settings":null,
+              "manually_approves_followers":false,"dm_policy":"everyone",
+              "created_at":"2024-01-04T03:04:05Z"}]
         """.trimIndent()
 
         /**
@@ -254,13 +307,43 @@ internal class FixtureInstance : AutoCloseable {
              "MANAGE_INVITES":true}
         """.trimIndent()
 
+        /**
+         * The categories the channel list groups by.
+         *
+         * The channel list reads this table before the channels, so a fixture without it drew a
+         * permanent "Loading channels" -- which is a picture of the fixture, not of the app.
+         */
+        val CHANNEL_CATEGORIES = """
+            [{"id":"cat1","server_id":"s1","name":"Text channels","order":0}]
+        """.trimIndent()
+
+        /**
+         * `channels.type` is a smallint -- 0 text, 1 voice -- not the word. A fixture that wrote
+         * `"type":"text"` failed to decode the whole tree, so the channel list sat on its
+         * spinner forever while every request returned 200.
+         */
         val CHANNELS = """
-            [{"id":"c1","server_id":"s1","name":"welcome","description":"Start here","type":"text",
-              "position":0,"category_id":"cat1"},
-             {"id":"c2","server_id":"s1","name":"general","description":"Everything and nothing","type":"text",
-              "position":1,"category_id":"cat1"},
-             {"id":"c3","server_id":"s1","name":"design","description":"Type, colour and motion","type":"text",
-              "position":2,"category_id":"cat1"}]
+            [{"id":"c1","server_id":"s1","name":"welcome","description":"Start here","type":0,
+              "order":0,"category":"cat1"},
+             {"id":"c2","server_id":"s1","name":"general","description":"Everything and nothing","type":0,
+              "order":1,"category":"cat1"},
+             {"id":"c3","server_id":"s1","name":"design","description":"Type, colour and motion","type":0,
+              "order":2,"category":"cat1"}]
+        """.trimIndent()
+
+        /**
+         * Both people in the direct conversation.
+         *
+         * The DM list reads this table twice -- once for the account's own rows, which is what
+         * lists a conversation at all, and once for the other people in it, which is what gives
+         * the row its title. The fixture answers both with both rows, because it routes on the
+         * path and not on the query: one row drew a list whose every conversation was nameless.
+         */
+        val CONVERSATION_PARTICIPANTS = """
+            [{"id":"cp1","conversation_id":"cv1","user_id":"$PROFILE_ID","joined_at":"2026-01-01T00:00:00Z",
+              "left_at":null,"hidden_at":null},
+             {"id":"cp2","conversation_id":"cv1","user_id":"p2","joined_at":"2026-01-01T00:00:00Z",
+              "left_at":null,"hidden_at":null}]
         """.trimIndent()
 
         val CONVERSATIONS = """

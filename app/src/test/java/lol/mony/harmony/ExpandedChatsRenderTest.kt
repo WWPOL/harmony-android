@@ -11,7 +11,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import lol.mony.harmony.RenderHarness.capture
 import lol.mony.harmony.ui.AppState
-import lol.mony.harmony.ui.navigation.Destination
+import lol.mony.harmony.ui.navigation.Space
 import lol.mony.harmony.ui.navigation.HarmonyShell
 import lol.mony.harmony.ui.screens.chat.ChatsDestination
 import lol.mony.harmony.ui.theme.HarmonyTheme
@@ -54,9 +54,10 @@ class ExpandedChatsRenderTest {
                 // window's white shows through the inset and the capture misrepresents it.
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     val state = AppState(lol.mony.harmony.AppContainer(RuntimeEnvironment.getApplication()))
-                    HarmonyShell(Destination.Chats, {}, chats = 4, mentions = 2, safeArea = insets) { layout ->
-                        ChatsDestination(state, theme, layout)
-                    }
+                    HarmonyShell(
+                        spaces = railSpaces, currentSpace = railSpaces[1],
+                        onSpace = {}, onAddServer = {}, onMore = {}, safeArea = insets,
+                    ) { layout -> ChatsDestination(state, theme, layout) }
                 }
             }
         }
@@ -64,20 +65,20 @@ class ExpandedChatsRenderTest {
     }
 
     /**
-     * Three panes, each with real width, and the room gets the most of it.
+     * The three panes -- the spaces, the list and the room -- each with real width.
      *
      * A width assertion rather than a picture: a screenshot shows that *something* drew, and the
-     * bug was that the something was 40dp wide. The room has to be the widest pane, because that
-     * is the one a person reads.
+     * bug this replaced was that the something was 40dp wide. The room has to be the widest
+     * pane, because that is the one a person reads.
      */
     @Test fun theExpandedLayoutGivesTheRoomTheMostWidth() {
         draw()
         val screen = with(compose.density) { 1000.dp.toPx() }
-        val switcher = compose.onNodeWithTag("space-switcher").fetchSemanticsNode().boundsInRoot
+        val rail = compose.onNodeWithTag("space-rail").fetchSemanticsNode().boundsInRoot
         val list = compose.onNodeWithTag("room-list").fetchSemanticsNode().boundsInRoot
-        assertTrue("the switcher drew nothing", switcher.width > 0f)
+        assertTrue("the rail drew nothing", rail.width > 0f)
         assertTrue("the list drew nothing", list.width > 0f)
-        val room = screen - switcher.width - list.width
+        val room = screen - rail.width - list.width
         assertTrue(
             "the room is ${room}px of ${screen}px, narrower than the list's ${list.width}px",
             room > list.width,
@@ -113,9 +114,10 @@ class ExpandedChatsRenderTest {
         compose.setContent {
             HarmonyTheme(theme) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    HarmonyShell(Destination.Chats, {}, chats = 4, mentions = 2, safeArea = insets) { _ ->
-                        DesignGallery.Content()
-                    }
+                    HarmonyShell(
+                        spaces = railSpaces, currentSpace = railSpaces[1],
+                        onSpace = {}, onAddServer = {}, onMore = {}, safeArea = insets,
+                    ) { _ -> DesignGallery.Content() }
                 }
             }
         }
@@ -143,9 +145,11 @@ class MediumChatsRenderTest {
             HarmonyTheme(VisualThemeSettings()) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     val state = AppState(lol.mony.harmony.AppContainer(RuntimeEnvironment.getApplication()))
-                    HarmonyShell(Destination.Chats, {}, safeArea = WindowInsets(0, 24, 0, 24)) { layout ->
-                        ChatsDestination(state, VisualThemeSettings(), layout)
-                    }
+                    HarmonyShell(
+                        spaces = railSpaces, currentSpace = railSpaces[1],
+                        onSpace = {}, onAddServer = {}, onMore = {},
+                        safeArea = WindowInsets(0, 24, 0, 24),
+                    ) { layout -> ChatsDestination(state, VisualThemeSettings(), layout) }
                 }
             }
         }
@@ -158,10 +162,23 @@ class MediumChatsRenderTest {
             "at 640dp the room is only ${room}px of ${screen}px, a strip of pixels",
             room >= minimum,
         )
-        // And the switcher is a pane here, above the list, not a third column.
+        // And the spaces are the rail here, not a strip above the list: there is exactly one
+        // place a server is chosen, at every width.
         assertTrue(
-            "a 640dp window drew no space switcher",
-            compose.onAllNodesWithTag("space-switcher").fetchSemanticsNodes().isNotEmpty(),
+            "a 640dp window drew no space rail",
+            compose.onAllNodesWithTag("space-rail").fetchSemanticsNodes().isNotEmpty(),
+        )
+        assertTrue(
+            "a 640dp window also drew the phone's bar",
+            compose.onAllNodesWithTag("space-bar").fetchSemanticsNodes().isEmpty(),
         )
     }
 }
+
+/** The spaces these captures draw: Home and three servers, one of them asking for attention. */
+private val railSpaces = listOf(
+    Space.Home.copy(badge = 2),
+    Space("s1", "Design"),
+    Space("s2", "E2E Server", badge = 4, mentions = 2),
+    Space("s3", "Book club"),
+)

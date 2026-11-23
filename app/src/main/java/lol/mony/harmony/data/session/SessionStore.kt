@@ -161,6 +161,21 @@ class SessionStore(private val context: Context, private val sealer: SessionSeal
         val key = accountKey("dynamic-color")
         context.sessionData.edit { if (enabled) it[key] = "on" else it.remove(key) }
     }
+    /**
+     * The server this account was last reading, so the app opens where they left off.
+     *
+     * It is a *device* preference, keyed by the account and instance like the rest: a phone and
+     * a tablet can be in different servers, and a server id from another instance means nothing
+     * here. An empty string is Home (the direct messages), which is a place and not an absence.
+     */
+    suspend fun lastSpace(): String? =
+        context.sessionData.data.first()[accountKey("last-space")]
+
+    suspend fun saveLastSpace(serverId: String?) {
+        val key = accountKey("last-space")
+        context.sessionData.edit { if (serverId == null) it[key] = "" else it[key] = serverId }
+    }
+
     suspend fun draft(room: String): String {
         val key = accountKey("draft.$room")
         return context.sessionData.data.first()[key].orEmpty()

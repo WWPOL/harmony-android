@@ -5,7 +5,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
-import lol.mony.harmony.ui.navigation.Destination
+import androidx.compose.ui.test.onNodeWithTag
+import lol.mony.harmony.ui.navigation.Space
 import lol.mony.harmony.ui.navigation.HarmonyShell
 import lol.mony.harmony.ui.theme.HarmonyTheme
 import lol.mony.harmony.ui.theme.VisualThemeSettings
@@ -41,24 +42,35 @@ class WideWindowRenderTest {
             HarmonyTheme(VisualThemeSettings(theme = "custom", customThemeMode = "dark",
                 customPrimaryColor = "#A855F7", customAccentColor = "#A855F7")) {
                 Surface(Modifier.fillMaxSize()) {
-                    HarmonyShell(Destination.Chats, {}, chats = 3, mentions = 1) { _ ->
-                        DesignGallery.Content()
-                    }
+                    HarmonyShell(
+                        spaces = wideSpaces, currentSpace = wideSpaces[1],
+                        onSpace = {}, onAddServer = {}, onMore = {},
+                    ) { _ -> DesignGallery.Content() }
                 }
             }
         }
         compose.waitForIdle()
         RenderHarness.run { compose.capture("design-tablet-custom") }
         assertTrue("the rail drew nothing",
-            compose.onAllNodesWithTag("rail").fetchSemanticsNodes().isNotEmpty())
+            compose.onAllNodesWithTag("space-rail").fetchSemanticsNodes().isNotEmpty())
         assertTrue("a wide window also drew a bottom bar",
-            compose.onAllNodesWithTag("nav-bar").fetchSemanticsNodes().isEmpty())
-        // Every destination is in the rail, and each is a real target.
-        for (label in listOf("Chats", "Social", "Files", "Alerts", "You")) {
-            val nodes = compose.onAllNodesWithTag("nav-$label").fetchSemanticsNodes()
-            assertTrue("$label is missing from the rail", nodes.isNotEmpty())
-            assertTrue("$label is ${nodes.first().size.height}px tall",
-                nodes.first().size.height > 0f)
+            compose.onAllNodesWithTag("space-bar").fetchSemanticsNodes().isEmpty())
+        // Every space is in the rail, by name, and each is a real target.
+        for (name in listOf("Home", "Design", "E2E Server", "Book club")) {
+            val tag = if (name == "Home") "space-home" else "space-server-$name"
+            val nodes = compose.onAllNodesWithTag(tag).fetchSemanticsNodes()
+            assertTrue("$name is missing from the rail", nodes.isNotEmpty())
+            assertTrue("$name is ${nodes.first().size.height}px tall", nodes.first().size.height > 0f)
         }
+        // And "More", which is where the four rare destinations live.
+        compose.onNodeWithTag("space-more").assertExists()
     }
 }
+
+/** The spaces the wide frame draws: Home and three servers, one asking for attention. */
+private val wideSpaces = listOf(
+    Space.Home.copy(badge = 3),
+    Space("s1", "Design"),
+    Space("s2", "E2E Server", badge = 1, mentions = 1),
+    Space("s3", "Book club"),
+)

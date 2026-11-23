@@ -95,8 +95,17 @@ fun ServerAvatar(
     size: Dp = 44.dp,
     selected: Boolean = false,
     baseUrl: String? = null,
+    /**
+     * The corners to draw, when the caller is animating them.
+     *
+     * The frame's navigation morphs a face's radius as it becomes current -- Material 3
+     * Expressive's selected-item language is a shape change, not a colour change -- and a
+     * composable that decides its own radius cannot be animated from outside. Null keeps the
+     * default, so every other caller is unchanged.
+     */
+    shape: androidx.compose.foundation.shape.CornerBasedShape? = null,
 ) {
-    val shape = RoundedCornerShape(if (selected) 16.dp else 22.dp)
+    val shape = shape ?: RoundedCornerShape(if (selected) 16.dp else 22.dp)
     val harmony: HarmonyColors = LocalHarmonyColors.current
     val image = AvatarUrl.resolveServerIcon(baseUrl, url)
     if (image != null) {

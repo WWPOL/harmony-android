@@ -93,3 +93,36 @@ fun ServerBranding(
         }
     }
 }
+
+/**
+ * A server's cover as the backdrop of its channel list's app bar.
+ *
+ * The cover used to be a 96dp band *above* the bar, which drew the server's face and name twice
+ * in the first 100dp of the list. Here it is behind the bar instead: the bar keeps its own
+ * height, the title sits on the picture, and a server with no cover is simply a plain bar.
+ *
+ * A gradient from transparent to the background keeps the title readable over any upload: the
+ * uploader chooses the picture, so the app cannot assume it is dark.
+ */
+@Composable
+fun ServerBannerBackdrop(name: String, banner: String?, baseUrl: String?) {
+    val resolved = AvatarUrl.resolveServerBanner(baseUrl, banner) ?: return
+    Box(Modifier.fillMaxWidth().height(112.dp).testTag("server-banner")) {
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current).data(resolved).crossfade(true).build(),
+            contentDescription = name + " cover",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(
+            Modifier.matchParentSize().background(
+                Brush.verticalGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.background.copy(alpha = 0.35f),
+                        MaterialTheme.colorScheme.background.copy(alpha = 0.92f),
+                    ),
+                ),
+            ),
+        )
+    }
+}

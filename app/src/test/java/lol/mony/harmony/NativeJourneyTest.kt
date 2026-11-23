@@ -52,23 +52,33 @@ class NativeJourneyTest {
         compose.onAllNodesWithText(marker, substring = true).fetchSemanticsNodes().isNotEmpty()
     }
 
-    /** The bottom bar switches destinations, and each one loads its own data. */
-    @Test fun bottomNavigationReachesEveryDestination() {
+    /**
+     * The app's map reaches every place, and each one loads its own data.
+     *
+     * The four rare destinations are behind the frame's "More" control, so this walks the route a
+     * person takes: open the map, choose a place, read it, open the map again, come back. It is
+     * one extra tap from the old bar, and it is the same tap whatever else is on screen.
+     */
+    @Test fun theMapReachesEveryPlace() {
         val state = signedIn()
         compose.shot("journey-chats", state, settle = "Direct message") {
             SignedInShell(state, VisualThemeSettings(), { _, _ -> }, {})
         }
         for ((tag, marker) in listOf(
-            "nav-Social" to "Your following feed is quiet",
-            "nav-Alerts" to "Notifications",
-            "nav-You" to "Your profile",
-            "nav-Chats" to "Direct message",
+            "sheet-nav-Social" to "Your following feed is quiet",
+            "sheet-nav-Alerts" to "Notifications",
+            "sheet-nav-You" to "Your profile",
         )) {
+            compose.onNodeWithTag("space-more").performClick()
+            compose.waitForIdle()
             compose.onNodeWithTag(tag).performClick()
             settle(marker)
             compose.waitForIdle()
-            compose.capture("journey-" + tag.removePrefix("nav-").lowercase())
+            compose.capture("journey-" + tag.removePrefix("sheet-nav-").lowercase())
         }
+        // Back returns to the conversation, which is the frame's own rule and not each page's.
+        compose.onNodeWithTag("space-home").performClick()
+        settle("Direct message")
     }
 
     /** Open the fixture direct message from the list, read it, and send one back. */
@@ -94,12 +104,19 @@ class NativeJourneyTest {
         assertTrue("the sent message is stored on the instance", stored.any { it.plainText == text })
     }
 
-    /** Pick the server in the space switcher, open its channel, and send a message into it. */
+    /**
+     * Pick a server in the frame's rail, open its channel, and send a message into it.
+     *
+     * This is the journey the redesign is for: the server is one tap from the conversation, not
+     * hidden inside it.
+     */
     @Test fun channelRoundTrip() {
         val state = signedIn()
         val session = state.auth.state.value as AuthState.SignedIn
-        compose.shot("journey-rail", state, settle = "Direct message") { ChatsDestination(state, VisualThemeSettings(), NavigationLayout.BottomBar) }
-        compose.onNodeWithTag("rail-server-E2E Server").performClick()
+        compose.shot("journey-rail", state, settle = "Direct message") {
+            SignedInShell(state, VisualThemeSettings(), { _, _ -> }, {})
+        }
+        compose.onNodeWithTag("space-server-E2E Server").performClick()
         compose.waitUntil(180_000) { compose.onAllNodesWithTag("channel-list").fetchSemanticsNodes().isNotEmpty() }
         compose.waitForIdle()
         compose.capture("journey-channels")

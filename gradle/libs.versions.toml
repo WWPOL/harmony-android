@@ -5,6 +5,11 @@ coreKtx = "1.19.0"
 lifecycle = "2.11.0"
 activityCompose = "1.13.0"
 composeBom = "2026.09.00"
+# material3 is pinned ahead of the BOM: 1.5.0 is the first release where Material 3
+# Expressive is public API (MaterialExpressiveTheme, MotionScheme, LoadingIndicator,
+# MaterialShapes, ShortNavigationBar, ToggleButton). The BOM still manages the rest of
+# Compose; 1.5.0 needs compose-ui 1.12.0, which the BOM's 1.12.1 satisfies.
+material3 = "1.5.0"
 navigation = "2.10.2"
 serialization = "1.9.0"
 okhttp = "5.3.0"
@@ -32,7 +37,7 @@ androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-toolin
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
-androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
 androidx-compose-material3-window-size = { group = "androidx.compose.material3", name = "material3-window-size-class" }
 androidx-compose-material3-adaptive = { group = "androidx.compose.material3.adaptive", name = "adaptive" }
 androidx-compose-material3-adaptive-layout = { group = "androidx.compose.material3.adaptive", name = "adaptive-layout" }

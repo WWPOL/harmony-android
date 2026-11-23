@@ -66,21 +66,26 @@ app/src/test/       JVM and Robolectric tests, mirroring those packages
 
 ## Android interpretation of Harmony
 
-Material 3 top bars, navigation bar and rail, modal sheets, text fields, switches, ripples and
-system back. The frame follows the window: a navigation bar at the bottom of a phone, a rail at
-the side of anything 600dp or wider. The server and channel list is a pane inside the Chats
-destination rather than a drawer over the whole app, and wide windows show that list beside the
-room it selects. Messages stay left aligned and chronological rather than being wrapped in
+Material 3 Expressive: its top bars, navigation bar and rail, modal sheets, text fields,
+switches, ripples, `LoadingIndicator` and system back, installed through
+`MaterialExpressiveTheme` so the platform's own motion scheme is the app's. The frame follows the
+window: a bar at the bottom of a phone, a rail at the side of anything 600dp or wider. The
+navigation is the **spaces** -- Home and every server -- because that is where nearly all of a
+session is spent; the feed, the drive, the inbox and the account are one tap away behind the
+rail's "More" control instead of taking half the frame. The channel list is a pane inside the
+Chats destination, and wide windows show it beside the room it selects. Messages stay left aligned and chronological rather than being wrapped in
 generic chat bubbles: Harmony's message model is not a bubble model.
 
-[redesign.md](redesign.md) is the design document: the frame, the Chats list-detail, the type,
-shape and motion system, the two colour sources, what was verified and what is still limited.
+[redesign.md](redesign.md) is the design document: the frame -- the **spaces** as the app's
+navigation, with Home and every server one tap away at any width -- the Chats list-detail, the
+"More" sheet that holds the four rare destinations, the type, shape and motion system, the two
+colour sources, what was verified and what is still limited.
 
 Palette anchors are the instance look's sky blue `#0EA5E9`, secondary `#38BDF8`, dark surface
 `#1A1A1E`, sidebar `#17181A`, text `#F2F3F5` and presence green `#43B581`. Typography is
 Android's own face, scaled from the account's message size and zoom against one role scale.
 Rounded controls and native selection affordances provide the Android identity; colour,
-hierarchy, the space switcher and the chat composition carry the instance's identity. The app
+hierarchy, the server rail and the chat composition carry the instance's identity. The app
 does not replace that identity, and does not choose wallpaper colours over an explicit theme:
 "wallpaper colors" is an explicit, device-local choice, and the branded palette is what it falls
 back to.

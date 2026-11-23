@@ -49,6 +49,29 @@ Compact captures are 400x900dp, expanded are 1000x800dp, both at xhdpi.
 | `page-voice-controls-light.png` | The same bar in the light palette, with the toggles in the other state: the outline is what has to survive a light theme, and this is where that is checked. |
 | `page-voice-ended-dark.png` | A call the server ended, with the reason and both things a person can do. |
 
+## The spaces as navigation
+
+These six are the redesign's central claim, drawn from the **real `SignedInShell`** against the
+fixture instance -- not a gallery and not a hand-built layout. They are what a person sees after
+signing in.
+
+| File | What it is |
+|---|---|
+| `nav-phone-home.png` | A 400dp phone, signed in: the direct messages, with the spaces in a bar at the bottom -- Home, the server, and "More". The server is one tap from here. |
+| `nav-phone-server.png` | The same phone after one tap on the server: its channels, with its own face and name in the list's bar. One tap, no drawer and no destination change. |
+| `nav-phone-map.png` | The "More" sheet: every server with its unread count, then the four rare destinations under "Elsewhere", each with a line saying what is inside. |
+| `nav-phone-you.png` | The account page, reached from that sheet -- one tap from the conversation, and the spaces are still at the bottom. |
+| `nav-wide-home.png` | The same screen at 1000dp: the spaces are a rail that lists every server *by name*, beside the conversation. |
+| `nav-wide-map.png` | The map at that width: every server and all four places on one surface. |
+
+`ServerFirstNavigationRenderTest` and `WideServerFirstNavigationRenderTest` produce them and
+assert the claim as they go: the bar at 400dp and the rail at 1000dp, a server reachable from the
+conversation in one tap, and the map reaching the four destinations.
+
+The design-system captures (`design-phone-{dark,light}.png`, `design-tablet-custom.png`,
+`design-expanded-chats-{dark,light}.png`) now draw the same frame with fixture spaces, so they
+show the new navigation in both palettes and at both widths.
+
 ## What is not here
 
 - **A populated room on a device.** Needs a live instance. The room's own render is in

@@ -5,6 +5,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.CornerBasedShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
@@ -114,6 +116,20 @@ data class MotionPreferences(
     /** The spec for a fade or a colour change: still a fade, never zero frames of state. */
     fun effects(millis: Int): androidx.compose.animation.core.AnimationSpec<Float> =
         androidx.compose.animation.core.tween(durationMillis = duration(millis))
+
+    /**
+     * [spatial] for a value that is not a `Float` -- a colour, a `Dp`, an `IntOffset`.
+     *
+     * `animateColorAsState` and `animateDpAsState` want a spec of *their* type, and a spec of
+     * `Float` is not one; the duration and the easing are the same either way, so the generic
+     * form exists rather than each caller building its own tween.
+     */
+    fun <T> spatialSpec(millis: Int): androidx.compose.animation.core.AnimationSpec<T> =
+        androidx.compose.animation.core.tween(durationMillis = duration(millis))
+
+    /** [effects] for a value that is not a `Float`. */
+    fun <T> effectsSpec(millis: Int): androidx.compose.animation.core.AnimationSpec<T> =
+        androidx.compose.animation.core.tween(durationMillis = duration(millis))
 }
 
 val LocalMotion = staticCompositionLocalOf { MotionPreferences(false) }
@@ -180,6 +196,10 @@ fun HarmonyTheme(
     val typography = remember(resolved.fontSize, resolved.zoomLevel) {
         harmonyTypography(resolved.fontSize, resolved.zoomLevel)
     }
+    // Material's own expressive motion, or a scheme that has already stopped moving when the
+    // person asked for less. Installed on the theme rather than kept beside it, so a Material
+    // component the app does not draw itself obeys the same preference the app's own does.
+    val motionScheme = remember(motion) { motionSchemeFor(motion) }
     CompositionLocalProvider(
         LocalBaseDensity provides baseDensity,
         LocalDensity provides Density(baseDensity.density * resolved.zoomLevel / 100f, baseDensity.fontScale),
@@ -188,8 +208,15 @@ fun HarmonyTheme(
         LocalSizes provides SizePreferences(resolved.fontSize, resolved.zoomLevel, resolved.compact),
         LocalAccessibility provides AccessibilityPreferences(resolved.highContrast, resolved.screenReaderSupport),
     ) {
-        MaterialTheme(
+        // `MaterialExpressiveTheme`, not `MaterialTheme`: it is what selects the expressive
+        // shapes, the spring-based motion and the components that only exist in the expressive
+        // set (the short navigation bar's sliding indicator, the loading indicator's morph).
+        // Since material3 1.5.0 it is public API, so the app can ask for it instead of
+        // re-implementing it.
+        @OptIn(ExperimentalMaterial3ExpressiveApi::class)
+        MaterialExpressiveTheme(
             colorScheme = colorScheme,
+            motionScheme = motionScheme,
             typography = typography,
             shapes = harmonyShapes,
             content = content,

@@ -96,16 +96,49 @@ internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) 
     }
     val baseUrl = state.auth.state.collectAsState().value.let { (it as? AuthState.SignedIn)?.endpoint?.baseUrl }
     Column(modifier.fillMaxHeight()) {
-        // The server's own cover and icon, drawn once by the shared composable so the rail,
-        // the header and the tests all resolve branding the same way.
-        tree?.server?.let { ServerBranding(it, baseUrl = baseUrl) }
-        TopAppBar(title = { Text(tree?.server?.name ?: "Channels", maxLines = 1) },
+        // One header, not two. The server's cover and icon used to be drawn *above* an app bar
+        // that repeated the name, so a server with branding drew its face and name twice in the
+        // first 100dp of the list. The branding is inside the bar now: the cover is the bar's
+        // backdrop, and the icon and name are its title.
+        val branding = tree?.server
+        Box {
+            if (branding?.banner != null) {
+                // A cover behind the bar, dimmed so the title on it stays readable whatever the
+                // uploader chose. The gradient is the same one the old header used.
+                ServerBannerBackdrop(branding.name, branding.banner, baseUrl)
+            }
+            TopAppBar(
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // The server's own face beside its name: the frame's rail is the way a server
+                    // is chosen, and this is the confirmation that the choice took, in the same
+                    // picture the rail drew.
+                    if (branding != null) {
+                        ServerAvatar(branding.name, branding.icon, size = 26.dp, selected = true, baseUrl = baseUrl)
+                    }
+                    Column {
+                        Text(branding?.name ?: "Channels", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            branding?.let { server -> "${server.memberCount} members" } ?: "Server",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            colors = if (branding?.banner != null) {
+                TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
+            } else {
+                TopAppBarDefaults.topAppBarColors()
+            },
             actions = {
                 IconButton(onClick = { state.serverTrees.value = state.serverTrees.value - serverId; retry++ }) {
                     Icon(Icons.Default.Refresh, "Refresh")
                 }
                 IconButton(onClick = { management = true }) { Icon(Icons.Default.Settings, "Server settings") }
             })
+        }
         when {
             failure != null -> ErrorState(failure!!) { retry++ }
             tree == null -> LoadingState("Loading channels")
@@ -193,12 +226,31 @@ internal fun DirectMessages(state: AppState, modifier: Modifier) {
         } catch (error: Exception) { failure = error.message }
     }
     Column(modifier.fillMaxHeight()) {
-        TopAppBar(title = { Text("Messages") }, actions = {
-            IconButton(onClick = { state.conversations.value = null; retry++ }) {
-                Icon(Icons.Default.Refresh, "Refresh conversations")
-            }
-            IconButton(onClick = { start = true }) { Icon(Icons.Default.Edit, "New message") }
-        })
+        TopAppBar(
+            title = {
+                Column {
+                    Text("Direct messages", style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        if (rows.isNullOrEmpty()) "Nobody yet"
+                        else "${rows.orEmpty().size} conversations",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            actions = {
+                IconButton(onClick = { state.conversations.value = null; retry++ }) {
+                    Icon(Icons.Default.Refresh, "Refresh conversations")
+                }
+                // Writing is the one thing this screen is for, so it is a filled tonal button
+                // rather than a third grey icon in a row of them.
+                FilledTonalIconButton(
+                    onClick = { start = true },
+                    modifier = Modifier.padding(end = 8.dp).testTag("new-message"),
+                ) { Icon(Icons.Default.Edit, "New message") }
+            },
+        )
         val openFailure = failure
         if (openFailure != null) ErrorBanner(openFailure) { failure = null }
         when {

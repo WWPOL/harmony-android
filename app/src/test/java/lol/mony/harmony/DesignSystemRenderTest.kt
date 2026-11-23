@@ -35,10 +35,8 @@ import androidx.compose.ui.unit.dp
 import lol.mony.harmony.ui.components.EmptyState
 import lol.mony.harmony.ui.components.HarmonyCard
 import lol.mony.harmony.ui.components.SectionHeader
-import lol.mony.harmony.ui.navigation.Destination
-import lol.mony.harmony.ui.navigation.DestinationBadge
 import lol.mony.harmony.ui.navigation.HarmonyShell
-import lol.mony.harmony.ui.navigation.NavigationLayout
+import lol.mony.harmony.ui.navigation.Space
 import lol.mony.harmony.ui.theme.HarmonyShape
 import lol.mony.harmony.ui.theme.HarmonyTheme
 import lol.mony.harmony.ui.theme.LocalHarmonyColors
@@ -77,14 +75,18 @@ class DesignSystemRenderTest {
         compose.setContent {
             HarmonyTheme(VisualThemeSettings(theme = "dark")) {
                 Surface(Modifier.fillMaxSize()) {
-                    HarmonyShell(Destination.Chats, {}, chats = 3, mentions = 1) { _ -> DesignGallery.Content() }
+                    HarmonyShell(
+                        spaces = previewSpaces,
+                        currentSpace = previewSpaces.first(),
+                        onSpace = {}, onAddServer = {}, onMore = {},
+                    ) { _ -> DesignGallery.Content() }
                 }
             }
         }
         compose.waitForIdle()
         RenderHarness.run { compose.capture("design-phone-dark") }
         // The bar is the frame, and it is dark: the account's own look, not the app's default.
-        assertTrue("the bar drew nothing", compose.onAllNodesWithTag("nav-bar").fetchSemanticsNodes().isNotEmpty())
+        assertTrue("the space bar drew nothing", compose.onAllNodesWithTag("space-bar").fetchSemanticsNodes().isNotEmpty())
     }
 
     /** The same screen in the account's light look. */
@@ -92,13 +94,17 @@ class DesignSystemRenderTest {
         compose.setContent {
             HarmonyTheme(VisualThemeSettings(theme = "light")) {
                 Surface(Modifier.fillMaxSize()) {
-                    HarmonyShell(Destination.Chats, {}, chats = 3, mentions = 1) { _ -> DesignGallery.Content() }
+                    HarmonyShell(
+                        spaces = previewSpaces,
+                        currentSpace = previewSpaces.first(),
+                        onSpace = {}, onAddServer = {}, onMore = {},
+                    ) { _ -> DesignGallery.Content() }
                 }
             }
         }
         compose.waitForIdle()
         RenderHarness.run { compose.capture("design-phone-light") }
-        assertTrue("the bar drew nothing", compose.onAllNodesWithTag("nav-bar").fetchSemanticsNodes().isNotEmpty())
+        assertTrue("the space bar drew nothing", compose.onAllNodesWithTag("space-bar").fetchSemanticsNodes().isNotEmpty())
     }
 
     /**
@@ -132,4 +138,12 @@ class DesignSystemRenderTest {
                 compose.onAllNodesWithText("Write a message").fetchSemanticsNodes().isNotEmpty(),
         )
     }
+
+    /** Three servers and Home, as the frame's navigation: what the captures draw. */
+    private val previewSpaces = listOf(
+        Space.Home.copy(badge = 3),
+        Space("s1", "Design"),
+        Space("s2", "E2E Server", badge = 1),
+        Space("s3", "Book club", badge = 12, mentions = 1),
+    )
 }

@@ -18,6 +18,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
@@ -25,7 +26,6 @@ import lol.mony.harmony.ui.AppState
 import lol.mony.harmony.ui.components.HarmonyDivider
 import lol.mony.harmony.ui.navigation.LocalWindowWidth
 import lol.mony.harmony.ui.navigation.NavigationLayout
-import lol.mony.harmony.ui.navigation.showsSpaceColumnAt
 import lol.mony.harmony.ui.navigation.showsTwoPanesAt
 import lol.mony.harmony.ui.theme.HarmonySize
 import lol.mony.harmony.ui.theme.LocalHarmonyColors
@@ -33,24 +33,26 @@ import lol.mony.harmony.ui.theme.LocalMotion
 import lol.mony.harmony.ui.theme.VisualThemeSettings
 
 /**
- * Chats, as an adaptive list-detail.
+ * Chats: the conversation, as an adaptive list-detail.
  *
- * This is the screen the redesign is mostly about. The old workspace was one column with three
- * mutually exclusive states: the DM list, a server's channel list, or a room. Opening a room
- * *replaced* the list, and getting back to another channel meant going back first; on a tablet
- * the whole width was spent on whichever one was current.
- *
- * Here the list and the room are two panes:
+ * This is the surface the app is for, and it is now the *whole* of the primary surface rather
+ * than one of five equal destinations. The servers are the frame's navigation
+ * ([lol.mony.harmony.ui.navigation.SpaceRail]); what is left here is the two panes a person
+ * actually moves between -- a list of rooms and the room they are reading.
  *
  * - **Compact** (a phone): one pane at a time, which is the only honest thing to do with 400dp.
  *   Choosing a channel slides the room in over the list and the back gesture returns; the room's
  *   own back arrow says the same thing, so a person who does not know the gesture is not stuck.
+ *   Switching server is still one tap, because the bar at the bottom is the frame and it does
+ *   not go away when a room opens.
  * - **Medium and expanded**: the list keeps its width and the room takes the rest, so choosing a
  *   channel is a selection rather than a navigation, and the unread channels stay visible while
  *   reading. That is what a wide window is for.
  *
- * The space switcher (Home and each server) is inside this destination, not in the app's
- * navigation: a server is *content* you are reading, not a place the app has.
+ * The space switcher that used to sit *inside* this destination is gone. It was a second
+ * navigation inside the content, competing with the frame's own; the frame now carries the
+ * spaces, so there is exactly one place a server is chosen and it is the same place at every
+ * width and on every screen.
  */
 @Composable
 fun ChatsDestination(
@@ -63,12 +65,7 @@ fun ChatsDestination(
     val conversationId by state.openConversationId.collectAsState()
     val motion = LocalMotion.current
     val open = channelId ?: conversationId
-    // Two decisions, not one. A rail means there is room for a list beside its detail; a third
-    // pane (the space switcher as a column) needs an expanded window, or the room is squeezed to
-    // a strip. See `showsSpaceColumnAt`.
     val twoPanes = showsTwoPanesAt(widthDp)
-    val spaceColumn = showsSpaceColumnAt(widthDp)
-    val spaceLayout = if (spaceColumn) NavigationLayout.Rail else NavigationLayout.BottomBar
 
     // Back closes the open room before it leaves the destination, on both layouts. On a wide
     // window the room is a pane, so closing it is still what back means.
@@ -79,16 +76,10 @@ fun ChatsDestination(
 
     if (twoPanes) {
         Row(Modifier.fillMaxSize()) {
-            if (spaceColumn) {
-                // The switcher is a column here, so the whole server list is visible at once
-                // and a server name is never truncated to fit a 76dp tile.
-                SpaceSwitcher(state, spaceLayout, onSpaceChosen = {})
-                HarmonyDivider(Modifier.fillMaxHeight().width(1.dp))
-            }
             Surface(
                 Modifier.width(HarmonySize.paneListWidth).fillMaxHeight(),
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
-            ) { RoomList(state, appearance, switcherAbove = !spaceColumn, spaceLayout) }
+            ) { RoomList(state, appearance) }
             HarmonyDivider(Modifier.fillMaxHeight().width(1.dp))
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 if (open == null) {
@@ -103,7 +94,7 @@ fun ChatsDestination(
         }
     } else {
         Box(Modifier.fillMaxSize()) {
-            RoomList(state, appearance, switcherAbove = true, spaceLayout)
+            RoomList(state, appearance)
             // The room covers the list rather than replacing it, so returning is a reverse
             // animation of the same travel instead of a jump cut.
             AnimatedVisibility(
@@ -151,21 +142,14 @@ private fun RoomPane(
 private fun RoomList(
     state: AppState,
     appearance: VisualThemeSettings,
-    switcherAbove: Boolean = false,
-    spaceLayout: NavigationLayout = NavigationLayout.BottomBar,
 ) {
     val serverId by state.selectedServerId.collectAsState()
     val showingDms by state.showingDms.collectAsState()
-    Column(Modifier.fillMaxSize().testTag("room-list")) {
-        // The strip form sits above the list; the column form is a pane of its own and is drawn
-        // by the destination instead. `spaceLayout` says which, so the two cannot disagree.
-        if (switcherAbove) SpaceSwitcher(state, spaceLayout, onSpaceChosen = {})
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (showingDms || serverId == null) {
-                DirectMessages(state, Modifier.fillMaxSize())
-            } else {
-                ChannelList(state, serverId!!, Modifier.fillMaxSize())
-            }
+    Box(Modifier.fillMaxSize().testTag("room-list")) {
+        if (showingDms || serverId == null) {
+            DirectMessages(state, Modifier.fillMaxSize())
+        } else {
+            ChannelList(state, serverId!!, Modifier.fillMaxSize())
         }
     }
 }
@@ -180,8 +164,8 @@ private fun RoomList(
 @Composable
 private fun NoRoomChosen() {
     Surface(Modifier.fillMaxSize(), color = LocalHarmonyColors.current.surfaceSidebar) {
-        Box(Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
-            Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 androidx.compose.material3.Text(
                     "Choose a conversation",
                     style = MaterialTheme.typography.titleMedium,

@@ -38,6 +38,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -48,8 +50,7 @@ import lol.mony.harmony.ui.components.HarmonyDivider
 import lol.mony.harmony.ui.navigation.Destination
 import lol.mony.harmony.ui.navigation.HarmonyShell
 import lol.mony.harmony.ui.navigation.LocalWindowWidth
-import lol.mony.harmony.ui.navigation.NavigationLayout
-import lol.mony.harmony.ui.navigation.showsSpaceColumnAt
+import lol.mony.harmony.ui.navigation.Space
 import lol.mony.harmony.ui.navigation.showsTwoPanesAt
 import lol.mony.harmony.ui.theme.HarmonyShape
 import lol.mony.harmony.ui.theme.HarmonySize
@@ -87,21 +88,24 @@ class DesignPreviewActivity : ComponentActivity() {
 
 @Composable
 private fun PreviewChats() {
-    val destinationState = androidx.compose.runtime.remember {
-        androidx.compose.runtime.mutableStateOf(Destination.Chats)
-    }
-    val destination = destinationState.value
+    // The real frame, driven by the real spaces: the preview is only worth having if it is the
+    // app's own navigation, not a drawing of it. The rows inside the content are fixtures
+    // because the signed-in screens read an instance and this one may not be running.
+    val current = remember { mutableStateOf<String?>(null) }
+    val spaces = listOf(
+        Space(null, "Home", badge = 3),
+        Space("s1", "Design"),
+        Space("s2", "E2E Server", badge = 1),
+        Space("s3", "Book club"),
+        Space("s4", "Homelab", badge = 12, mentions = 2),
+    )
     HarmonyShell(
-        destination = destination,
-        onDestination = { destinationState.value = it },
-        chats = 4,
-        mentions = 2,
-    ) { layout ->
-        when (destination) {
-            Destination.Chats -> PreviewChatsContent(layout)
-            else -> PreviewPlaceholder(destination.label)
-        }
-    }
+        spaces = spaces,
+        currentSpace = spaces.firstOrNull { it.id == current.value } ?: spaces.first(),
+        onSpace = { current.value = it.id },
+        onAddServer = {},
+        onMore = {},
+    ) { _ -> PreviewChatsContent() }
 }
 
 /**
@@ -112,167 +116,27 @@ private fun PreviewChats() {
  * list, the room and the composer can be judged at both widths.
  */
 @Composable
-private fun PreviewChatsContent(layout: NavigationLayout) {
-    // The same two decisions the real destination makes, from the same width: two panes from
-    // 600dp, and the space switcher as a third pane only from 840dp. Below that the switcher is
-    // the strip above the list, or the room would be squeezed to a strip of pixels.
-    val widthDp = LocalWindowWidth.current
-    val twoPanes = showsTwoPanesAt(widthDp)
-    val spaceColumn = showsSpaceColumnAt(widthDp)
-    if (twoPanes) {
-        // The measurements of the real `ChatsDestination`: the switcher at its own width, the
-        // list at `paneListWidth`, and the room taking the rest. The dividers are
-        // `fillMaxHeight`, not `fillMaxSize` -- a full-size divider in a Row claims the width
-        // and squeezes the panes to nothing, which is exactly what a capture has to catch.
+private fun PreviewChatsContent() {
+    // The same decision the real destination makes: two panes from 600dp, and the room taking
+    // what the list does not. The servers are the frame's, so there is no third pane.
+    if (showsTwoPanesAt(LocalWindowWidth.current)) {
         Row(Modifier.fillMaxSize()) {
-            if (spaceColumn) {
-                PreviewSpaceColumn()
-                HarmonyDivider(Modifier.fillMaxHeight().width(1.dp))
-            }
             Surface(
                 Modifier.width(HarmonySize.paneListWidth).fillMaxHeight(),
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
-            ) {
-                Column(Modifier.fillMaxSize()) {
-                    if (!spaceColumn) PreviewSpaceStrip()
-                    PreviewRoomList(Modifier.weight(1f))
-                }
-            }
+            ) { PreviewRoomList(Modifier.fillMaxSize()) }
             HarmonyDivider(Modifier.fillMaxHeight().width(1.dp))
             Box(Modifier.weight(1f).fillMaxHeight()) { PreviewRoom() }
         }
     } else {
-        Column(Modifier.fillMaxSize()) {
-            PreviewSpaceStrip()
-            PreviewRoomList(Modifier.weight(1f))
-        }
-    }
-}
-
-/** The space switcher as a phone draws it: a scrolling strip of pills. */
-@Composable
-private fun PreviewSpaceStrip() {
-    androidx.compose.foundation.lazy.LazyRow(
-        // No inset here: `HarmonyShell` pads the destination's whole content by the status bar
-        // and the cutout, so a strip that padded itself again would sit twice as far down.
-        Modifier.fillMaxWidth().testTag("space-switcher"),
-        contentPadding = PaddingValues(horizontal = HarmonySize.gutter, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        item {
-            PreviewSpacePill("Home", selected = true, badge = 3, testTag = "rail-home") {
-                Icon(Icons.Filled.Home, null, Modifier.size(18.dp))
-            }
-        }
-        items(listOf("Design", "E2E Server", "Book club")) { name ->
-            PreviewSpacePill(name, selected = false, badge = if (name == "E2E Server") 1 else 0,
-                testTag = "rail-server-$name") {
-                Box(
-                    Modifier.size(22.dp).background(MaterialTheme.colorScheme.primary, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) { Text(name.take(1), style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onPrimary) }
-            }
-        }
-        item {
-            PreviewSpacePill("Add", selected = false, badge = 0, testTag = "rail-add-server") {
-                Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun PreviewSpacePill(
-    label: String,
-    selected: Boolean,
-    badge: Int,
-    testTag: String,
-    glyph: @Composable () -> Unit,
-) {
-    Surface(
-        onClick = {},
-        shape = HarmonyShape.pill,
-        color = if (selected) MaterialTheme.colorScheme.secondaryContainer
-        else MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier.heightIn48().testTag(testTag),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            glyph()
-            Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
-            if (badge > 0) {
-                androidx.compose.material3.Badge { Text("$badge") }
-            }
-        }
-    }
-}
-
-/** The space switcher as a wide window draws it: a column with every name visible. */
-@Composable
-private fun PreviewSpaceColumn() {
-    Column(
-        Modifier.width(200.dp).fillMaxHeight()
-            .background(LocalHarmonyColors.current.surfaceSidebar)
-            .padding(vertical = 12.dp)
-            .testTag("space-switcher"),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        PreviewSpaceRow("Home", selected = true, badge = 3, testTag = "rail-home") {
-            Icon(Icons.Filled.Home, null, Modifier.size(18.dp))
-        }
-        HarmonyDivider(Modifier.padding(vertical = 6.dp))
-        listOf("Design", "E2E Server", "Book club").forEach { name ->
-            PreviewSpaceRow(name, selected = false, badge = if (name == "E2E Server") 1 else 0,
-                testTag = "rail-server-$name") {
-                Box(
-                    Modifier.size(22.dp).background(MaterialTheme.colorScheme.primary, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) { Text(name.take(1), style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onPrimary) }
-            }
-        }
-        PreviewSpaceRow("Add a server", selected = false, badge = 0, testTag = "rail-add-server") {
-            Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
-        }
-    }
-}
-
-@Composable
-private fun PreviewSpaceRow(
-    label: String,
-    selected: Boolean,
-    badge: Int,
-    testTag: String,
-    glyph: @Composable () -> Unit,
-) {
-    Surface(
-        onClick = {},
-        shape = MaterialTheme.shapes.medium,
-        color = if (selected) MaterialTheme.colorScheme.secondaryContainer
-        else androidx.compose.ui.graphics.Color.Transparent,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).heightIn48().testTag(testTag),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            glyph()
-            Text(label, style = MaterialTheme.typography.titleSmall,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            if (badge > 0) androidx.compose.material3.Badge { Text("$badge") }
-        }
+        Column(Modifier.fillMaxSize()) { PreviewRoomList(Modifier.weight(1f)) }
     }
 }
 
 /** The room list: a server's channels, grouped under their categories. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PreviewRoomList(modifier: Modifier = Modifier.fillMaxSize()) {
+private fun PreviewRoomList(modifier: Modifier = Modifier) {
     val channels = listOf(
         "welcome" to "Start here",
         "general" to "Everything and nothing",
