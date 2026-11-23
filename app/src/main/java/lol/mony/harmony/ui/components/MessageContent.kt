@@ -12,6 +12,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import lol.mony.harmony.data.model.ContentPart
+import lol.mony.harmony.data.model.Emoji
 import lol.mony.harmony.data.model.Message
 import lol.mony.harmony.ui.theme.LocalSizes
 
@@ -47,8 +49,10 @@ fun MessageContent(
     fontSize: Double,
     modifier: Modifier = Modifier,
     encryptedNotice: String? = null,
-    /** The instance an attachment's relative URL resolves against. */
+    /** The instance an attachment's or emoji's relative URL resolves against. */
     baseUrl: String? = null,
+    /** The `emojis` rows the room resolved, so an id-only emoji part still draws its picture. */
+    emojis: Map<String, Emoji> = emptyMap(),
 ) {
     val sizes = LocalSizes.current
     val style = MaterialTheme.typography.bodyMedium.copy(fontSize = fontSize.sp)
@@ -77,7 +81,7 @@ fun MessageContent(
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     itemVerticalAlignment = Alignment.CenterVertically,
                 ) {
-                    for (part in run.parts) InlinePart(message.id, part, style, color, sizes.messageSp, muted)
+                    for (part in run.parts) InlinePart(message.id, part, style, color, sizes.messageSp, muted, baseUrl, emojis)
                 }
             }
         }
@@ -102,13 +106,15 @@ private fun runs(content: List<ContentPart>): List<Run> {
 @Composable
 private fun InlinePart(messageId: String, part: ContentPart, style: androidx.compose.ui.text.TextStyle,
                        color: androidx.compose.ui.graphics.Color, messageSp: Double,
-                       muted: androidx.compose.ui.graphics.Color) {
+                       muted: androidx.compose.ui.graphics.Color, baseUrl: String?,
+                       emojis: Map<String, Emoji>) {
     when (part.type) {
-        "text" -> SelectionContainer {
-            Text(part.text.orEmpty(), style = style, color = color,
-                modifier = Modifier.testTag("message-" + messageId))
-        }
-        "emoji" -> EmojiPart(part, messageSp)
+        // Text is not drawn as one run: the reference resolves `:shortcode:` inside it to the
+        // emoji's picture (`renderMarkdownToHTML`'s `emoji` token), so a message someone typed a
+        // server emoji into draws the emoji rather than its name.
+        "text" -> TextWithEmoji(part.text.orEmpty(), style, color, messageSp, baseUrl, emojis,
+            Modifier.testTag("message-" + messageId))
+        "emoji" -> EmojiPart(part, messageSp, baseUrl = baseUrl, emojis = emojis)
         "mention" -> Text(buildAnnotatedString {
             withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)) {
                 append("@" + (part.username ?: part.displayName ?: "someone"))
@@ -131,32 +137,158 @@ private fun InlinePart(messageId: String, part: ContentPart, style: androidx.com
 }
 
 /**
+ * One piece of a text part: literal text, or a `:shortcode:` the instance may have an emoji for.
+ *
+ * The reference's parser produces exactly these two, and its renderer draws an `emoji` token as
+ * the emoji's image when it can resolve the name, else as the literal `:name:` it was written as.
+ */
+internal sealed interface TextToken {
+    data class Literal(val text: String) : TextToken
+    data class Shortcode(val name: String) : TextToken
+}
+
+/**
+ * Splits a text part into literal text and the shortcodes in it.
+ *
+ * The rules are the reference's (`src/utils/markdownParser.ts`): a shortcode is `:name:` of
+ * `[a-zA-Z0-9_+~-]` (the `~N` suffix disambiguates two emoji of one name), a bridged emoji is
+ * `:discord:[a:]<name>:<snowflake>:`, and a code span is left alone -- `` `:cat:` `` is how a
+ * person writes about a shortcode rather than using one. `:` alone, or an empty pair of colons,
+ * is text.
+ */
+internal fun textTokens(text: String): List<TextToken> {
+    if (text.isEmpty()) return emptyList()
+    val out = mutableListOf<TextToken>()
+    var index = 0
+    var literalStart = 0
+    fun flushLiteral(end: Int) {
+        if (end > literalStart) out += TextToken.Literal(text.substring(literalStart, end))
+    }
+    while (index < text.length) {
+        // A code span runs to its closing backtick, and nothing inside it is an emoji.
+        if (text[index] == '`') {
+            val close = text.indexOf('`', index + 1)
+            index = if (close > index) close + 1 else index + 1
+            continue
+        }
+        if (text[index] != ':') { index++; continue }
+        val match = SHORTCODE_IN_TEXT.find(text, index)
+        if (match == null || match.range.first != index) { index++; continue }
+        flushLiteral(index)
+        out += TextToken.Shortcode(match.groupValues[1])
+        index = match.range.last + 1
+        literalStart = index
+    }
+    flushLiteral(text.length)
+    return out
+}
+
+/** `:name:` or `:discord:[a:]<name>:<snowflake>:`, the two shapes the reference tokenises. */
+private val SHORTCODE_IN_TEXT =
+    Regex(":(discord:(?:a:)?[A-Za-z0-9_]{1,64}:[0-9]{5,25}|[A-Za-z0-9_+~\\-]{1,64}):")
+
+/**
+ * A text part, with the shortcodes in it drawn as the emoji they name.
+ *
+ * The reference draws `:blobcat:` inside a message as blobcat's picture, and leaves it as the
+ * literal text when it cannot resolve the name -- which is why a person sees `:long_name:` where
+ * an emoji belongs on an instance whose library this client has not read. Here the name is looked
+ * up in [emojis] by name; a name nothing answers to stays exactly the text it was written as.
+ */
+@Composable
+private fun TextWithEmoji(
+    text: String,
+    style: androidx.compose.ui.text.TextStyle,
+    color: androidx.compose.ui.graphics.Color,
+    messageSp: Double,
+    baseUrl: String?,
+    emojis: Map<String, Emoji>,
+    modifier: Modifier = Modifier,
+) {
+    val tokens = remember(text) { textTokens(text) }
+    // A part with no shortcode in it -- most of them -- is one Text, so the common case costs
+    // nothing and keeps the selection and wrapping behaviour it always had.
+    if (tokens.none { it is TextToken.Shortcode }) {
+        SelectionContainer { Text(text, style = style, color = color, modifier = modifier) }
+        return
+    }
+    SelectionContainer {
+        FlowRow(modifier = modifier, itemVerticalAlignment = Alignment.CenterVertically) {
+            for (token in tokens) when (token) {
+                is TextToken.Literal -> Text(token.text, style = style, color = color)
+                is TextToken.Shortcode -> {
+                    val emoji = emojiNamed(emojis, token.name)
+                    if (emoji == null) {
+                        // What the reference renders when its resolver has nothing: the text as
+                        // written, so a `:name:` an instance does not have is not a hole.
+                        Text(":" + token.name + ":", style = style, color = color)
+                    } else {
+                        EmojiGlyph(
+                            emoji = emoji,
+                            label = ":" + token.name + ":",
+                            size = (messageSp + 6.0).dp,
+                            baseUrl = baseUrl,
+                            textStyle = style,
+                            modifier = Modifier.testTag("text-emoji-" + token.name),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The emoji [name] names, from the rows the room resolved: by name, else by a bridged identifier.
+ *
+ * A row's name is what a shortcode is written from, and two rows may share one -- a server emoji
+ * and a personal one -- so the first is taken rather than none. `~N` is the reference's
+ * disambiguator and is dropped here for the same reason.
+ */
+internal fun emojiNamed(emojis: Map<String, Emoji>, name: String): Emoji? {
+    val bare = name.substringBefore('~')
+    emojis.values.firstOrNull { it.name?.trim()?.trim(':')?.equals(bare, ignoreCase = true) == true }
+        ?.let { return it }
+    return Emoji.fromStoredContent(bare).takeIf { it.hasImage }
+}
+
+/**
  * One emoji: its image when the row has a file, its own glyph when it wraps a unicode codepoint,
  * and its shortcode when there is neither.
  *
  * The description is the `:name:` shortcode, which is what a screen reader says and what the web
- * puts in the image's `alt`.
+ * puts in the image's `alt`. A part whose row is not in the message (an id-only part, or one a
+ * bridged client wrote) is filled in from [emojis], which the room resolves for the page.
  */
 @Composable
-fun EmojiPart(part: ContentPart, messageSp: Double, modifier: Modifier = Modifier) {
-    val emoji = part.emoji
-    val shortcode = emoji?.shortcode ?: ":emoji:"
-    val size = (messageSp + 6.0).dp
+fun EmojiPart(part: ContentPart, messageSp: Double, modifier: Modifier = Modifier,
+              baseUrl: String? = null, emojis: Map<String, Emoji> = emptyMap()) {
+    val declared = part.emoji
+    val row = declared?.id?.let { emojis[it] }
+    // The part is the truth about which emoji it is; the row fills in a picture the part lacks.
+    val emoji = when {
+        declared == null -> row
+        row == null -> declared
+        else -> declared.copy(
+            name = declared.name ?: row.name,
+            url = declared.url ?: row.url,
+            content = declared.content ?: row.content,
+        )
+    }
+    val label = emoji?.let { if (it.hasImage) customEmojiLabel(it.name).ifBlank { ":emoji:" } else it.shortcode }
+        ?: ":emoji:"
     // The tag is on every branch so a test -- and a screenshot reader -- finds the same
     // node whichever way this particular emoji draws.
-    val tag = "emoji-" + (emoji?.name ?: shortcode.trim(':'))
-    val tagged = modifier.testTag(tag)
-    when {
-        emoji != null && emoji.hasImage -> AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(emoji.url).crossfade(true).build(),
-            contentDescription = shortcode,
-            contentScale = ContentScale.Fit,
-            modifier = tagged.size(size),
-        )
-        emoji != null && !emoji.content.isNullOrBlank() -> Text(emoji.content, fontSize = (messageSp + 4.0).sp,
-            modifier = tagged)
-        else -> Text(shortcode, fontSize = (messageSp + 1.0).sp, modifier = tagged)
-    }
+    val tag = "emoji-" + (emoji?.name ?: label.trim(':'))
+    EmojiGlyph(
+        emoji = emoji,
+        label = label,
+        size = (messageSp + 6.0).dp,
+        baseUrl = baseUrl,
+        // A fallback reads at the sentence's own size, not as a caption under it.
+        textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = (messageSp + 1.0).sp),
+        modifier = modifier.testTag(tag),
+    )
 }
 
 /** A part that stands on its own line: an attachment, a sticker, a poll, a system event. */

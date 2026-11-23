@@ -61,6 +61,21 @@ object AvatarUrl {
     const val SERVER_ICONS_BUCKET = "server_icons"
     const val SERVER_BANNERS_BUCKET = "server_banners"
 
+    /**
+     * The bucket an emoji's file lives in, as the reference's `getEmojiUrl` names it.
+     *
+     * An `emojis.url` written by this instance's own uploader is the object's public URL
+     * (`create_my_emoji` refuses anything else), but a row imported, bridged or written by an
+     * older client holds the bare object path -- `<profile-or-server-id>/<file>.png` -- and the
+     * reference joins exactly that to this bucket. Resolving it the way an avatar is resolved
+     * would ask the `avatars` bucket for an emoji, which is a 404 and an emoji that draws
+     * nothing.
+     */
+    const val EMOJIS_BUCKET = "emojis"
+
+    /** An emoji's picture: absolute as it stands, else the `emojis` bucket's public URL. */
+    fun resolveEmoji(baseUrl: String?, path: String?): String? = resolveBucket(baseUrl, path, EMOJIS_BUCKET)
+
     /** A server's icon: `servers.icon`, read out of the `server_icons` bucket. */
     fun resolveServerIcon(baseUrl: String?, path: String?): String? =
         resolveBucket(baseUrl, path, SERVER_ICONS_BUCKET)

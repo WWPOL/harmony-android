@@ -127,4 +127,18 @@ class ReactionGestureTest {
         assertEquals(":cat:", reactionLabel(custom))
         assertEquals(":dog:", reactionLabel(Reaction(messageId = "m1", customEmojiContent = ":dog:", emojiId = "e-dog")))
     }
+
+    /**
+     * The pill draws its emoji, not the string its row happens to store.
+     *
+     * `reaction-e-cat` is the pill's identity; the emoji inside it is a node of its own, so a pill
+     * that showed `:cat:` as text would still pass the existence check above and fail here.
+     */
+    @Test fun aPillDrawsItsEmojiInsideItself() {
+        pills({}, {})
+        // The pill is one accessible control -- its description names the emoji, the count and
+        // whose it is -- so its emoji is a child of the merged node, not a node beside it.
+        compose.onNodeWithTag("reaction-emoji-e-cat", useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag("reaction-emoji-\uD83D\uDC4D", useUnmergedTree = true).assertExists()
+    }
 }

@@ -95,6 +95,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     var searchRows by remember { mutableStateOf<List<Message>?>(null) }
     val people by state.people.collectAsState()
     val bots by state.bots.collectAsState()
+    val emojiRows by state.emojis.collectAsState()
     var selectedProfile by remember(cacheKey) { mutableStateOf<String?>(null) }
     var reactors by remember(cacheKey) { mutableStateOf<Pair<Message, String>?>(null) }
     val live by state.live.collectAsState()
@@ -140,9 +141,17 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 )
             }
             state.resolveAuthors(session.endpoint, token, page)
+            // A message part that names an emoji by id alone gets its picture from here, so a
+            // bridged or round-tripped emoji is not the one shape that draws nothing.
+            state.resolveMessageEmojis(session.endpoint, token, page)
             val ids = state.rooms.snapshot(key)?.rows.orEmpty().takeLast(50).map { it.message.id }
             runCatching { state.chats.reactionsFor(session.endpoint, token, ids).getOrThrow() }
-                .onSuccess { state.rooms.reactions(key, it) }
+                .onSuccess {
+                    state.rooms.reactions(key, it)
+                    // A reaction row carries an emoji's id and no picture; the picture is one
+                    // `emojis` read for the page rather than one per pill.
+                    state.resolveReactionEmojis(session.endpoint, token, it.values.flatten())
+                }
             if (!older && page.isNotEmpty()) {
                 val last = page.last().id
                 if (direct) {
@@ -164,21 +173,32 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
      * Toggles this account's reaction with [key] on [message].
      *
      * [key] is the reaction's own identity (`Reaction.key`), not the display label: a custom
-     * emoji's label is `:custom:` and the old comparison could not tell two of them apart, so
+     * emoji's label is `:name:`, and the old comparison could not tell two of them apart, so
      * tapping the second custom pill removed the first. The row the instance stores carries
      * the same key back, which is what makes a second tap remove rather than add.
+     *
+     * The write follows the reference client's rule (`Reaction.toggleEmojiId`): a pill that names
+     * an `emojis` row writes `emoji_id`, anything else writes `custom_emoji_content`. Writing the
+     * row id into the content column -- which this used to do for a pill whose row stored no
+     * content -- is refused by the instance's own trigger, and removing by the wrong column
+     * deleted nothing.
      */
     suspend fun react(message: Message, key: String) {
         val cacheKey = state.roomKey(roomId, direct, thread?.id)
         val token = state.auth.freshToken() ?: error("Sign in again.")
-        val mine = state.rooms.snapshot(cacheKey)?.reactions?.get(message.id).orEmpty()
-            .any { it.userId == myId && it.key == key }
-        val content = state.rooms.snapshot(cacheKey)?.reactions?.get(message.id).orEmpty()
-            .firstOrNull { it.key == key }?.content ?: key
-        if (mine) state.chats.removeReaction(session.endpoint, token, message.id, myId, content).getOrThrow()
-        else state.chats.addReaction(session.endpoint, token, message.id, myId, content).getOrThrow()
+        val rows = state.rooms.snapshot(cacheKey)?.reactions?.get(message.id).orEmpty()
+        val existing = rows.firstOrNull { it.key == key }
+        val mine = rows.any { it.userId == myId && it.key == key }
+        // A pill already on the message keeps its own shape, so joining it writes what it carries.
+        val emojiId = existing?.toggleEmojiId ?: key.takeIf { isEmojiRowId(it) }
+        val content = if (emojiId != null) null else (existing?.content ?: key)
+        if (mine) state.chats.removeReaction(session.endpoint, token, message.id, myId, emojiId, content).getOrThrow()
+        else state.chats.addReaction(session.endpoint, token, message.id, myId, emojiId, content).getOrThrow()
         runCatching { state.chats.reactionsFor(session.endpoint, token, listOf(message.id)).getOrThrow() }
-            .onSuccess { state.rooms.reactions(cacheKey, it) }
+            .onSuccess {
+                state.rooms.reactions(cacheKey, it)
+                state.resolveReactionEmojis(session.endpoint, token, it[message.id].orEmpty())
+            }
     }
     fun action(work: suspend () -> Unit) { scope.launch {
         try { work() } catch (error: Exception) { failure = error.message ?: "The action failed." }
@@ -402,6 +422,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                         baseUrl = session.endpoint.baseUrl,
                         appearance = appearance,
                         reactions = reactions[row.message.id].orEmpty(),
+                        emojis = emojiRows,
                         myId = myId,
                         onActions = { selected = row.message },
                         onReact = { key -> if (!row.isPending) action { react(row.message, key) } },
@@ -591,11 +612,18 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
         val (reactedMessage, emoji) = openReactors
         // The same key the pill was drawn under, so the sheet lists exactly that pill's people.
         val who = reactions[reactedMessage.id].orEmpty().filter { it.key == emoji }
+        // The title draws the same emoji the pill drew: its picture when the row was read, else
+        // the shortcode it stores -- never the id the row is keyed by.
+        val pill = reactionPills(who, emojiRows, myId).firstOrNull()
+            ?: reactionPills(listOf(Reaction(messageId = reactedMessage.id, customEmojiContent = emoji)), emojiRows, myId).first()
         ModalBottomSheet(onDismissRequest = { reactors = null }) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                Text(reactionLabel(who.firstOrNull() ?: Reaction(messageId = reactedMessage.id, customEmojiContent = emoji)) +
-                    " " + who.size, style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.testTag("reactors-title"))
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("reactors-title")) {
+                    EmojiGlyph(emoji = pill.emoji, label = pill.label, size = 24.dp,
+                        baseUrl = session.endpoint.baseUrl, modifier = Modifier.testTag("reactors-emoji"))
+                    Spacer(Modifier.width(8.dp))
+                    Text(pill.count.toString(), style = MaterialTheme.typography.titleMedium)
+                }
                 Spacer(Modifier.height(8.dp))
                 if (who.isEmpty()) Text("Nobody has reacted with this yet.", style = MaterialTheme.typography.bodyMedium)
                 for (reaction in who) {
@@ -727,7 +755,7 @@ internal fun showsAuthorHeader(message: Message, previous: Message?): Boolean {
 @Composable
 private fun MessageRow(
     row: RoomRow, author: MessageAuthor, showHeader: Boolean, baseUrl: String?,
-    appearance: VisualThemeSettings, reactions: List<Reaction>, myId: String,
+    appearance: VisualThemeSettings, reactions: List<Reaction>, emojis: Map<String, Emoji>, myId: String,
     onActions: () -> Unit, onReact: (String) -> Unit, onAuthor: (String?) -> Unit,
     onShowReactors: (String) -> Unit, onReply: () -> Unit, onRetry: () -> Unit,
     highlighted: Boolean = false,
@@ -786,7 +814,7 @@ private fun MessageRow(
                     Text("Reply", style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                MessageContent(message, sizes.messageSp, baseUrl = baseUrl,
+                MessageContent(message, sizes.messageSp, baseUrl = baseUrl, emojis = emojis,
                     encryptedNotice = if (message.encrypted) "Encrypted message. Keys are not available in this client." else null)
                 if (row.isPending) Text("Sending…", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("sending-label"))
@@ -801,6 +829,7 @@ private fun MessageRow(
                 if (reactions.isNotEmpty()) MessageReactions(
                     message = message, reactions = reactions, myId = myId,
                     onToggle = onReact, onShowReactors = onShowReactors,
+                    emojis = emojis, baseUrl = baseUrl,
                 )
             }
         }

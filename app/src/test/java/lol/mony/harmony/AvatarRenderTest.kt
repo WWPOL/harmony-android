@@ -102,6 +102,20 @@ class AvatarRenderTest {
             AvatarUrl.resolve("https://example.test", "p1/a.png"))
     }
 
+    @Test fun anEmojiBarePathNamesTheEmojiBucket() {
+        // An `emojis.url` an import or an older client wrote is the bare object path, and the
+        // reference joins it to the `emojis` bucket. Resolving it as an avatar would ask the
+        // `avatars` bucket for it, which is a 404 and an emoji that draws nothing.
+        assertEquals("https://example.test/storage/v1/object/public/emojis/p1/a.png",
+            AvatarUrl.resolveEmoji("https://example.test", "p1/a.png"))
+        assertEquals("https://example.test/storage/v1/object/public/emojis/a.png",
+            AvatarUrl.resolveEmoji("https://example.test", "/storage/v1/object/public/emojis/a.png"))
+        assertEquals("https://cdn.discordapp.com/emojis/1.png",
+            AvatarUrl.resolveEmoji("https://example.test", "https://cdn.discordapp.com/emojis/1.png"))
+        assertEquals("https://example.test/harmony/storage/v1/object/public/emojis/p1/a.png",
+            AvatarUrl.resolveEmoji("https://example.test/harmony", "p1/a.png"))
+    }
+
     @Test fun theBundledDefaultIsNotFetched() {
         // Asking the server for the app's own default costs a request and can 404; the app
         // draws its own initials instead.

@@ -12,6 +12,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import lol.mony.harmony.data.model.Bot
 import lol.mony.harmony.data.model.DirectConversation
+import lol.mony.harmony.data.model.Emoji
 import lol.mony.harmony.data.model.ServerTree
 import lol.mony.harmony.data.model.Thread
 import lol.mony.harmony.data.model.Channel
@@ -25,6 +26,8 @@ import lol.mony.harmony.data.repo.SettingsRepository
 import lol.mony.harmony.data.session.AuthRepository
 import lol.mony.harmony.data.session.AuthState
 import lol.mony.harmony.data.session.SessionStore
+import lol.mony.harmony.ui.components.TextToken
+import lol.mony.harmony.ui.components.textTokens
 import lol.mony.harmony.ui.theme.VisualThemeSettings
 
 /**
@@ -147,7 +150,71 @@ class AppState(
         _bots.update { current -> current + bots.associateBy { it.id } }
     }
 
+    private val _emojis = MutableStateFlow<Map<String, Emoji>>(emptyMap())
+
+    /**
+     * The `emojis` rows resolved so far, keyed by `emojis.id`.
+     *
+     * A reaction row names a custom emoji by id and carries no picture, and a message part may
+     * carry a stale row; both are drawn from here. Without it a custom emoji reaction is a uuid,
+     * which is the bug this map exists to close.
+     */
+    val emojis: StateFlow<Map<String, Emoji>> = _emojis.asStateFlow()
+
+    fun rememberEmojis(rows: Collection<Emoji>) {
+        val keyed = rows.mapNotNull { row -> row.id?.takeIf { it.isNotBlank() }?.let { it to row } }
+        if (keyed.isEmpty()) return
+        _emojis.update { current -> current + keyed.toMap() }
+    }
+
     fun person(authUserId: String?): Profile? = authUserId?.let { _people.value[it] }
+
+    /**
+     * Resolves every emoji a page's reactions name, so a custom emoji is drawn as its picture.
+     *
+     * The page's reaction rows are read first and the ids they name are looked up once, which is
+     * one request per page rather than one per pill. A failed lookup is swallowed for the same
+     * reason [resolveAuthors] swallows one: a pill then draws the shortcode the reaction stores
+     * rather than an id, and the rest of the page is unaffected.
+     */
+    suspend fun resolveReactionEmojis(
+        endpoint: lol.mony.harmony.data.api.Endpoint,
+        token: String,
+        reactions: Collection<lol.mony.harmony.data.model.Reaction>,
+    ) {
+        val known = _emojis.value
+        val ids = reactions.mapNotNull { it.emojiId }.filter { it !in known }.distinct()
+        if (ids.isEmpty()) return
+        runCatching { rememberEmojis(chats.emojis(endpoint, token, ids).values) }
+    }
+
+    /**
+     * Resolves the emoji parts of a page of messages.
+     *
+     * A part carries the `emojis` row it was written from, so most parts need nothing; an id-only
+     * part (one a bridged client wrote, or one whose row a sender stripped) gets its picture here.
+     * An emoji a page already names is not read again.
+     */
+    suspend fun resolveMessageEmojis(
+        endpoint: lol.mony.harmony.data.api.Endpoint,
+        token: String,
+        messages: Collection<lol.mony.harmony.data.model.Message>,
+    ) {
+        val known = _emojis.value
+        val parts = messages.flatMap { message -> message.content }
+        val ids = parts.mapNotNull { part -> part.emoji?.takeIf { !it.hasImage }?.id }
+            .filter { it !in known }.distinct()
+        if (ids.isNotEmpty()) runCatching { rememberEmojis(chats.emojis(endpoint, token, ids).values) }
+        // A `:shortcode:` written into the text is how most custom emoji are used: this client has
+        // no picker, so the name is what a person types, and the reference draws its picture.
+        val knownNames = _emojis.value.values.mapNotNull { it.name }.toSet()
+        val names = parts.filter { it.type == "text" }
+            .flatMap { part -> textTokens(part.text.orEmpty()) }
+            .filterIsInstance<TextToken.Shortcode>()
+            .map { it.name }.filter { it !in knownNames }.distinct()
+        if (names.isEmpty()) return
+        runCatching { rememberEmojis(chats.emojisNamed(endpoint, token, names).values) }
+    }
 
     /**
      * Resolves every author a page of messages names, so no row draws a name it has not looked

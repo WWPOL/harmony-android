@@ -36,6 +36,22 @@ rotation, system appearance or device rendering.
 - `message-emoji-image.png` -- `shipping [image] today`: the custom emoji drawn
   as its own picture, inline in the sentence, from a `file://` PNG so the
   assertion is on pixels rather than on the alt text.
+- `message-emoji-pill.png` -- `shipping [image] today` drawn by
+  `EmojiPillRenderTest`: the emoji is a picture between the two words, not a
+  shortcode and not an id.
+- `message-text-emoji.png` -- `shipping [image] today`, where the message's own
+  text is `shipping :blobcat: today`: a shortcode typed into a message draws
+  that emoji's picture. This client has no picker, so this is how a custom emoji
+  is actually used, and the bug drew the name here.
+- `reaction-emoji-image.png` -- a reaction pill whose emoji names an `emojis`
+  row: the row's picture with its count. Before
+  [custom-emoji.md](../../custom-emoji.md) this pill drew the row's **uuid**,
+  because `reactions` carries the id and the app never read the row.
+- `reaction-emoji-fallback.png` -- a pill whose `emojis` row was not read:
+  `:blobcat:` and the count. The emoji is named, never the id it is keyed by.
+- `message-emoji-fallback.png` -- an emoji whose file cannot load draws its
+  shortcode in place. An `AsyncImage` with no error branch leaves a hole, which
+  is the other half of the same bug.
 - `thread-sheet-open.png`, `thread-opened.png` -- the room's Threads sheet, and
   the thread it opens, which is the transition that used to crash the app.
 - `pinned-sheet.png`, `actions-sheet.png` -- the pinned-messages sheet and the

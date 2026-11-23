@@ -42,6 +42,103 @@ data class Emoji(
 
     /** True when there is an image to draw; a unicode emoji draws as its own glyph instead. */
     val hasImage: Boolean get() = !url.isNullOrBlank()
+
+    /** The unicode glyph this emoji draws as text, when it wraps a codepoint rather than a file. */
+    val glyph: String? get() = content?.takeIf { it.isNotBlank() }
+
+    companion object {
+        /**
+         * The emoji a stored identifier names, when the `emojis` row it belongs to was not read.
+         *
+         * `reactions.custom_emoji_content` holds one of four shapes, as the instance's own
+         * `reaction_content_well_formed` allows (`20261107800001_reaction_emoji_check`): a unicode
+         * glyph; `:name:` or `:name@host:`; `discord:[a:]<name>:<id>`, whose picture is on Discord's
+         * CDN; or a bare name, which clients before 1.9.4 wrote. A reaction that names an `emojis`
+         * row by id carries no content, so nothing here can be drawn from an id -- the caller draws
+         * a placeholder instead of the uuid.
+         */
+        fun fromStoredContent(content: String?): Emoji {
+            val raw = content?.trim()?.takeIf { it.isNotEmpty() } ?: return Emoji()
+            // A row id is not a name: it is alphanumeric and hyphenated, so it would otherwise be
+            // read as a bare name and drawn as `:<uuid>:`, which is the bug this file is fixing.
+            if (isEmojiRowId(raw)) return Emoji(id = raw)
+            DiscordEmoji.parse(raw)?.let {
+                return Emoji(name = it.name, url = it.imageUrl, domain = DiscordEmoji.DOMAIN)
+            }
+            SHORTCODE.matchEntire(raw)?.let { match ->
+                return Emoji(name = match.groupValues[1], domain = match.groupValues[2].ifBlank { null })
+            }
+            if (BARE_NAME.matches(raw)) return Emoji(name = raw)
+            return Emoji(content = raw)
+        }
+
+        /** `:name:` and `:name@host:`: the shortcode forms a reaction or a part may carry. */
+        private val SHORTCODE =
+            Regex("^:([A-Za-z0-9_+\\-]{1,64})(?:@([A-Za-z0-9.\\-]+(?::[0-9]{1,5})?))?:$")
+
+        /** A bare name, which is what a client before 1.9.4 wrote where an emoji belongs. */
+        private val BARE_NAME = Regex("^[A-Za-z0-9_~\\-]{1,64}$")
+    }
+}
+
+/**
+ * True when a string is an `emojis` row id rather than something a person can read.
+ *
+ * A reaction names its emoji either by this id (`reactions.emoji_id`) or by content; a client that
+ * draws the id as the emoji shows a uuid under a message, which is the bug this predicate exists
+ * to make impossible.
+ */
+fun isEmojiRowId(value: String?): Boolean = value != null && EMOJI_ROW_ID.matches(value)
+
+/** A uuid: the shape of an `emojis` row's id. */
+private val EMOJI_ROW_ID =
+    Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+/**
+ * `discord:[a:]<name>:<id>`: a custom emoji bridged from Discord, whose picture is on its CDN.
+ *
+ * The bridge stores the identifier in `reactions.custom_emoji_content` and the same emoji in a
+ * message part as `{domain: "discord.com", url: "https://cdn.discordapp.com/emojis/<id>.png"}`.
+ * The identifier therefore carries everything needed to draw the emoji without an `emojis` row,
+ * which is what the reference client's `discordCustomEmojiUrlFromIdentifier` relies on.
+ */
+data class DiscordEmoji(val name: String, val id: String, val animated: Boolean = false) {
+    /** The image the identifier stands for; a GIF when the bridged emoji is animated. */
+    val imageUrl: String get() = CDN + id + if (animated) ".gif" else ".png"
+
+    /** The identifier a reaction stores, without the surrounding colons. */
+    val token: String get() = "discord:" + (if (animated) "a:" else "") + name + ":" + id
+
+    companion object {
+        const val CDN = "https://cdn.discordapp.com/emojis/"
+
+        /** The domain a bridged part carries, which is what tells it from this instance's own. */
+        const val DOMAIN = "discord.com"
+
+        /** Discord's names are 2-32 of `[A-Za-z0-9_]`; the instance allows `_~-` up to 64. */
+        private val PATTERN = Regex("^discord:(a:)?([A-Za-z0-9_~\\-]{1,64}):([0-9]{5,25})$")
+
+        /** The hosts a bridged reaction's `remote_emoji_url` may name, as the reference allows. */
+        private val CDN_HOSTS = setOf("cdn.discordapp.com", "media.discordapp.net")
+
+        /**
+         * [url] when it is an https URL on Discord's CDN, else null.
+         *
+         * `remote_emoji_url` is written by whatever bot bridged the reaction, and every viewer of
+         * the message would fetch it, so the reference honours only Discord's own hosts and this
+         * does the same. A url anywhere else is not a picture this client will load.
+         */
+        fun cdnUrl(url: String?): String? {
+            val raw = url?.trim()?.takeIf { it.startsWith("https://", ignoreCase = true) } ?: return null
+            val host = runCatching { java.net.URI(raw).host }.getOrNull()?.lowercase() ?: return null
+            return raw.takeIf { host in CDN_HOSTS }
+        }
+
+        fun parse(identifier: String?): DiscordEmoji? {
+            val match = PATTERN.matchEntire(identifier?.trim() ?: return null) ?: return null
+            return DiscordEmoji(match.groupValues[2], match.groupValues[3], match.groupValues[1].isNotEmpty())
+        }
+    }
 }
 
 internal object EmojiSerializer : KSerializer<Emoji> {
@@ -385,6 +482,13 @@ data class Reaction(
     @SerialName("bot_id") val botId: String? = null,
     @SerialName("custom_emoji_content") val customEmojiContent: String? = null,
     @SerialName("emoji_id") val emojiId: String? = null,
+    /**
+     * `reactions.metadata`: a bridged reaction's own picture, under `remote_emoji_url`.
+     *
+     * The Discord bridge writes a reaction's image here instead of an `emojis` row, so a pill
+     * that read only the two emoji columns had nothing to draw and showed the emoji's name.
+     */
+    val metadata: JsonElement? = null,
     @SerialName("created_at") val createdAt: String? = null,
 ) {
     val emoji: String get() = customEmojiContent ?: emojiId ?: "?"
@@ -396,17 +500,49 @@ data class Reaction(
      *
      * This is the identity a pill is drawn under, the one a tap toggles, and the one the
      * reactor list filters by, so all three agree about which reactions belong together. The
-     * display label cannot do that job: every custom emoji's label is `:custom:`, so two
-     * different custom pills would be one group and a tap would remove the wrong one.
+     * display label cannot do that job: a custom emoji's label is `:name:`, so two different
+     * server emoji could be one group and a tap would remove the wrong one.
      */
     val key: String get() = emojiId ?: customEmojiContent ?: emoji
 
     /**
      * What to write back to `reactions.custom_emoji_content` when this account toggles the
      * pill. Joining an existing pill sends the content that pill already carries, which is what
-     * the instance's own `check_reaction_emoji` trigger expects.
+     * the instance's own `check_reaction_emoji` trigger expects. A pill with no content names its
+     * `emojis` row instead, and writes [toggleEmojiId].
      */
-    val content: String get() = customEmojiContent ?: emojiId ?: emoji
+    val content: String? get() = customEmojiContent ?: emojiId
+
+    /**
+     * The `reactions.emoji_id` a toggle writes, and the column a toggle removes by.
+     *
+     * The reference client writes a reaction one of two ways (`CoreMessageService.toggleReaction`):
+     * a uuid names an `emojis` row and goes in `emoji_id`; anything else -- a unicode glyph, a
+     * shortcode, a bridged `discord:` identifier -- goes in `custom_emoji_content`. Writing a uuid
+     * into `custom_emoji_content` instead is what the instance refuses with
+     * `REACTION_EMOJI: <uuid> is no emoji`, because that column holds an emoji, not a row id.
+     */
+    val toggleEmojiId: String? get() = emojiId ?: customEmojiContent?.takeIf { isEmojiRowId(it) }
+
+    /** The `reactions.custom_emoji_content` a toggle writes, or null when it writes an id. */
+    val toggleContent: String? get() = if (toggleEmojiId != null) null else content
+
+    /**
+     * The picture a reaction carries outside the `emojis` table: a bridged emoji's own image.
+     *
+     * A Discord-bridged reaction names its emoji in `custom_emoji_content` and puts the file in
+     * `metadata.remote_emoji_url`, kept on Discord's CDN with its png/gif extension. The reference
+     * reads it only from there (`remoteReactionEmojiUrl` in `src/utils/emojiUtils.ts`), because
+     * any bot can write reaction metadata and every viewer of the message would fetch that url.
+     * So the url is honoured only on Discord's own hosts, and otherwise the identifier's snowflake
+     * rebuilds the picture; anything else has none, and draws its name.
+     */
+    val remoteEmojiUrl: String? get() {
+        if (emojiId != null) return null
+        val fromMetadata = (metadata as? JsonObject)?.stringOrNull("remote_emoji_url")
+        return DiscordEmoji.cdnUrl(fromMetadata) ?: DiscordEmoji.parse(customEmojiContent)?.imageUrl
+    }
+
 }
 
 @Serializable

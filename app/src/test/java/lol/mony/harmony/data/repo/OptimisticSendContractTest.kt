@@ -140,7 +140,7 @@ class OptimisticSendContractTest {
     @Test fun theReactionLimitReadsAsASentenceRatherThanTheDatabasesWords() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(400)
             .setBody("""{"code":"P0001","message":"Maximum emoji reactions per message reached (20)"}"""))
-        val result = chat.addReaction(endpoint, token(), "m1", "p1", "👍")
+        val result = chat.addReaction(endpoint, token(), "m1", "p1", null, "👍")
 
         assertTrue(result.isFailure)
         val message = result.exceptionOrNull()!!.message!!
@@ -151,7 +151,7 @@ class OptimisticSendContractTest {
     @Test fun anOrdinaryReactionFailureKeepsItsOwnReason() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(403)
             .setBody("""{"code":"42501","message":"Permission denied"}"""))
-        val result = chat.addReaction(endpoint, token(), "m1", "p1", "👍")
+        val result = chat.addReaction(endpoint, token(), "m1", "p1", null, "👍")
         assertTrue(result.isFailure)
         assertTrue(result.exceptionOrNull()!!.message!!.contains("Permission denied"))
     }

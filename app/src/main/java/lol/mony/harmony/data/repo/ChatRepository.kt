@@ -193,21 +193,100 @@ class ChatRepository(private val rest: RestApi) {
             serializer = ListSerializer(Reaction.serializer())).getOrThrow().groupBy { it.messageId }
     }
 
-    suspend fun addReaction(endpoint: Endpoint, token: String, messageId: String, userId: String, emoji: String): Result<Unit> = runCatching {
-        rest.insert(endpoint, token, "reactions", buildJsonObject {
-            put("message_id", messageId); put("user_id", userId); put("custom_emoji_content", emoji)
-        }.toString(), serializer = ListSerializer(Reaction.serializer())).getOrThrow()
-    }.map { Unit }.recoverCatching { error ->
-        // The instance allows 20 reactions from one person on one message and says so in the
-        // database's own words; turning that into a sentence is the client's job.
-        if (error.message?.contains("Maximum emoji reactions", ignoreCase = true) == true) {
-            throw IllegalArgumentException("You have reached the 20-reaction limit on this message.")
-        }
-        throw error
+    /**
+     * The `emojis` rows a set of ids names, so a custom emoji can be drawn as its picture.
+     *
+     * A reaction row carries `emoji_id`, and a message part carries the emoji's whole row; the
+     * id alone is a uuid, which is why a client that draws only what the reaction stores shows
+     * an id where a picture belongs. `emojis` is world-readable (`emojis_select_all`), so one
+     * `in.(...)` read answers for a whole page. A removed emoji keeps its row and its file, and
+     * is still what old content shows, so `deleted_at` is not filtered here.
+     */
+    suspend fun emojis(endpoint: Endpoint, token: String, ids: Collection<String>): Map<String, Emoji> {
+        val unique = ids.filter { isEmojiRowId(it) }.distinct()
+        if (unique.isEmpty()) return emptyMap()
+        return rest.select(endpoint, token, "emojis", EMOJI_COLUMNS,
+            listOf("id" to "in.(${unique.take(PAGE).joinToString(",")})"),
+            serializer = ListSerializer(Emoji.serializer()),
+        ).getOrThrow().mapNotNull { row -> row.id?.let { it to row } }.toMap()
     }
 
-    suspend fun removeReaction(endpoint: Endpoint, token: String, messageId: String, userId: String, emoji: String): Result<Unit> =
-        rest.delete(endpoint, token, "reactions", listOf("message_id" to "eq.$messageId", "user_id" to "eq.$userId", "custom_emoji_content" to "eq.$emoji"))
+    /**
+     * The `emojis` rows a set of `:shortcodes:` names, so text that uses one draws its picture.
+     *
+     * A message's text is where a custom emoji is used most: this client has no picker, so a
+     * person types `:blobcat:` and the reference draws blobcat's picture for it. Only the names
+     * the instance actually has come back; the rest stay the text they were written as, which is
+     * what the reference's own renderer does with a name its resolver cannot answer.
+     */
+    suspend fun emojisNamed(endpoint: Endpoint, token: String, names: Collection<String>): Map<String, Emoji> {
+        val unique = names.map { it.substringBefore('~').trim().trim(':') }
+            .filter { EMOJI_NAME.matches(it) }.distinct()
+        if (unique.isEmpty()) return emptyMap()
+        return rest.select(endpoint, token, "emojis", EMOJI_COLUMNS,
+            listOf("name" to "in.(${unique.take(PAGE).joinToString(",")})"),
+            serializer = ListSerializer(Emoji.serializer()),
+        ).getOrThrow().mapNotNull { row -> row.id?.let { it to row } }.toMap()
+    }
+
+    /**
+     * Adds this account's reaction with one emoji to a message, as the reference client writes it.
+     *
+     * [emojiId] names an `emojis` row and goes in `emoji_id`; [content] is a unicode glyph, a
+     * shortcode or a bridged `discord:` identifier and goes in `custom_emoji_content`. Exactly one
+     * of the two is set, which is the shape the instance's `check_reaction_emoji` trigger accepts.
+     */
+    suspend fun addReaction(endpoint: Endpoint, token: String, messageId: String, userId: String,
+                            emojiId: String?, content: String?): Result<Unit> = runCatching {
+        require(emojiId != null || content != null) { "A reaction names an emoji." }
+        rest.insert(endpoint, token, "reactions", buildJsonObject {
+            put("message_id", messageId); put("user_id", userId)
+            emojiId?.let { put("emoji_id", it) }
+            content?.let { put("custom_emoji_content", it) }
+        }.toString(), serializer = ListSerializer(Reaction.serializer())).getOrThrow()
+    }.map { Unit }.recoverCatching { error ->
+        throw readableReactionFailure(error)
+    }
+
+    /**
+     * Removes this account's reaction, filtering on the column that reaction was written to.
+     *
+     * The old delete always filtered `custom_emoji_content`, which is null on a row that names its
+     * emoji by id, so `eq.<glyph>` matched nothing and the reaction could not be taken back.
+     */
+    suspend fun removeReaction(endpoint: Endpoint, token: String, messageId: String, userId: String,
+                               emojiId: String?, content: String?): Result<Unit> {
+        val filters = buildList {
+            add("message_id" to "eq.$messageId"); add("user_id" to "eq.$userId")
+            if (emojiId != null) add("emoji_id" to "eq.$emojiId")
+            else if (content != null) add("custom_emoji_content" to "eq.$content")
+        }
+        if (filters.size == 2) return Result.failure(IllegalArgumentException("A reaction names an emoji."))
+        return rest.delete(endpoint, token, "reactions", filters)
+    }
+
+    /**
+     * The instance's refusal of a reaction as a sentence a person can act on.
+     *
+     * Every reason below is the database's own wording, raised by a trigger; the reference client
+     * maps the same codes to its own strings. Anything else keeps its own message rather than
+     * being replaced by a generic one.
+     */
+    private fun readableReactionFailure(error: Throwable): Throwable {
+        val message = error.message.orEmpty()
+        val known = when {
+            message.contains("Maximum emoji reactions", ignoreCase = true) ->
+                "You have reached the 20-reaction limit on this message."
+            message.contains("USE_EXTERNAL_EMOJIS") ->
+                "That emoji belongs to another server, and you cannot use it here."
+            message.contains("ADD_REACTIONS") ->
+                "You cannot add reactions in this channel."
+            message.contains("REACTION_EMOJI") ->
+                "That emoji is no longer available."
+            else -> null
+        }
+        return known?.let { IllegalArgumentException(it) } ?: error
+    }
 
     suspend fun conversations(endpoint: Endpoint, token: String, profileId: String,
                               profiles: ProfileRepository): Result<List<DirectConversation>> = runCatching {
@@ -271,3 +350,9 @@ internal fun requiresEncryption(element: JsonElement): Boolean = when (element) 
 
 internal object JsonPrimitiveText { fun quote(value: String): String = JsonPrimitive(value).toString() }
 internal fun nowIso(): String = java.time.Instant.now().toString()
+
+/** The columns of an `emojis` row this client draws, so a wide read cannot break a page. */
+private const val EMOJI_COLUMNS = "id,name,url,domain"
+
+/** An `emojis.name`: the instance allows `_~-` up to 64, without the colons a shortcode has. */
+private val EMOJI_NAME = Regex("^[A-Za-z0-9_+~\\-]{1,64}$")
