@@ -10,10 +10,11 @@
 #   ./upgrade-test.sh prepare <out-dir>
 #   ./upgrade-test.sh run <out-dir> [serial]
 #
-# prepare builds the version in VERSION, then the same tree with the patch number
-# raised by one, so the second is what a later release would produce. Both are signed
-# with whatever test-keystore.properties configures (or the generated debug key) and
-# named as the workflow names them. VERSION is restored afterwards.
+# prepare builds the tree twice: once as it is, then once with the build number raised
+# by one (-PharmonyVersionCode), which is what a later commit produces. The version name
+# stays the commit's, because it is the same commit: what a later commit changes is the
+# number Android compares. Both are signed with whatever test-keystore.properties
+# configures (or the generated debug key) and named as the workflow names them.
 set -euo pipefail
 MODE=${1:?usage: upgrade-test.sh <prepare|run> <out-dir> [serial]}
 OUT=${2:?usage: upgrade-test.sh <prepare|run> <out-dir> [serial]}
@@ -43,27 +44,22 @@ describe() {
 
 if [ "$MODE" = prepare ]; then
   version=$(tr -d '[:space:]' < "$ROOT/VERSION")
-  major=${version%%.*}; rest=${version#*.}; minor=${rest%%.*}; patch=${rest#*.}
-  next="$major.$minor.$((patch + 1))"
-  cp "$ROOT/VERSION" "$OUT/VERSION.orig"
-  trap 'cp "$OUT/VERSION.orig" "$ROOT/VERSION" 2>/dev/null || true' EXIT
-  echo "### first build: $version"
-  cd "$HERE"
-  ./gradlew :app:assembleDebug --console=plain --max-workers=2 > "$OUT/build-1.log" 2>&1
-  cp app/build/outputs/apk/debug/app-debug.apk "$OUT/first.apk"
-  echo "### second build: $next"
-  printf '%s\n' "$next" > "$ROOT/VERSION"
-  ./gradlew :app:assembleDebug --console=plain --max-workers=2 > "$OUT/build-2.log" 2>&1
-  cp app/build/outputs/apk/debug/app-debug.apk "$OUT/second.apk"
-  cp "$OUT/VERSION.orig" "$ROOT/VERSION"
-  # name-artifact.sh reads the same VERSION file for both builds, so both files would get
-  # one name. Each is renamed here to the version its own manifest reports, which is the
-  # number Android compares.
   sha=$(git rev-parse --short=7 HEAD)
-  mv "$OUT/first.apk" "$OUT/Brapmony-$version-$sha-debug.apk"
-  mv "$OUT/second.apk" "$OUT/Brapmony-$next-$sha-debug.apk"
-  first="$OUT/Brapmony-$version-$sha-debug.apk"
-  second="$OUT/Brapmony-$next-$sha-debug.apk"
+  # The number Gradle derives for this commit, and the one a later commit would give it.
+  # Read from git the same way the build reads it, so the two agree.
+  code=$((2000000 + $(git rev-list --count HEAD)))
+  next_code=$((code + 1))
+  # Both builds report the same version name, because they are the same commit: what
+  # Android compares to decide an upgrade is the versionCode, and that is what differs.
+  cd "$HERE"
+  echo "### first build: $version-$sha, versionCode $code"
+  ./gradlew :app:assembleDebug --console=plain --max-workers=2 > "$OUT/build-1.log" 2>&1
+  cp app/build/outputs/apk/debug/app-debug.apk "$OUT/Brapmony-$version-$sha-code$code-debug.apk"
+  echo "### second build: $version-$sha, versionCode $next_code"
+  ./gradlew :app:assembleDebug -PharmonyVersionCode="$next_code" --console=plain --max-workers=2 > "$OUT/build-2.log" 2>&1
+  cp app/build/outputs/apk/debug/app-debug.apk "$OUT/Brapmony-$version-$sha-code$next_code-debug.apk"
+  first="$OUT/Brapmony-$version-$sha-code$code-debug.apk"
+  second="$OUT/Brapmony-$version-$sha-code$next_code-debug.apk"
   describe "$first" first
   describe "$second" second
   first_pkg=$(package_name "$first"); second_pkg=$(package_name "$second")
@@ -77,10 +73,11 @@ if [ "$MODE" = prepare ]; then
   exit 0
 fi
 if [ "$MODE" = run ]; then
-  # The two files `prepare` wrote, oldest version first; sort -V orders the version
-  # numbers, not the letters of their names.
-  first=$(ls "$OUT"/Brapmony-*-debug.apk | sort -V | head -1)
-  second=$(ls "$OUT"/Brapmony-*-debug.apk | sort -V | tail -1)
+  # The two files `prepare` wrote, oldest build number first. Both report the same
+  # version name -- they are the same commit -- so the order comes from the versionCode in
+  # their names, which is the number Android compares.
+  first=$(ls "$OUT"/Brapmony-*-code*-debug.apk | sort -V | head -1)
+  second=$(ls "$OUT"/Brapmony-*-code*-debug.apk | sort -V | tail -1)
   second_code=$(version_code "$second")
   D wait-for-device
   echo "### installing the first build"

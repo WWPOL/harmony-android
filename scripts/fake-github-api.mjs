@@ -143,6 +143,15 @@ const server = http.createServer(async (req, res) => {
     console.log(`created tag ${name} at ${payload.sha}`);
     return send(201, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
   }
+  // The branch list and the artifact list `cleanup` reads. This stand-in starts with no
+  // branches and no artifacts, so a cleanup run against it lists nothing and deletes
+  // nothing: the command's own behaviour is covered by scripts/release.test.mjs, and this
+  // process exists to run the workflow's steps, not to model the whole API.
+  if (req.method === 'GET' && url.pathname === `/repos/${repo}/branches`) return page([]);
+  // The artifacts endpoint pages an object holding the page, as GitHub's does.
+  if (req.method === 'GET' && url.pathname === `/repos/${repo}/actions/artifacts`) {
+    return send(200, { total_count: 0, artifacts: [] });
+  }
   return send(404, { message: `unhandled ${req.method} ${url.pathname}` });
 });
 

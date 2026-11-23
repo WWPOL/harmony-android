@@ -8,24 +8,72 @@ updates which.
 There is one place an APK is published for people: **a release**. Nothing is pushed to a
 container registry; see [There is no package](#there-is-no-package).
 
+## Versions: a release line, and a build that is its commit
+
+There are two numbers, and they answer two different questions.
+
+**`VERSION` is the release line** — `0.1.0` today. It is a number a person reads, changed on
+purpose when the app reaches a milestone, and the name of a release when the commit carrying
+it is tagged `v0.1.0`. It is *not* bumped per commit and does not identify a build.
+
+**A build is identified by its commit.** `app/build.gradle.kts` reads the commit from git:
+
+| | Branch build (every push) | Version build (`vX.Y.Z` tag) |
+| --- | --- | --- |
+| `versionName` | `<VERSION>-<sha7>-debug` — e.g. `0.1.0-606ab10-debug` | `<VERSION>` — e.g. `0.1.0` (`-debug` if test-signed) |
+| `versionCode` | `2_000_000` + the number of commits reachable from it | The same number |
+
+So two commits never report the same version, and a later commit always reports a higher
+`versionCode` than an earlier one, which is what Android compares before it installs one build
+over another. Nobody maintains a counter: the commit count only grows along a branch, and every
+build of one commit gets the same number. CI has to fetch the whole history for that to hold
+(`fetch-depth: 0`), and a checkout without one fails the version step rather than reporting `1`.
+
+The `2_000_000` base is the one number chosen by hand, and it is chosen once: the previous
+scheme numbered a release `maj*1e6 + min*1e3 + pat`, so `1.9.6` was `1_009_006` and no `1.x`
+release could exceed `1_999_999`. Starting above that is what keeps this change from being a
+downgrade Android refuses.
+
+**What this replaced, and why.** `VERSION` said `1.9.6` from the first commit of this
+repository, and nothing ever changed it: it was the value inherited from the project this app
+was split out of. Every build of every commit therefore reported `versionName 1.9.6` and
+`versionCode 1009006`, the rolling release was titled `Brapmony 1.9.6` for all of them, and
+only the commit in the file name said which build was which. A version that never moves is not
+a version; it is a constant, and it made the Releases page describe a stream of different
+builds with one stale number. [The evidence note](evidence/release/versioning-and-cleanup.md)
+has the history, the remote state it left behind, and the sweep that clears it.
+
+`-PharmonyVersionCode` overrides the number, which `upgrade-test.sh` uses to build one tree
+twice with a higher code. `-PharmonyReleaseBuild` makes the version name the plain release line,
+which `release.yml` sets: a tag's APK is the release, not a build of a branch.
+
+The version is on the account screen, in the About section, read from `BuildConfig`: it is
+what to quote in a bug report.
+
 ## Names
 
-One scheme, everywhere: `<app>-<version>[-<commit>][-<signing>].apk`. The signing state is
-last, the way Gradle names a variant, and `-debug` is a signing statement rather than only a
-build type: it says the APK carries the repository's test key.
+One scheme, everywhere: `<app>-<version>[-<signing>].apk`, where `<version>` is the version
+name the APK itself reports. The signing state is last, the way Gradle names a variant, and
+`-debug` is a signing statement rather than only a build type: it says the APK carries the
+repository's test key.
 
 | Build | Name |
 | --- | --- |
-| Push to a branch | `Brapmony-1.9.6-606ab10-debug.apk` |
-| Version tag, release-signed | `Brapmony-1.9.6.apk` |
-| Version tag, test-signed | `Brapmony-1.9.6-debug.apk` |
+| Push to a branch | `Brapmony-0.1.0-606ab10-debug.apk` |
+| Version tag, release-signed | `Brapmony-0.1.0.apk` |
+| Version tag, test-signed | `Brapmony-0.1.0-debug.apk` |
 | The stable name to bookmark | `Brapmony-latest.apk` (and `.sha256`) |
 | Actions artifact | The APK's own name, `-attempt-<n>` on a re-run |
 
+The name is passed to `scripts/name-artifact.sh` as the version name the build produced
+(`APP_VERSION_NAME`), not derived a second time inside the script, so the file name and the
+manifest inside the file cannot disagree. The workflow checks the finished APK's manifest
+against the version it reports before it names the file, and the publish job checks the
+downloaded copy again.
+
 The branch is not in the file name: it is in the tag of the release the file is published to
 (`android-rolling-<branch>`), which is where a downloader looks for it, and a branch name can
-carry characters and a length a file name should not. `scripts/name-artifact.sh` is the one
-place that builds a name, so a workflow cannot invent its own.
+carry characters and a length a file name should not.
 
 An earlier version of this workflow published `Brapmony_Android_V1.9.6_debug-<branch>-<sha7>.apk`
 and `Brapmony_Android_latest.apk`. Those names are retired on the first publish that runs
@@ -42,23 +90,42 @@ rather than leave an older one standing.
 
 | Where | What | Lifetime |
 | --- | --- | --- |
-| Actions artifact `Brapmony-<version>-<sha7>-debug` | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 90 days, never overwritten |
+| Actions artifact `Brapmony-<version>-<sha7>-debug` | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 30 days, never overwritten |
 | Release `android-rolling-main` (the default branch) | This run's APK under its own name, plus `Brapmony-latest.apk` and that file's `.sha256` | The release stays; builds older than the newest ten of that branch are pruned |
 | Prerelease `android-rolling-<other branch>` | The same, for a branch that is not the default | The same |
 | Attestation, for the APK | A signed build-provenance statement naming this repository, this workflow and this commit | As long as the repository keeps it |
 | The run's summary | Links to all of it | With the run |
 
-Each run's APK is named after its version and commit (`Brapmony-1.9.6-606ab10-debug.apk`),
+Each run's APK is named after the version it reports (`Brapmony-0.1.0-606ab10-debug.apk`),
 so a link to a particular build keeps working after later pushes. `Brapmony-latest.apk` is the
 stable name to bookmark: it is replaced on every push to that branch, from the same bytes as
 that run's own APK.
 
 **The default branch's build is a release.** It is what the repository's Releases box and
 `/releases/latest` offer, so somebody who finds the repository finds a downloadable app
-rather than nothing. Its release is named `Brapmony <version>`, and the title and body are
-refreshed on every publish so the page describes the build that is actually there — only
-after that build has uploaded, so a failed publish cannot leave the page describing bytes it
+rather than nothing. Its release is named for the branch — `Brapmony (rolling) main` — and its
+body is refreshed on every publish so the page describes the build that is actually there,
+with the version, versionCode, commit and checksum of that build. The body is updated only
+after the build has uploaded, so a failed publish cannot leave the page describing bytes it
 does not have.
+
+### Why one release per branch, and not one per commit
+
+A rolling release is a **window on a branch**, refreshed by every push. It holds the newest ten
+builds of `main`, each under its own name, plus the stable `Brapmony-latest.apk`.
+
+A release per commit would make the Releases page a commit log: dozens of entries a day, each
+one a copy of the previous one plus a commit, and no entry meaning more than the one after it.
+GitHub's Releases page is the front door of the repository, and what it should say is "here is
+the app" — which is what one rolling release says — rather than "here are the last four hundred
+commits". A build that is worth keeping is a **version release**: push a `vX.Y.Z` tag, and that
+commit's APK is attached to a release named for the version, with nothing on top of it. That is
+the archive; the rolling release is the window.
+
+The title is not a version, either. It was `Brapmony 1.9.6` for every build of every branch,
+because `VERSION` was one number nothing bumped, so the title was a version that described no
+particular build and every build at once. A version belongs to a build (in the body, beside its
+commit) or to a tag release (in its title), not to a release whose contents change daily.
 
 Every other branch's build is a **prerelease**, which `releases/latest` skips: a branch build
 is not an offer to anybody. A rolling release that carries none of this workflow's own assets
@@ -210,7 +277,7 @@ claim, and the API's `digest` and the attestation are GitHub's.
 - **Actions artifacts as a download route.** The artifact is kept because it is the record of
   what a run built, with the `.sha256` and the metadata file beside it, and because the
   publish job reads it back instead of rebuilding. It is not a route to offer people: it
-  expires after 90 days and needs a GitHub login to download. The release is the route that
+  expires after 30 days and needs a GitHub login to download. The release is the route that
   outlives a run.
 - **A cache of the Gradle build between runs.** It would make a build faster, and it is a
   separate change with its own risk (a stale cache producing a different APK from the same
@@ -222,8 +289,10 @@ claim, and the API's `digest` and the attestation are GitHub's.
 
 A version tag (`vX.Y.Z`) runs
 [`release.yml`](https://github.com/WWPOL/harmony-android/blob/main/.github/workflows/release.yml),
-which stamps `VERSION` from the tag, builds the release variant, and attaches the APK to the
-release for that tag:
+which checks that the tagged commit's `VERSION` is the tag's number, builds the release variant
+with that release line as its version name, and attaches the APK to the release for that tag.
+A tag whose commit says a different version is refused, so a release cannot be published under
+a number the tree does not carry.
 
 | Signing configured | Asset |
 | --- | --- |
@@ -402,17 +471,61 @@ certificates differ, the APK is a different app to Android.
 
 ## Version and upgrades
 
-`app/build.gradle.kts` reads the repository's `VERSION` file, which the release workflow
-stamps from the tag. `versionName` is that version and `versionCode` is
-`X * 1_000_000 + Y * 1_000 + Z`, so a later release always carries a higher versionCode than
-an earlier one and no counter is maintained by hand. A higher versionCode is necessary but not
-sufficient: Android also requires the same signing key, so an install is only ever upgraded in
-place by a build signed with the key the installed one carries (see [Signing](#signing)).
+Android installs a build over an installed app when the package is the same, the signing
+certificate matches, and the `versionCode` is not lower. The scheme above gives the third one
+for free: the code is the commit count, so a later commit is always higher and a build of the
+same commit is always equal. A higher code is necessary but not sufficient — the certificate
+is the other half, so an install is only ever upgraded in place by a build signed with the key
+the installed one carries (see [Signing](#signing)).
 
-The debug variant appends `-debug` to the version name, so the About screen and the APK's
-file name say which build is installed. The package is the same in every build type: a debug
-build and a release build of one version are the same app to Android, and only the certificate
-decides whether one installs over the other.
+The debug variant appends `-debug` to the version name, so the About row and the APK's file
+name say which build is installed. The package is the same in every build type: a debug build
+and a release build of one commit are the same app to Android, and only the certificate decides
+whether one installs over the other.
+
+## Cutting a release
+
+A version release is a tag. The version line is bumped in a commit, and the tag goes on that
+commit:
+
+```sh
+printf '%s\n' 0.2.0 > VERSION          # the release line, bumped on purpose
+git commit -am 'chore(release): 0.2.0'
+git tag v0.2.0
+git push origin main --follow-tags      # the tag runs release.yml
+```
+
+`release.yml` refuses a tag whose commit's `VERSION` is not the tag's number, so a release
+cannot be published under a version the tree does not carry. It builds the release variant,
+names the APK `Brapmony-0.2.0.apk` (`-debug` when test-signed), attaches it and its `.sha256`
+to the release for the tag, and attests it. Re-running the tag finds the same release and
+replaces only the names it owns.
+
+No tag has been pushed yet, so `0.1.0` is the release line with no release under it: what
+exists today is the rolling release of `main`.
+
+## Cleaning up what nothing publishes to any more
+
+A rolling tag is created by the first publish of a branch and moved by every one after it.
+When a branch is deleted or renamed, nothing moves its tag again: the tag stays in the
+repository's tag list, and its release stays on the Releases page, pointing at a build no
+branch will ever refresh. A workflow cannot notice — it only ever runs for the branch it is
+publishing — so the sweep is separate and explicit:
+
+```sh
+node scripts/release.mjs cleanup --default-branch main              # lists
+node scripts/release.mjs cleanup --default-branch main --apply      # deletes
+```
+
+or **Actions → Clean up releases and builds → Run workflow**, where `apply` is a checkbox that
+is off by default. It removes the rolling releases and tags of branches that no longer exist,
+a rolling tag whose release was deleted by hand (a tag is a page on the repository too, and it
+can only be found from the tag list), and Actions artifacts beyond the newest ten. It never
+touches a version release, a version tag, the rolling release of a branch that exists, or the
+default branch's release; each of those is a test in `scripts/release.test.mjs`.
+
+The list, without the deletion, is also what to read when the Releases page has something on it
+that should not be there.
 
 ## Working on the workflows
 
@@ -420,8 +533,8 @@ Three Node scripts exist for checking the workflows without a runner:
 
 | Script | What it does |
 | --- | --- |
-| `scripts/release.test.mjs` | Runs the publishing script against an in-process stand-in for the GitHub releases API |
-| `scripts/workflow.test.mjs` | Parses both workflows and asserts the properties that make publishing safe |
+| `scripts/release.test.mjs` | Runs the publishing and cleanup commands against an in-process stand-in for the GitHub releases API |
+| `scripts/workflow.test.mjs` | Parses all three workflows and asserts the properties that make publishing and deleting safe |
 | `scripts/workflow-steps.mjs` | Runs one job's `run:` steps with `bash -eo pipefail`, as GitHub does, on this machine |
 
 The first two run in CI with the unit tests:
@@ -450,7 +563,9 @@ The workflow tests assert that every action is pinned to a commit SHA, that
 request runs, that `packages: write` and `artifact-metadata: write` appear nowhere, that the
 branch publisher runs only for a push to this repository, that a push has no path filter, that
 the stable test key is configured from a secret and its absence reported, that the tag job
-stamps `VERSION` from the tag and attaches by release id, that the APK namer is called with a
+refuses a tag whose commit's `VERSION` is another number and attaches by release id, that the
+build number's base is the same in Gradle and in both workflows, that the cleanup workflow is
+dispatch-only and lists before it deletes, that the APK namer is called with a
 profile it accepts and really renames the file to the name the scheme says, that a re-run's
 artifact does not land on the first attempt's name, that no upload carries a label and the old
 ones are cleared, that the publish moves the rolling tag onto the commit it built, that no
@@ -556,8 +671,8 @@ decision and the retirement of the old names are checked by `npm test` against a
 stand-in for the releases API, and the first push after this change is reproduced exactly:
 the test seeds the stand-in with the release `main` actually had — `Brapmony_Android_latest.apk`,
 its `.sha256`, and `Brapmony_Android_V1.9.6_debug-main-606ab10.apk`, read from the GitHub API
-— publishes one build, and asserts that it becomes a release named `Brapmony 1.9.6` with the
-new names, the old stable names retired, and the old build left for pruning.
+— publishes one build, and asserts that it becomes a release named `Brapmony (rolling) main`
+with the new names, the old stable names retired, and the old build left for pruning.
 
 The `Publish` step is also run as the workflow runs it, with `scripts/workflow-steps.mjs`
 against `scripts/fake-github-api.mjs`, and the release it produces is read back: every asset

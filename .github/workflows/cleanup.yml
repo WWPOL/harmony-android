@@ -1,0 +1,79 @@
+name: Clean up releases and builds
+
+# Removes what a rolling publish leaves behind when nothing will publish to it again, and
+# the Actions artifacts that outlived their use:
+#
+#   * the rolling release and tag of a branch that no longer exists -- the release is one
+#     nothing will ever refresh, and the tag points at a commit no release on the
+#     repository describes any more;
+#   * a rolling tag with no release at all, which a release deleted by hand leaves behind;
+#   * Actions artifacts beyond the newest few. An artifact is the record of one run, it
+#     expires on its own, and the release is the copy that outlives a run.
+#
+# It is a manual dispatch, never a push: deleting a release and a tag is not something a
+# build should do by accident, and the decision that a branch is gone is a person's. The
+# default is a dry run that lists what it would delete.
+#
+# What it never touches: a version release (`vX.Y.Z`) and its tag, the rolling release of a
+# branch that still exists, and the rolling release of the default branch. Those are
+# `scripts/release.mjs`'s own rules, and `npm test` asserts them.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Delete what the run lists. Leave unchecked for a dry run.'
+        type: boolean
+        default: false
+      keep-artifacts:
+        description: 'How many of the newest Actions artifacts to keep.'
+        type: string
+        default: '10'
+
+# One run at a time, so two dispatches cannot try to delete the same release.
+concurrency:
+  group: cleanup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The branch whose rolling release is the repository's release, and the one branch that
+  # is never stale whatever the API says about it.
+  DEFAULT_BRANCH: main
+
+jobs:
+  cleanup:
+    name: Remove stale releases, tags and old artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Deleting a release and a tag is a write to the repository; deleting an artifact is
+    # `actions: write`. Neither is granted to any other job in this repository.
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - name: List, and delete when asked
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+          KEEP_ARTIFACTS: ${{ inputs.keep-artifacts }}
+        run: |
+          args=(cleanup --default-branch "$DEFAULT_BRANCH" --keep-artifacts "${KEEP_ARTIFACTS:-10}")
+          if [ "$APPLY" = 'true' ]; then
+            args+=(--apply)
+          fi
+          node scripts/release.mjs "${args[@]}" | tee cleanup.txt
+          {
+            echo "### Clean up releases and builds"
+            echo ""
+            echo '```'
+            cat cleanup.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

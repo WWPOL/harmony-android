@@ -22,6 +22,7 @@ import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Palette
@@ -56,6 +57,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import lol.mony.harmony.BuildConfig
 import lol.mony.harmony.data.model.AccountProfile
 import lol.mony.harmony.data.model.AccountPrivacy
 import lol.mony.harmony.data.repo.AccountRepository
@@ -337,6 +339,17 @@ private fun SettingsList(
             )
 
             SectionHeader("About")
+            // The version this build reports, read from the APK's own manifest rather than
+            // written here: a branch build says `0.1.0-<sha7>-debug`, a release says
+            // `0.1.0`. It is the number to quote in a bug report, and the only place a
+            // person can read it without unpacking the file (CONTRIBUTING.md says so).
+            SettingsRow(
+                title = "Version",
+                summary = "${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
+                icon = Icons.Outlined.Info,
+                tag = "you-version",
+                onClick = {},
+            )
             SettingsRow(
                 title = "Source and licence",
                 summary = "GPLv3 · a native client for Harmony instances",

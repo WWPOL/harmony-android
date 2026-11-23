@@ -1,15 +1,17 @@
 #!/usr/bin/env node
-// Publishes the Android client's APK from CI. Three callers:
+// Publishes the Android client's APK from CI. Four callers:
 //
 //   node scripts/release.mjs rolling --apk <file> --branch <ref> --commit <sha> \
 //       --default-branch <ref> [--version <x.y.z>] [--keep <n>] [--body <markdown>] \
 //       [--dry-run]
 //     Publishes a rolling build of one branch: `Brapmony (rolling) <branch>` tagged
-//     `android-rolling-<slug>`. Each run adds its APK under its own versioned name and
-//     refreshes the stable `Brapmony-latest.apk` (and its `.sha256`) to the same bytes.
-//     The build of the repository's default branch is published as a **release**, so it
-//     is what the repository's Releases page and /releases/latest offer; any other
-//     branch's is a prerelease, which /releases/latest skips.
+//     `android-rolling-<slug>`. Each run adds its APK under its own name and refreshes
+//     the stable `Brapmony-latest.apk` (and its `.sha256`) to the same bytes. The build
+//     of the repository's default branch is published as a **release**, so it is what the
+//     repository's Releases page and /releases/latest offer; any other branch's is a
+//     prerelease, which /releases/latest skips. The release is named for the branch, not
+//     for a version: it is a window on a stream of builds, and the version of the build
+//     that is on it is in its body beside the commit.
 //
 //   node scripts/release.mjs tag --tag <vX.Y.Z> [--name <title>] [--body <markdown>]
 //     Creates the version release for a tag, or finds the one that exists, and prints
@@ -18,6 +20,14 @@
 //   node scripts/release.mjs upload --release-id <id> <file>...
 //     Attaches files to an existing release, replacing assets of the same name and
 //     nothing else.
+//
+//   node scripts/release.mjs cleanup --default-branch <ref> [--keep-artifacts <n>] [--apply]
+//     Lists, and with --apply deletes, what a rolling workflow left behind that nothing
+//     will publish to again: the rolling releases and tags of branches that no longer
+//     exist, and Actions artifacts beyond the newest --keep-artifacts. It never touches a
+//     version release, a version tag, or the rolling release of a branch that exists.
+//     Run by cleanup.yml on a manual dispatch, because deleting a release and a tag is
+//     not something a push should do by accident.
 //
 // What this refuses to do, because a published download link is somebody's:
 //
@@ -29,7 +39,8 @@
 //   * replace a build asset whose bytes differ, which would silently change what an
 //     existing name means (the new bytes go under a distinct name instead);
 //   * delete the stable `latest` name before the replacement has been uploaded;
-//   * prune when the newest build did not upload.
+//   * prune when the newest build did not upload;
+//   * delete a version release, a version tag, or the rolling release of a live branch.
 //
 // Retention: a rolling release keeps the newest DEFAULT_KEEP builds of its branch and
 // deletes older ones it uploaded itself. The release is a rolling window, not an
@@ -58,6 +69,9 @@ export const RETIRED_ASSETS = ['Brapmony_Android_latest.apk', 'Brapmony_Android_
 export const ROLLING_TAG_PREFIX = 'android-rolling-';
 // How many of a branch's own builds a rolling release keeps.
 export const DEFAULT_KEEP = 10;
+// How many Actions artifacts the cleanup keeps: enough to read back what the last few runs
+// built, not the whole history.
+export const DEFAULT_ARTIFACT_KEEP = 10;
 
 // The account GitHub attributes a workflow's uploads to. An asset uploaded by a workflow
 // carries this login, and one somebody attached to the release by hand carries theirs, so
@@ -118,12 +132,14 @@ export function rollingName(branch) {
   return `Brapmony (rolling) ${String(branch || '').trim()}`;
 }
 
-// The name a published release of the default branch carries, so the Releases page reads
-// as the app and its version rather than as a branch. The build is still named by the tag
-// (`android-rolling-<branch>`), which is what a download link uses.
-export function releaseTitle(branch, version) {
-  const v = String(version || '').trim();
-  return v ? `Brapmony ${v}` : rollingName(branch);
+// The name a rolling release carries. It is named for the branch, not for a version: a
+// rolling release is a window on a branch, refreshed by every push, so a version in its
+// title would be one stale number standing for a stream of different builds -- which is
+// what `Brapmony 1.9.6` was, for every commit, because the version line never changed.
+// The version of the build that is actually on it is in its body, beside the commit.
+// A version release is the one named by a version, and its tag is `vX.Y.Z`.
+export function releaseTitle(branch) {
+  return rollingName(branch);
 }
 
 // Whether a rolling release is a published release or a prerelease. The default branch's
@@ -199,13 +215,18 @@ export function client({
     return res.status === 204 ? null : res.json();
   }
 
-  async function paginate(url) {
+  // Every page of a list endpoint, concatenated. `unwrap` names the property a page
+  // carries its items under, for the endpoints that answer with an object rather than an
+  // array -- `/actions/artifacts` is `{ total_count, artifacts: [...] }`, while
+  // `/releases` is the array itself.
+  async function paginate(url, { unwrap } = {}) {
     const out = [];
     let next = `${repoUrl}${url}${url.includes('?') ? '&' : '?'}per_page=100`;
     while (next) {
       const res = await request('GET', next);
       if (!res.ok) throw new PublishError(`GET ${next}: ${res.status} ${await res.text()}`);
-      out.push(...(await res.json()));
+      const page = await res.json();
+      out.push(...(unwrap ? (page?.[unwrap] ?? []) : page));
       next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') || '')?.[1];
     }
     return out;
@@ -224,11 +245,13 @@ async function findByTag(gh, tag) {
 }
 
 // What a rolling release of [branch] should say and be: a published release for the
-// default branch, a prerelease for any other.
+// default branch, a prerelease for any other. [version] is accepted and unused by the
+// title: the version of the build on it belongs in the body, where it is the build's,
+// rather than in the title, where it would be one number for many builds.
 export function rollingState({ branch, defaultBranch, version, body }) {
   const published = isPublishedRelease(branch, defaultBranch);
   return {
-    name: published ? releaseTitle(branch, version) : rollingName(branch),
+    name: releaseTitle(branch, version),
     body: body ?? '',
     draft: false,
     prerelease: !published,
@@ -542,6 +565,133 @@ function required(values, keys) {
   for (const k of keys) if (!values[k]) throw new PublishError(`--${k} is required`);
 }
 
+// Every release and tag a rolling workflow left behind that no branch will publish to
+// again, and every Actions artifact older than the ones worth keeping.
+//
+// This exists because the alternatives are worse. A rolling tag is created by the first
+// publish of a branch and moved by every one after it; when the branch is deleted or
+// renamed, nothing moves the tag again, so it sits in the repository's tag list pointing
+// at a commit that no release on it describes any more. The same happens to the release.
+// Nothing in the workflow can know a branch is gone -- it only ever runs for the branch it
+// is publishing -- so this is a separate, explicit sweep rather than something a push
+// does: deleting a release and a tag is not a thing a build should do by accident.
+//
+// What it will never do, because a published download is somebody's:
+//
+//   * touch a release or a tag that is not a rolling one (`android-rolling-<branch>`),
+//     so a version release and its `vX.Y.Z` tag are never candidates;
+//   * touch the rolling release of a branch that still exists, or of [defaultBranch];
+//   * delete a tag whose commit the release's assets do not name (see below);
+//   * delete anything at all without --apply.
+//
+// The one judgement it has to make is whether a rolling release is stale. It asks the
+// repository which branches exist: a rolling tag for a branch that is not there is stale.
+// That is exact, and it needs no timestamp: `gh` reports a deleted branch as absent, and a
+// release whose tag names no branch is one nothing will ever update again.
+// Whether a rolling tag names a branch that still exists. A slug is lossy -- `feature/x`
+// and `feature-x` both become `feature-x` -- so the tag is compared with the slugs of the
+// branches that exist rather than parsed back into a branch name, which would guess wrong
+// for one of those two.
+export function tagNamesLiveBranch(tag, branches) {
+  if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) return false;
+  const slug = String(tag).slice(ROLLING_TAG_PREFIX.length);
+  return [...branches].some((branch) => {
+    try {
+      return rollingTag(branch).slice(ROLLING_TAG_PREFIX.length) === slug;
+    } catch {
+      return false;
+    }
+  });
+}
+
+export async function staleRollingReleases(gh, { defaultBranch, branches }) {
+  if (!defaultBranch) throw new PublishError('--default-branch is required');
+  const live = [defaultBranch, ...branches];
+  const releases = await gh.paginate('/releases');
+  const stale = [];
+  for (const release of releases) {
+    const tag = String(release.tag_name || '');
+    // A version release's tag is `vX.Y.Z` and never carries the rolling prefix.
+    if (!tag.startsWith(ROLLING_TAG_PREFIX)) continue;
+    if (tagNamesLiveBranch(tag, live)) continue;
+    stale.push({ id: release.id, tag, name: release.name, draft: Boolean(release.draft), assets: (release.assets || []).length });
+  }
+  return stale;
+}
+
+// Rolling tags with no release at all. A release deleted by hand leaves its tag behind,
+// and a tag is a page on the repository as much as a release is: it still points at a
+// commit, and it still reads as a build of a branch that no longer exists. They are found
+// from the tag list rather than from the release list, because there is no release to
+// find them from.
+export async function orphanRollingTags(gh, { defaultBranch, branches }) {
+  if (!defaultBranch) throw new PublishError('--default-branch is required');
+  const live = [defaultBranch, ...branches];
+  const tags = await gh.paginate('/tags');
+  const released = new Set((await gh.paginate('/releases')).map((r) => r.tag_name));
+  return tags
+    .map((t) => t.name)
+    .filter((tag) => String(tag).startsWith(ROLLING_TAG_PREFIX))
+    .filter((tag) => !released.has(tag) && !tagNamesLiveBranch(tag, live));
+}
+
+// Deletes a rolling tag that has no release. The same refusal as the release path: only a
+// rolling tag, never a version tag.
+export async function deleteTag(gh, { tag, log = () => {} }) {
+  if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) {
+    throw new PublishError(`refusing to delete ${tag}: not a rolling tag`);
+  }
+  try {
+    await gh.json('DELETE', `/git/refs/tags/${tag}`);
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+  log(`Deleted tag ${tag}`);
+  return { tag };
+}
+
+// Deletes a stale rolling release and the tag that named it. Only the assets this workflow
+// uploaded go with it -- GitHub deletes a release's assets with the release -- and the tag
+// is deleted only after the release is gone, so a failure in between leaves a release
+// whose tag still exists rather than a tag pointing at nothing.
+export async function deleteStaleRelease(gh, { id, tag, log = () => {} }) {
+  if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) {
+    throw new PublishError(`refusing to delete ${tag}: not a rolling tag`);
+  }
+  await gh.json('DELETE', `/releases/${id}`);
+  log(`Deleted release ${tag} (${id})`);
+  // A tag with no release is still a tag on the repository, so it is removed too. A 404
+  // means it was never created or is already gone, which is the state wanted.
+  try {
+    await gh.json('DELETE', `/git/refs/tags/${tag}`);
+    log(`Deleted tag ${tag}`);
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+  return { id, tag };
+}
+
+// Actions artifacts older than the newest [keep] of them. An artifact is the record of one
+// run, not a download route: it expires, and the release is what outlives a run. Keeping a
+// few is useful for reading back what a recent run built; keeping every one of them for 90
+// days is storage bought for nothing.
+export async function oldArtifacts(gh, { keep = DEFAULT_ARTIFACT_KEEP } = {}) {
+  if (!(keep >= 0)) throw new PublishError(`--keep-artifacts must not be negative: ${keep}`);
+  // Unlike `/releases`, this endpoint answers with an object holding the page
+  // (`{ total_count, artifacts: [...] }`) rather than the page itself.
+  const artifacts = await gh.paginate('/actions/artifacts', { unwrap: 'artifacts' });
+  // Newest first by id: GitHub assigns a higher id to each later artifact, and the list is
+  // not ordered by anything this can rely on.
+  const sorted = artifacts.slice().sort((a, b) => b.id - a.id);
+  return sorted.slice(keep).map((a) => ({ id: a.id, name: a.name, size: a.size_in_bytes }));
+}
+
+export async function deleteArtifact(gh, { id, name, log = () => {} }) {
+  await gh.json('DELETE', `/actions/artifacts/${id}`);
+  log(`Deleted artifact ${name} (${id})`);
+  return { id, name };
+}
+
 export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
   const [command, ...rest] = argv;
   const { values, positionals } = parseArgs({
@@ -559,6 +709,8 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       'release-id': { type: 'string' },
       tag: { type: 'string' },
       name: { type: 'string' },
+      'keep-artifacts': { type: 'string' },
+      apply: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
     },
   });
@@ -665,7 +817,32 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
     return uploaded;
   }
 
-  throw new PublishError('usage: release.mjs <rolling|tag|upload> [options]');
+  if (command === 'cleanup') {
+    required(values, ['default-branch']);
+    const gh = ghOverride ?? client();
+    const apply = values['apply'] === true;
+    const branches = (await gh.paginate('/branches')).map((b) => b.name);
+    const defaultBranch = values['default-branch'];
+    const stale = await staleRollingReleases(gh, { defaultBranch, branches });
+    const orphans = await orphanRollingTags(gh, { defaultBranch, branches });
+    const keepArtifacts = Number(values['keep-artifacts'] ?? DEFAULT_ARTIFACT_KEEP);
+    const artifacts = await oldArtifacts(gh, { keep: keepArtifacts });
+    const freed = artifacts.reduce((sum, a) => sum + (a.size || 0), 0);
+    log(`Branches: ${branches.length ? branches.join(', ') : '(none)'}`);
+    log(`Stale rolling releases: ${stale.length ? stale.map((r) => r.tag).join(', ') : '(none)'}`);
+    log(`Rolling tags with no release: ${orphans.length ? orphans.join(', ') : '(none)'}`);
+    log(`Artifacts beyond the newest ${keepArtifacts}: ${artifacts.length ? `${artifacts.map((a) => a.name).join(', ')} (${(freed / 1e6).toFixed(1)} MB)` : '(none)'}`);
+    if (!apply) {
+      log('Nothing deleted: pass --apply to delete what is listed above.');
+      return { stale, orphans, artifacts, applied: false };
+    }
+    for (const release of stale) await deleteStaleRelease(gh, { ...release, log });
+    for (const tag of orphans) await deleteTag(gh, { tag, log });
+    for (const artifact of artifacts) await deleteArtifact(gh, { ...artifact, log });
+    return { stale, orphans, artifacts, applied: true };
+  }
+
+  throw new PublishError('usage: release.mjs <rolling|tag|upload|cleanup> [options]');
 }
 
 // A copy of [file] under one fixed name, so the upload names the asset rather than taking

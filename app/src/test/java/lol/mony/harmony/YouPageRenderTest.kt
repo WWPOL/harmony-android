@@ -6,6 +6,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import kotlinx.coroutines.runBlocking
@@ -119,6 +120,47 @@ class YouPageRenderTest {
             val state = signedIn(instance)
             draw(state, VisualThemeSettings(theme = "light"))
             RenderHarness.run { compose.capture("page-you-light") }
+        }
+    }
+
+    /**
+     * The version this build is, on the screen a person opens to find it.
+     *
+     * `CONTRIBUTING.md` tells a bug reporter to read the app's version off the account screen,
+     * and `docs/builds.md` says which build is installed is a question the About screen answers.
+     * Before this the screen showed no version at all, so that instruction had nothing to point
+     * at. The expectation is `BuildConfig`, which Gradle sets from the same `versionName` the
+     * APK's manifest carries: this asserts the screen shows that value, not a string typed into
+     * the screen.
+     */
+    @Test fun theVersionTheBuildReportsIsOnTheScreen() {
+        FixtureInstance().use { instance ->
+            instance.start()
+            val state = signedIn(instance)
+            draw(state, VisualThemeSettings(theme = "dark"))
+            // A branch build's version name is `<VERSION>-<sha7>`; the debug variant adds
+            // `-debug`. Whatever it is, the row must carry it rather than a placeholder.
+            assertTrue(
+                "BuildConfig.VERSION_NAME is not a version: ${BuildConfig.VERSION_NAME}",
+                Regex("^\\d+\\.\\d+\\.\\d+(-[0-9a-f]{7})?(-debug)?$").matches(BuildConfig.VERSION_NAME),
+            )
+            // Addressed by the row's tag and by the text a person reads: a row that stopped
+            // being drawn, or stopped carrying the version, fails here.
+            assertTrue(
+                "the account page has no version row",
+                compose.onAllNodesWithTag("you-version").fetchSemanticsNodes().isNotEmpty(),
+            )
+            assertTrue(
+                "the version row does not show ${BuildConfig.VERSION_NAME}",
+                compose.onAllNodes(hasText(BuildConfig.VERSION_NAME, substring = true))
+                    .fetchSemanticsNodes().isNotEmpty(),
+            )
+            assertTrue(
+                "the version row does not show build ${BuildConfig.VERSION_CODE}",
+                compose.onAllNodes(hasText("build ${BuildConfig.VERSION_CODE}", substring = true))
+                    .fetchSemanticsNodes().isNotEmpty(),
+            )
+            RenderHarness.run { compose.capture("page-you-version-dark") }
         }
     }
 }

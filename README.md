@@ -50,22 +50,35 @@ the only place it is published, and the only route you need:
    the older copy once and install again.
 3. The build needs Android 8.0 (API 26) or newer.
 
+**The build's version is its commit.** The app is at version `0.1.0`, the release line: a
+number that changes when the app reaches a milestone, not once per push. Which *build* you
+have is the commit it was built from, so the About row on the account screen reads
+`0.1.0-<commit>-debug` — the release line, the commit, and `-debug` for the test key. Nothing
+bumps a number per commit, and two builds never report the same version.
+
 The file names say what the file is:
 
 | Name | What it is |
 | --- | --- |
 | `Brapmony-latest.apk` | The newest build of `main`. The stable name to bookmark. |
-| `Brapmony-1.9.6-606ab10-debug.apk` | One build: the version, the commit, and `-debug` for the test key it is signed with. |
-| `Brapmony-1.9.6.apk` | A version-tag release, signed with the release key. `-debug` when it is test-signed instead. |
+| `Brapmony-0.1.0-606ab10-debug.apk` | One build: the release line, the commit it was built from, and `-debug` for the test key it is signed with. |
+| `Brapmony-0.1.0.apk` | A version release, from a `v0.1.0` tag, signed with the release key. `-debug` when it is test-signed instead. |
 
 Each build is kept under its own name beside `Brapmony-latest.apk`, with a `.sha256` beside
-it, so a particular build stays downloadable after later pushes. Version releases (`vX.Y.Z`)
-are cut from tags and appear as full releases. A build of any other branch is a prerelease
-and is not offered as the repository's release. [docs/builds.md](docs/builds.md) describes
-exactly what is published where and which build installs over which.
+it, so a particular build stays downloadable after later pushes. A build of any other branch
+is a prerelease and is not offered as the repository's release.
+[docs/builds.md](docs/builds.md) describes exactly what is published where and which build
+installs over which.
 
 > The rolling release is a window on `main`, not an archive: it keeps the newest ten builds
-> of the branch and drops older ones. The version release of a tag is the archive.
+> of the branch and drops older ones. A version release (`vX.Y.Z`) is the archive.
+
+**One release per branch, not one per commit.** The rolling release is refreshed by every
+push, so the Releases page shows one entry for `main` — not one per commit, which would make
+it a commit log where no release means more than the next. A version release is cut by
+pushing a `vX.Y.Z` tag, and is the named point to download if you want something fixed. The
+rolling release is named for the branch (`Brapmony (rolling) main`), and the version, commit
+and checksum of the build that is on it are in its body.
 
 **What you downloaded, and which commit it came from.** Every APK published here carries a
 signed **build provenance attestation**. GitHub signs a statement that this exact file was
@@ -172,7 +185,7 @@ See [docs/builds.md](docs/builds.md#signing) for what each signing configuration
 | Screen-by-screen parity matrix | [docs/parity-matrix.md](docs/parity-matrix.md) |
 | Message body decoding and drawing | [docs/message-content.md](docs/message-content.md) |
 | Captured screens and logs | [docs/evidence/](docs/evidence/) |
-| The release page as it was, and the asset names the fix produces | [docs/evidence/release/](docs/evidence/release/) |
+| The release page as it was, the asset names the fix produces, and the 1.9.6 version history | [docs/evidence/release/](docs/evidence/release/) |
 | How the repository was restructured to hold the app alone | [docs/restructure.md](docs/restructure.md) |
 
 ## Contributing

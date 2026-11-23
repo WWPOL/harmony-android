@@ -46,6 +46,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # The whole history: the build number is the commit count, so a shallow clone
+          # would report 1 and a tag build would claim a lower versionCode than the branch
+          # builds it has to install over.
+          fetch-depth: 0
       # Helper scripts come from the workflow's own commit, so a dispatch can rebuild a
       # tag that predates a change to them.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -56,8 +60,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .ci/.nvmrc
-      # The APK's version is the tag's: VERSION is stamped from it, and a mismatch between
-      # the stamped tree and the tag fails the run rather than publishing a wrong version.
+      # The APK's version is the tag's: VERSION is stamped from it, and the tag has to be
+      # the line the tagged commit carries. A tag that disagrees is refused rather than
+      # publishing a file whose name says one version and whose contents say another: the
+      # version line is bumped in a commit, and the tag goes on that commit.
       - name: Stamp the version from the tag
         id: version
         env:
@@ -68,10 +74,25 @@ jobs:
             echo "::error::the tag is not vX.Y.Z: $TAG"
             exit 1
           fi
-          printf '%s\n' "$version" > VERSION
-          IFS=. read -r major minor patch <<<"$version"
+          line=$(tr -d '[:space:]' < VERSION)
+          if [ "$line" != "$version" ]; then
+            echo "::error::the tag is $TAG, but the tagged commit's VERSION is $line. Bump VERSION to $version in a commit, and tag that commit."
+            exit 1
+          fi
+          # The same number android.yml derives, from the same source: the build number is
+          # the commit count, so a tag build and a branch build of one commit report the
+          # same versionCode and Android treats them as one app.
+          commits=$(git rev-list --count HEAD)
+          if [ -z "$commits" ] || [ "$commits" -lt 1 ]; then
+            echo '::error::the checkout has no commit history, so the build number cannot be derived'
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "version-code=$((major * 1000000 + minor * 1000 + patch))" >> "$GITHUB_OUTPUT"
+          # BUILD_NUMBER_BASE in app/build.gradle.kts, written out so this is an
+          # independent expectation of what the APK should report rather than a number
+          # read back from the thing it checks. `npm test` asserts the two agree.
+          echo "version-code=$((2000000 + commits))" >> "$GITHUB_OUTPUT"
+          echo "commits=$commits" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
@@ -154,8 +175,12 @@ jobs:
           else
             echo "::warning::No ANDROID_KEYSTORE_BASE64 secret - the APK is signed with a key generated for this run and named -debug. It will not install over a build signed by any other run."
           fi
+      # `-PharmonyReleaseBuild` makes the version name the plain release line rather than a
+      # branch build's `<line>-<sha7>`: a tag's APK is the release, and its version name is
+      # the release's name. The build number is still the commit count, so a tag build and a
+      # branch build of the same commit are the same versionCode and install over each other.
       - name: Build the APK
-        run: ./gradlew :app:assembleRelease :app:testReleaseUnitTest --no-daemon --console=plain --max-workers=2
+        run: ./gradlew :app:assembleRelease :app:testReleaseUnitTest -PharmonyReleaseBuild=true --no-daemon --console=plain --max-workers=2
       # Named for what it is: `Brapmony-<version>.apk`, with `-debug` when the profile it
       # was signed with was the test key. Never the profile someone hoped it was.
       - name: Name the APK
@@ -163,6 +188,7 @@ jobs:
         env:
           GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
           GITHUB_SHA: ${{ github.sha }}
+          APP_VERSION_NAME: ${{ steps.version.outputs.version }}
         run: |
           profile=$([ "$HAS_KEYSTORE" = 'true' ] && echo release || echo debug)
           set -- app/build/outputs/apk/release/*.apk
@@ -193,6 +219,13 @@ jobs:
           case $badging in
             *"$expected"*) ;;
             *) echo "::error::$apk does not report $expected"; exit 1 ;;
+          esac
+          # The release line is a name; the build number is what Android compares. Checked
+          # too, so a tag's APK cannot be published with a code Android would refuse as a
+          # downgrade of the branch build it is meant to replace.
+          case $badging in
+            *"versionCode='${{ steps.version.outputs.version-code }}'"*) ;;
+            *) echo "::error::$apk does not report versionCode ${{ steps.version.outputs.version-code }}"; exit 1 ;;
           esac
           "$tools"apksigner verify --print-certs "$apk" > apk-signature.txt
           # The certificate's SHA-256 fingerprint, not its subject: two different keys can

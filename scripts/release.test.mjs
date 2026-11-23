@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  DEFAULT_ARTIFACT_KEEP,
   LATEST_ASSET,
   LATEST_SHA256_ASSET,
   RETIRED_ASSETS,
@@ -24,10 +25,16 @@ import {
   BOT_LOGIN,
   LEGACY_OWNER,
   client,
+  deleteArtifact,
+  deleteTag,
+  deleteStaleRelease,
   ensureRollingRelease,
   ensureTagRelease,
   isPublishedRelease,
   moveRollingTag,
+  oldArtifacts,
+  orphanRollingTags,
+  tagNamesLiveBranch,
   pruneRollingAssets,
   publishBuild,
   releaseTitle,
@@ -35,6 +42,7 @@ import {
   retireAssets,
   rollingTag,
   rollingName,
+  staleRollingReleases,
 } from './release.mjs';
 
 const run = promisify(execFile);
@@ -69,7 +77,10 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
   const calls = [];
   // `digests: false` makes the stand-in answer without a digest, the way an API that does
   // not model the field does; a test then sees that a publish still works.
-  const state = { failUploads, corruptUploads, digests: true, uploader: null, ignoresLabel: false };
+  const state = {
+    failUploads, corruptUploads, digests: true, uploader: null, ignoresLabel: false,
+    branches: [], artifacts: [],
+  };
   let nextId = 900;
   const server = http.createServer(async (req, res) => {
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -121,6 +132,16 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
       if (!release) return send(404, { message: 'Not Found' });
       Object.assign(release, JSON.parse(body.toString()));
       return send(200, release);
+    }
+    // Deleting a release, which `cleanup` does for a rolling release whose branch is gone.
+    // Its assets go with it, as they do on GitHub.
+    if (m && req.method === 'DELETE') {
+      const id = Number(m[1]);
+      const before = releases.length;
+      const kept = releases.filter((r) => r.id !== id);
+      if (kept.length === before) return send(404, { message: 'Not Found' });
+      releases.splice(0, releases.length, ...kept);
+      return send(204);
     }
     m = match(new RegExp(`^/repos/${OWNER_REPO}/releases/(\\d+)/assets$`));
     if (m && req.method === 'GET') {
@@ -215,6 +236,44 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
       if (refs.has(name)) return send(422, { message: 'Reference already exists' });
       refs.set(name, payload.sha);
       return send(201, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
+    }
+    // Deleting a tag, which `cleanup` does after it deletes the release that named it.
+    m = match(/^\/repos\/[^/]+\/[^/]+\/git\/refs\/tags\/(.+)$/);
+    if (m && req.method === 'DELETE') {
+      const name = decodeURIComponent(m[1]);
+      if (!refs.has(name)) return send(404, { message: 'Not Found' });
+      refs.delete(name);
+      return send(204);
+    }
+    // The branch list, which `cleanup` reads to decide whether a rolling release's branch
+    // still exists. Seeded per test; empty by default, so nothing is assumed to exist.
+    if (req.method === 'GET' && url.pathname === `/repos/${OWNER_REPO}/branches`) {
+      return page(state.branches.map((name) => ({ name, commit: { sha: 'f'.repeat(40) } })));
+    }
+    // The tag list, which `cleanup` reads to find rolling tags a hand-deleted release left
+    // behind. It is the refs the stand-in holds, so a tag created or deleted here is in it.
+    if (req.method === 'GET' && url.pathname === `/repos/${OWNER_REPO}/tags`) {
+      return page([...refs.keys()].map((name) => ({ name, commit: { sha: refs.get(name) } })));
+    }
+    // Actions artifacts, which `cleanup` prunes to the newest few.
+    if (req.method === 'GET' && url.pathname === `/repos/${OWNER_REPO}/actions/artifacts`) {
+      // The real endpoint pages an object holding the page, not the page itself.
+      const n = Number(url.searchParams.get('page') || 1);
+      const slice = state.artifacts.slice((n - 1) * 2, n * 2);
+      const headers = {};
+      if (n * 2 < state.artifacts.length) {
+        const next = new URL(url);
+        next.searchParams.set('page', String(n + 1));
+        headers.link = `<${next}>; rel="next"`;
+      }
+      return send(200, { total_count: state.artifacts.length, artifacts: slice }, headers);
+    }
+    m = match(new RegExp(`^/repos/${OWNER_REPO}/actions/artifacts/(\\d+)$`));
+    if (m && req.method === 'DELETE') {
+      const id = Number(m[1]);
+      const before = state.artifacts.length;
+      state.artifacts = state.artifacts.filter((a) => a.id !== id);
+      return state.artifacts.length === before ? send(404, { message: 'Not Found' }) : send(204);
     }
     return send(404, { message: `unhandled ${req.method} ${url.pathname}` });
   });
@@ -313,6 +372,24 @@ test('rolling tag and name are derived from the branch and cannot collide with a
   assert.throws(() => rollingTag(''), /--branch is required/);
 });
 
+// The rolling release is a window on a branch, not a version. Its title used to be
+// `Brapmony <VERSION>`, which read as a release named `Brapmony 1.9.6` for every commit
+// of every branch, because VERSION was one number nothing bumped. A version belongs to a
+// build (in the body, beside its commit) or to a tag release (in its title); not to a
+// release that holds a different build every day.
+test('a rolling release is named for its branch, never for a version', () => {
+  assert.equal(releaseTitle('master'), 'Brapmony (rolling) master');
+  assert.equal(releaseTitle('main'), 'Brapmony (rolling) main');
+  assert.equal(releaseTitle('feature/x'), 'Brapmony (rolling) feature/x');
+  // Whatever version it is given, none of it reaches the title.
+  for (const version of ['1.9.6', '0.1.0', '2.0.0']) {
+    assert.equal(releaseTitle('main', version), 'Brapmony (rolling) main');
+  }
+  // A branch name that is also a version cannot make a title that reads as a version.
+  assert.equal(releaseTitle('v1.9.6'), 'Brapmony (rolling) v1.9.6');
+  assert.ok(!/^Brapmony \d/.test(releaseTitle('v1.9.6')), 'the app name alone is not the title');
+});
+
 test('a publish creates one release and uploads the build plus the stable names', async () => {
   const ws = workspace();
   try {
@@ -325,7 +402,12 @@ test('a publish creates one release and uploads the build plus the stable names'
     // prerelease is skipped by /releases/latest and by the repository's Releases box.
     assert.equal(release.prerelease, false);
     assert.equal(release.draft, false);
-    assert.equal(release.name, 'Brapmony 1.9.6', 'the release is named after the app and version');
+    // Named for the branch, not a version: this release is a window on a stream of
+    // builds, and a version in its title would be one stale number for all of them --
+    // which is exactly what `Brapmony 1.9.6` was, for every commit, when the version line
+    // never moved. The version of the build that is on it is in the body.
+    assert.equal(release.name, 'Brapmony (rolling) master', 'the release is named for the branch');
+    assert.ok(!/\d+\.\d+\.\d+/.test(release.name), 'and its title claims no version');
     const names = release.assets.map((a) => a.name).sort();
     assert.deepEqual(names, [
       'Brapmony-1.9.6-abc1234-debug.apk',
@@ -723,9 +805,10 @@ test('the first publish after the change turns the old release into the new one'
       { gh },
     );
     const release = gh.releases[0];
-    // It becomes the repository's release, named after the app and version.
+    // It becomes the repository's release, named for the branch it is a window on. Its
+    // old title, `Brapmony 1.9.6`, was the version line the app had never bumped.
     assert.equal(release.prerelease, false);
-    assert.equal(release.name, 'Brapmony 1.9.6');
+    assert.equal(release.name, 'Brapmony (rolling) main');
     assert.equal(release.body, 'the new build');
     // The names it published are gone; the new ones are there.
     const names = release.assets.map((a) => a.name).sort();
@@ -880,7 +963,7 @@ test('a rolling release of the default branch is moved out of the prereleases', 
     assert.match(stdout, /Updated android-rolling-master: prerelease, name, body/);
     const release = gh.releases.find((r) => r.id === 60);
     assert.equal(release.prerelease, false, 'the default branch is a release, not a prerelease');
-    assert.equal(release.name, 'Brapmony 1.9.6', 'and says what it is');
+    assert.equal(release.name, 'Brapmony (rolling) master', 'and says which branch it is');
     assert.equal(release.body, 'the build of abc1234', 'and describes the build that is now there');
     // The build it held is kept: it is a name a download link may point at.
     assert.ok(release.assets.some((a) => a.name === 'Brapmony_Android_V1.9.6_debug-master-abc1234.apk'));
@@ -1162,6 +1245,189 @@ test('a version release that carries a rolling tag is refused, not adopted', asy
     );
     // The real check: a rolling tag never reaches the version path at all.
     await assert.rejects(ensureTagRelease(gh, { tag: 'android-rolling-master' }), /--tag must be vX\.Y\.Z/);
+  } finally {
+    await gh.close();
+  }
+});
+
+// A rolling tag is created by the first publish of a branch and moved by every one after
+// it. When the branch is deleted or renamed nothing moves it again, so it stays in the
+// repository's tag list and its release stays on the Releases page pointing at a build no
+// branch will ever replace -- which is how `android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa`
+// was left behind. The cleanup sweep is the only thing that can notice: a workflow only
+// ever runs for the branch it is publishing.
+test('a rolling release whose branch is gone is stale, and a live branch\'s is not', async () => {
+  const gh = await fakeGitHub({
+    releases: [
+      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
+      { id: 71, tag_name: `${ROLLING_TAG_PREFIX}feature-old`, name: 'Brapmony (rolling) feature/old', prerelease: true, assets: [] },
+      { id: 72, tag_name: `${ROLLING_TAG_PREFIX}feature-live`, name: 'Brapmony (rolling) feature/live', prerelease: true, assets: [] },
+      // A version release is never a candidate, whatever branch list it is given.
+      versionRelease(),
+    ],
+  });
+  try {
+    gh.state.branches = ['main', 'feature/live'];
+    const stale = await staleRollingReleases(gh, { defaultBranch: 'main', branches: gh.state.branches });
+    assert.deepEqual(stale.map((r) => r.tag), [`${ROLLING_TAG_PREFIX}feature-old`]);
+    // A branch that exists is not stale, even as a prerelease.
+    assert.ok(!stale.some((r) => r.tag === `${ROLLING_TAG_PREFIX}feature-live`));
+    // The default branch is never stale: it is the repository's release.
+    assert.ok(!stale.some((r) => r.tag === `${ROLLING_TAG_PREFIX}main`));
+    // And a version release is not a rolling one, so it is not in the list at all.
+    assert.ok(!stale.some((r) => r.tag === 'v1.9.6'));
+  } finally {
+    await gh.close();
+  }
+});
+
+// Deleting a tag is refused for anything that is not a rolling tag, so the sweep cannot be
+// pointed at a version release by a wrong argument.
+test('only a rolling tag is ever deleted', async () => {
+  const gh = await fakeGitHub();
+  try {
+    await assert.rejects(
+      deleteStaleRelease(gh, { id: 41, tag: 'v1.9.6' }),
+      /not a rolling tag/,
+      'a version tag must be refused',
+    );
+    assert.equal(gh.releases.length, 0, 'and nothing was deleted');
+  } finally {
+    await gh.close();
+  }
+});
+
+test('a stale release is deleted with its tag, and nothing else is', async () => {
+  const gh = await fakeGitHub({
+    releases: [
+      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
+      { id: 71, tag_name: `${ROLLING_TAG_PREFIX}gone`, name: 'Brapmony (rolling) gone', prerelease: true, assets: [] },
+      versionRelease(),
+    ],
+  });
+  try {
+    gh.state.branches = ['main'];
+    const stale = await staleRollingReleases(gh, { defaultBranch: 'main', branches: ['main'] });
+    assert.deepEqual(stale.map((r) => r.tag), [`${ROLLING_TAG_PREFIX}gone`]);
+    for (const release of stale) await deleteStaleRelease(gh, release);
+    const tags = gh.releases.map((r) => r.tag_name);
+    assert.ok(!tags.includes(`${ROLLING_TAG_PREFIX}gone`), 'the stale release is gone');
+    assert.ok(tags.includes(`${ROLLING_TAG_PREFIX}main`), 'the live one is untouched');
+    assert.ok(tags.includes('v1.9.6'), 'the version release is untouched');
+    assert.ok(!gh.refs.has(`${ROLLING_TAG_PREFIX}gone`), 'its tag is gone too');
+    assert.ok(gh.refs.has(`${ROLLING_TAG_PREFIX}main`), 'and the live tag is still there');
+    assert.ok(gh.refs.has('v1.9.6'), 'and the version tag is still there');
+  } finally {
+    await gh.close();
+  }
+});
+
+// The cleanup command deletes nothing without --apply: it lists what it would remove, so
+// a dispatch that was meant as a dry run cannot take a release down.
+test('cleanup lists without --apply and deletes with it', async () => {
+  const gh = await fakeGitHub({
+    releases: [
+      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
+      { id: 71, tag_name: `${ROLLING_TAG_PREFIX}gone`, name: 'Brapmony (rolling) gone', prerelease: true, assets: [] },
+      versionRelease(),
+    ],
+  });
+  try {
+    gh.state.branches = ['main'];
+    gh.state.artifacts = [
+      { id: 1, name: 'old-artifact', size_in_bytes: 10 },
+      { id: 2, name: 'newer-artifact', size_in_bytes: 10 },
+      { id: 3, name: 'newest-artifact', size_in_bytes: 10 },
+    ];
+    const env = { ...process.env, GITHUB_TOKEN: 'test-token', GITHUB_REPOSITORY: OWNER_REPO, GITHUB_API_URL: gh.url };
+    const args = [join(here, 'release.mjs'), 'cleanup', '--default-branch', 'main', '--keep-artifacts', '1'];
+
+    const dry = await run(process.execPath, args, { env });
+    assert.match(dry.stdout, /Nothing deleted/);
+    assert.equal(gh.releases.length, 3, 'a dry run deletes nothing');
+    assert.equal(gh.state.artifacts.length, 3);
+
+    const applied = await run(process.execPath, [...args, '--apply'], { env });
+    assert.match(applied.stdout, /Deleted release android-rolling-gone/);
+    assert.match(applied.stdout, /Deleted tag android-rolling-gone/);
+    assert.deepEqual(gh.releases.map((r) => r.tag_name).sort(), ['android-rolling-main', 'v1.9.6']);
+    assert.deepEqual(gh.state.artifacts.map((a) => a.name), ['newest-artifact'], 'only the newest artifact is kept');
+  } finally {
+    await gh.close();
+  }
+});
+
+// The oldest artifacts are the ones removed: an artifact is the record of a run, and the
+// newest few are the ones worth reading back.
+test('artifact retention keeps the newest and deletes the oldest', async () => {
+  const gh = await fakeGitHub();
+  try {
+    gh.state.artifacts = [
+      { id: 1, name: 'oldest', size_in_bytes: 5 },
+      { id: 2, name: 'older', size_in_bytes: 5 },
+      { id: 3, name: 'newer', size_in_bytes: 5 },
+      { id: 4, name: 'newest', size_in_bytes: 5 },
+    ];
+    const old = await oldArtifacts(gh, { keep: 2 });
+    assert.deepEqual(old.map((a) => a.name), ['older', 'oldest']);
+    for (const artifact of old) await deleteArtifact(gh, artifact);
+    assert.deepEqual(gh.state.artifacts.map((a) => a.name).sort(), ['newer', 'newest']);
+    // Nothing is deleted when there are not more than `keep` of them.
+    assert.deepEqual(await oldArtifacts(gh, { keep: DEFAULT_ARTIFACT_KEEP }), []);
+    await assert.rejects(oldArtifacts(gh, { keep: -1 }), /must not be negative/);
+  } finally {
+    await gh.close();
+  }
+});
+
+// A release deleted by hand leaves its tag behind. A tag is a page on the repository as
+// much as a release is -- it names a commit and reads as a build of a branch -- so the
+// sweep has to find those too, and it can only find them from the tag list: there is no
+// release to find them from. `android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa`
+// is exactly this on the live repository.
+test('a rolling tag with no release is stale, and a live branch\'s tag is not', async () => {
+  const gh = await fakeGitHub({
+    releases: [
+      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
+    ],
+  });
+  try {
+    // A tag whose release was deleted, and one that never had a release.
+    gh.refs.set(`${ROLLING_TAG_PREFIX}deleted-by-hand`, 'a'.repeat(40));
+    gh.refs.set(`${ROLLING_TAG_PREFIX}main`, 'f'.repeat(40));
+    gh.refs.set('v1.9.6', 'b'.repeat(40));
+    gh.state.branches = ['main'];
+    const orphans = await orphanRollingTags(gh, { defaultBranch: 'main', branches: ['main'] });
+    assert.deepEqual(orphans, [`${ROLLING_TAG_PREFIX}deleted-by-hand`]);
+    // The default branch's tag has a release, so it is not an orphan.
+    assert.ok(!orphans.includes(`${ROLLING_TAG_PREFIX}main`));
+    // A version tag is never a rolling tag, whatever it is.
+    assert.ok(!orphans.includes('v1.9.6'));
+  } finally {
+    await gh.close();
+  }
+});
+
+test('the tag of a branch that exists is never an orphan, whatever its slug', async () => {
+  const gh = await fakeGitHub();
+  try {
+    // A slug is lossy, so the comparison is on slugs rather than parsed branch names.
+    assert.ok(tagNamesLiveBranch(`${ROLLING_TAG_PREFIX}feature-x`, ['feature/x']));
+    assert.ok(tagNamesLiveBranch(`${ROLLING_TAG_PREFIX}feature-x`, ['feature-x']));
+    assert.ok(!tagNamesLiveBranch(`${ROLLING_TAG_PREFIX}feature-y`, ['feature/x']));
+    // A version tag never names a rolling branch.
+    assert.ok(!tagNamesLiveBranch('v1.9.6', ['v1.9.6']));
+  } finally {
+    await gh.close();
+  }
+});
+
+// The orphan tags are deleted with the same refusal as a release's tag: only a rolling tag,
+// never a version tag.
+test('an orphan version tag is refused rather than deleted', async () => {
+  const gh = await fakeGitHub();
+  try {
+    await assert.rejects(deleteTag(gh, { tag: 'v1.9.6' }), /not a rolling tag/);
   } finally {
     await gh.close();
   }

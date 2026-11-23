@@ -20,7 +20,8 @@ const parse = (p) => YAML.parse(read(p));
 
 const ANDROID = '.github/workflows/android.yml';
 const RELEASE = '.github/workflows/release.yml';
-const WORKFLOWS = [ANDROID, RELEASE];
+const CLEANUP = '.github/workflows/cleanup.yml';
+const WORKFLOWS = [ANDROID, RELEASE, CLEANUP];
 
 // Every `uses:` in a document, with the file and job it is in.
 function uses(doc, file) {
@@ -86,6 +87,22 @@ test('no workflow runs untrusted code with a write token', () => {
     'id-token': 'write',
     attestations: 'write',
   });
+  // The cleanup workflow deletes releases, tags and artifacts, so it writes too -- and it
+  // is the one workflow a push can never run: deleting a release is not something a build
+  // should do by accident. It runs by hand only, lists before it deletes, and takes no
+  // code from anywhere but this repository.
+  const cleanup = parse(CLEANUP);
+  assert.deepEqual(Object.keys(cleanup.on), ['workflow_dispatch'], 'cleanup runs only when dispatched');
+  assert.deepEqual(cleanup.permissions, { contents: 'read' });
+  assert.deepEqual(cleanup.jobs.cleanup.permissions, { contents: 'write', actions: 'write' });
+  const cleanupRun = cleanup.jobs.cleanup.steps.find((s) => s.run && s.run.includes('release.mjs'));
+  assert.match(cleanupRun.run, /--apply/, 'it can delete');
+  assert.match(String(cleanupRun.env.APPLY), /inputs\.apply/, 'but only when the dispatch asks for it');
+  assert.match(cleanupRun.run, /if \[ "\$APPLY" = 'true' \]/, 'and the default is a dry run');
+  // Every job of it is a dispatch, so no push, pull request or schedule can reach it.
+  for (const [job, spec] of Object.entries(cleanup.jobs)) {
+    assert.equal(spec.if, undefined, `${job} runs only on the event that triggers it`);
+  }
 });
 
 test('every push to a branch builds the client', () => {
@@ -188,14 +205,54 @@ test('the default branch is a release, and another branch is a prerelease', () =
   assert.match(publish.run, /--version "\$VERSION"/, 'and names the release after the version');
 });
 
-test('the build the app reads its version from is the repository VERSION file', () => {
+test('the app\'s version is the VERSION line plus the commit, never a hand-bumped number', () => {
   const gradle = read('app/build.gradle.kts');
   assert.match(gradle, /rootProject\.file\("VERSION"\)/, 'the app reads the root VERSION');
-  assert.match(gradle, /1_000_000/, 'versionCode uses the x*1e6 + y*1e3 + z scheme');
+  // The build is identified by its commit, not by the release line: `1.9.6` was one value
+  // in VERSION from the first commit on, so every build of every commit reported it, and
+  // `versionCode` was a constant 1009006 that only ever went up when somebody remembered
+  // to edit the file. The name carries the commit and the code comes from git.
+  assert.match(gradle, /"rev-parse", "HEAD"/, 'the build reads the commit it is of');
+  assert.match(gradle, /"rev-list", "--count", "HEAD"/, 'and its versionCode is the commit count');
+  assert.match(gradle, /BUILD_NUMBER_BASE/, 'the build number starts above the old scheme, so the change is not a downgrade');
+  assert.match(gradle, /harmonyVersionCode/, 'and can be overridden for the upgrade test');
+  assert.match(gradle, /harmonyReleaseBuild/, 'a tag build reports the release line rather than the commit');
+  // A checkout without the history cannot derive the number, so every job that builds the
+  // app fetches all of it. A shallow clone reports 1 for every commit.
+  for (const file of [ANDROID, RELEASE]) {
+    const doc = parse(file);
+    const checkout = doc.jobs.build?.steps?.find((s) => String(s.uses || '').startsWith('actions/checkout'))
+      ?? doc.jobs.release.steps.find((s) => String(s.uses || '').startsWith('actions/checkout'));
+    assert.equal(checkout.with?.['fetch-depth'], 0, `${file} must fetch the whole history`);
+  }
   assert.match(gradle, /keystore\.properties/, 'production signing comes from an ignored file, never the tree');
   const ignored = read('.gitignore');
   assert.match(ignored, /keystore\.properties/);
   assert.match(ignored, /\*\.keystore/);
+});
+
+// The versionCode is derived in three places -- Gradle, the build job's version step and
+// the tag job's -- and each writes the base out rather than reading it from the others,
+// so each is an independent expectation of what the APK should report. They have to agree:
+// a workflow that expected a different number than Gradle wrote would fail every run at
+// the manifest check, and a wrong base would make the first build under this scheme a
+// downgrade of the last one under the old.
+test('the build number base is the same number everywhere it is written', () => {
+  const gradle = read('app/build.gradle.kts');
+  const declared = /val BUILD_NUMBER_BASE = ([0-9_]+)/.exec(gradle);
+  assert.ok(declared, 'app/build.gradle.kts declares BUILD_NUMBER_BASE');
+  const base = Number(declared[1].replace(/_/g, ''));
+  // Above 1_999_999, the highest code the old maj*1e6 + min*1e3 + pat scheme could give a
+  // 1.x release, so this change is not a downgrade Android refuses.
+  assert.ok(base > 1_999_999, `the base ${base} must be above the old scheme's ceiling`);
+  for (const file of [ANDROID, RELEASE]) {
+    const doc = parse(file);
+    const job = file === ANDROID ? doc.jobs.build : doc.jobs.release;
+    const step = job.steps.find((st) => st.id === 'version');
+    assert.ok(step, `${file} has a version step`);
+    assert.match(step.run, new RegExp(`\\$\\(\\(${base} \\+ commits\\)\\)`),
+      `${file}'s version step must add the same base (${base}) to the commit count`);
+  }
 });
 
 test('the test signing key is configured from a secret, and its absence is reported', () => {
@@ -463,34 +520,50 @@ test('the APK namer is called with arguments it accepts, and names the file', ()
   };
   writeFileSync(env.GITHUB_OUTPUT, '');
 
-  // The branch build: a test-signed APK, named after its version and commit.
-  const branch = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', apk], { cwd: root, env, encoding: 'utf8' });
+  // The branch build: a test-signed APK named for the version the APK reports, which is
+  // the release line and the commit. The workflow passes it as APP_VERSION_NAME rather
+  // than letting the namer derive it a second time, so the file name and the manifest are
+  // one claim; `-debug` is not appended twice when the version name already says it.
+  const versionName = '0.1.0-c214e8e';
+  const branchEnv = { ...env, APP_VERSION_NAME: versionName };
+  const branch = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', apk], { cwd: root, env: branchEnv, encoding: 'utf8' });
   assert.equal(branch.status, 0, `the branch build's namer call failed: ${branch.stderr}`);
   const named = branch.stdout.trim();
-  assert.equal(basename(named), 'Brapmony-1.9.6-c214e8e-debug.apk', 'the branch APK is named after its version and commit');
+  assert.equal(basename(named), `Brapmony-${versionName}-debug.apk`, 'the branch APK is named for the version it reports');
   assert.ok(existsSync(named), 'the APK really was renamed to that name');
   const output = readFileSync(env.GITHUB_OUTPUT, 'utf8');
   assert.match(output, /^path=/m, 'the path is written to GITHUB_OUTPUT');
-  assert.match(output, /^artifact=Brapmony-1\.9\.6-c214e8e-debug$/m, 'and the artifact name with it');
+  assert.match(output, new RegExp(`^artifact=Brapmony-${versionName}-debug$`, 'm'), 'and the artifact name with it');
   // A re-run of the same commit must not land on the first attempt's artifact name.
   writeFileSync(apk, 'a second attempt');
   const rerun = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', apk], {
-    cwd: root, env: { ...env, GITHUB_RUN_ATTEMPT: '2' }, encoding: 'utf8',
+    cwd: root, env: { ...branchEnv, GITHUB_RUN_ATTEMPT: '2' }, encoding: 'utf8',
   });
   assert.equal(rerun.status, 0, rerun.stderr);
-  assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /^artifact=Brapmony-1\.9\.6-c214e8e-debug-attempt-2$/m);
+  assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), new RegExp(`^artifact=Brapmony-${versionName}-debug-attempt-2$`, 'm'));
 
-  // The tag build: `--release`, with the profile as the signing state.
+  // The tag build: `--release`, with the profile as the signing state and the plain
+  // release line as the version. A release is one named point, not a stream of builds.
   for (const profile of ['release', 'debug']) {
     const file = join(dir, `app-release-${profile}.apk`);
     writeFileSync(file, 'a file to be renamed');
     const tagged = spawnSync('bash', ['scripts/name-artifact.sh', '--release', profile, file], {
-      cwd: root, env, encoding: 'utf8',
+      cwd: root, env: { ...env, APP_VERSION_NAME: '0.1.0' }, encoding: 'utf8',
     });
     assert.equal(tagged.status, 0, `the tag build's namer call failed for ${profile}: ${tagged.stderr}`);
-    const expected = profile === 'release' ? /Brapmony-\d+\.\d+\.\d+\.apk$/ : /Brapmony-\d+\.\d+\.\d+-debug\.apk$/;
+    const expected = profile === 'release' ? /Brapmony-0\.1\.0\.apk$/ : /Brapmony-0\.1\.0-debug\.apk$/;
     assert.match(tagged.stdout.trim(), expected, `a ${profile}-profile tag build is named for its signing`);
   }
+
+  // Without APP_VERSION_NAME the namer still derives a name from VERSION and GITHUB_SHA,
+  // which is what `upgrade-test.sh` relies on when it names its two builds.
+  const derivedFile = join(dir, 'app-derived.apk');
+  writeFileSync(derivedFile, 'a file to be renamed');
+  const derived = spawnSync('bash', ['scripts/name-artifact.sh', 'debug', derivedFile], {
+    cwd: root, env, encoding: 'utf8',
+  });
+  assert.equal(derived.status, 0, derived.stderr);
+  assert.match(basename(derived.stdout.trim()), /^Brapmony-\d+\.\d+\.\d+-c214e8e-debug\.apk$/);
 
   // And the exact string each workflow passes, taken from the workflow itself, is one the
   // namer accepts: the check above would still pass if a workflow passed `Android`.

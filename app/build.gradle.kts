@@ -6,18 +6,67 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-// The app's version is the VERSION file at the repository root, and the release workflow
-// stamps it from the tag it builds. The code is maj*1e6 + min*1e3 + pat, so an APK built
-// from a later release always carries a higher versionCode and Android installs it over
-// the previous one instead of refusing it as a downgrade.
-val appVersionName: String = rootProject.file("VERSION").readText().trim()
-val appVersionCode: Int = run {
-    val parts = appVersionName.split('.')
+// The app's version, in two parts that answer two different questions.
+//
+// VERSION is the release line: a number a person reads, changed on purpose when the app
+// reaches a milestone, and the name of a release when the commit carrying it is tagged
+// vX.Y.Z. It is not bumped per commit, and it does not identify a build.
+//
+// A build is identified by its commit. A branch build's version name is
+// `<VERSION>-<sha7>[-debug]` and its versionCode is a build number derived from the number
+// of commits reachable from it, so two commits never report the same build, a later commit
+// always reports a higher code than an earlier one, and nobody maintains a counter.
+//
+// A tag build is the release named by VERSION: it reports the plain version (`0.1.0`), so
+// a release is one named point rather than one of a stream of builds.
+//
+// -PharmonyVersionCode overrides the code; upgrade-test.sh uses it to build one tree twice
+// with a higher code, which is what a later commit would produce.
+val appVersionLine: String = rootProject.file("VERSION").readText().trim()
+run {
+    val parts = appVersionLine.split('.')
     require(parts.size == 3 && parts.all { part -> part.isNotEmpty() && part.all { it.isDigit() } }) {
-        "VERSION is not x.y.z: " + appVersionName
+        "VERSION is not x.y.z: " + appVersionLine
     }
-    parts[0].toInt() * 1_000_000 + parts[1].toInt() * 1_000 + parts[2].toInt()
 }
+
+// The commit this build is of, read from git rather than from an environment variable: a
+// local build and a CI build of one commit then report the same build. `providers.exec` is
+// the configuration-cache-compatible way to run git here; Gradle records its output as a
+// build configuration input, so a build of a different commit reconfigures instead of
+// replaying the previous commit's version.
+fun gitOutput(vararg arguments: String): String? = try {
+    providers.exec {
+        commandLine(listOf("git") + arguments)
+        workingDir(rootProject.projectDir)
+    }.standardOutput.asText.get().trim().ifEmpty { null }
+} catch (_: Exception) {
+    // No git, or not a checkout: there is no commit to name.
+    null
+}
+
+val gitCommit: String = gitOutput("rev-parse", "HEAD") ?: "unknown"
+val gitCommitShort: String = gitCommit.take(7)
+// `rev-list --count HEAD` is the number of commits reachable from this one: it only grows
+// along a branch, and every build of one commit gets the same number. A CI checkout has to
+// fetch the whole history for it to mean that (`fetch-depth: 0` in android.yml).
+val gitCommitCount: Int = gitOutput("rev-list", "--count", "HEAD")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+
+// The first build under this scheme has to install over the last one built under the old
+// one, which numbered a release maj*1e6 + min*1e3 + pat: 1.9.6 was 1_009_006, and no 1.x
+// release could exceed 1_999_999. Starting the build number above that keeps the change of
+// scheme from being a downgrade Android refuses. It is chosen once and never changes
+// again, because the commit count only grows.
+val BUILD_NUMBER_BASE = 2_000_000
+
+val versionCodeOverride: Int? = providers.gradleProperty("harmonyVersionCode").orNull?.toIntOrNull()
+val appVersionCode: Int = versionCodeOverride ?: (BUILD_NUMBER_BASE + gitCommitCount)
+
+// A branch build says which commit it is; a tag build (`-PharmonyReleaseBuild`, set by
+// release.yml) says which release. The debug variant appends -debug after this, so the
+// About screen and the APK's file name both name the build that is installed.
+val isTagBuild: Boolean = providers.gradleProperty("harmonyReleaseBuild").orNull == "true"
+val appVersionName: String = if (isTagBuild) appVersionLine else "$appVersionLine-$gitCommitShort"
 
 // Production signing is configured outside Git: keystore.properties (gitignored, in this
 // directory) names the store and its passwords, and CI writes it from secrets. Without it a release build is test-signed and its published
