@@ -1,12 +1,8 @@
 # Builds
 
-How the app is built and where its APKs are published: every-push artifacts, a release of
-the default branch and a prerelease of any other, the APK on each version tag, the signed
-provenance that binds each of them to its commit, what is signed with what, and which build
-updates which.
+How the app is built, what its APKs are called, and where each one is published.
 
-There is one place an APK is published for people: **a release**. Nothing is pushed to a
-container registry; see [There is no package](#there-is-no-package).
+Every APK is published as a release asset, and nowhere else.
 
 ## Versions: a release line, and a build that is its commit
 
@@ -102,12 +98,9 @@ stable name to bookmark: it is replaced on every push to that branch, from the s
 that run's own APK.
 
 **The default branch's build is a release.** It is what the repository's Releases box and
-`/releases/latest` offer, so somebody who finds the repository finds a downloadable app
-rather than nothing. Its release is named for the branch — `Brapmony (rolling) main` — and its
-body is refreshed on every publish so the page describes the build that is actually there,
-with the version, versionCode, commit and checksum of that build. The body is updated only
-after the build has uploaded, so a failed publish cannot leave the page describing bytes it
-does not have.
+`/releases/latest` offer. Its release is named for the branch — `Brapmony for Android — newest
+build of main` — and its body carries that build's version, versionCode, commit and checksum,
+refreshed only after the upload succeeds.
 
 ### Why one release per branch, and not one per commit
 
@@ -671,8 +664,9 @@ decision and the retirement of the old names are checked by `npm test` against a
 stand-in for the releases API, and the first push after this change is reproduced exactly:
 the test seeds the stand-in with the release `main` actually had — `Brapmony_Android_latest.apk`,
 its `.sha256`, and `Brapmony_Android_V1.9.6_debug-main-606ab10.apk`, read from the GitHub API
-— publishes one build, and asserts that it becomes a release named `Brapmony (rolling) main`
-with the new names, the old stable names retired, and the old build left for pruning.
+— publishes one build, and asserts that it becomes a release named `Brapmony for Android —
+newest build of main`, with the new names, the old stable names retired, and the old build
+left for pruning.
 
 The `Publish` step is also run as the workflow runs it, with `scripts/workflow-steps.mjs`
 against `scripts/fake-github-api.mjs`, and the release it produces is read back: every asset

@@ -271,25 +271,49 @@ jobs:
           node .ci/scripts/release.mjs tag --tag "$RELEASE_TAG" \
             --name "Brapmony ${{ steps.version.outputs.version }}" \
             --body "$(printf '%s\n' \
-              "The Android client's APK for ${{ steps.version.outputs.version }}." \
+              "Brapmony ${{ steps.version.outputs.version }} for Android, a native client for" \
+              "[Harmony](https://mony.lol) instances." \
+              "" \
+              "**[Download ${{ steps.name.outputs.stem }}.apk](https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${{ steps.name.outputs.stem }}.apk)**" \
+              "" \
+              "## Install" \
+              "" \
+              "1. Open it on the phone or tablet and tap the downloaded file." \
+              "2. Allow the install when Android asks. Unless a release key is configured, the" \
+              "   APK is test-signed, so Play Protect may warn." \
+              "3. On first launch, enter your instance's address and sign in." \
+              "" \
+              "Over a cable: \`adb install -r ${{ steps.name.outputs.stem }}.apk\`. Installing" \
+              "over an older build keeps the app's data." \
+              "" \
+              "Android 8.0 (API 26) or newer. A signature mismatch means an older build signed" \
+              "with a different key: uninstall it once." \
+              "" \
+              "## This build" \
               "" \
               "| | |" \
               "| --- | --- |" \
+              "| Release | ${{ steps.version.outputs.version }} |" \
               "| Commit | [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |" \
               "| Checksum | \`$(cut -d' ' -f1 "${{ steps.name.outputs.path }}.sha256")\` |" \
               "" \
-              "Install it over an older build; Android keeps the app's data. See" \
-              "https://github.com/${{ github.repository }}/blob/main/docs/builds.md for what each" \
-              "signing configuration means, and for the branch builds." \
+              "One APK for one version, kept as it is; the branch builds are elsewhere." \
+              "[How builds are named and signed](https://github.com/${{ github.repository }}/blob/main/docs/builds.md)." \
               "" \
-              "### Verify what you downloaded" \
+              "## Check the download" \
               "" \
-              "This asset carries a signed build-provenance attestation naming the repository," \
-              "the workflow and the commit it was built from:" \
+              "With the GitHub CLI:" \
               "" \
               '```sh' \
               "gh attestation verify ${{ steps.name.outputs.stem }}.apk --repo ${{ github.repository }}" \
-              '```')"
+              '```' \
+              "" \
+              "Or \`sha256sum -c ${{ steps.name.outputs.stem }}.apk.sha256\`." \
+              "" \
+              "No end-to-end encryption, no push notifications, and several media and" \
+              "administration flows are missing: not yet a drop-in replacement for the official" \
+              "client. [The gap audit](https://github.com/${{ github.repository }}/blob/main/docs/parity-audit.md)" \
+              "lists what is not there.")"
       - name: Attach the APK and its checksum
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

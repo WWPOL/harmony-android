@@ -16,7 +16,12 @@ const files = globSync('**/*.md', { cwd: root, exclude: (p) => p.startsWith('nod
 
 // `[text](target)` and `![alt](target)`, with an optional title after the target.
 const LINK = /!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
-// A bare angle-bracket URL is a link too, but never a relative one.
+// Markdown also allows raw HTML, and a README's screenshots are laid out as `<img
+// src="...">` inside a `<p>`: those are relative files too, and a moved capture breaks them
+// exactly as it breaks a Markdown image.
+const HTML_SRC = /<(?:img|source|video|audio)\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi;
+// A bare angle-bracket URL is a link too, but never a relative one. `data:` and the other
+// schemes fall to the first alternative: a URL's scheme is what makes it not a file here.
 const EXTERNAL = /^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i;
 
 const problems = [];
@@ -24,8 +29,11 @@ let checked = 0;
 
 for (const file of files) {
   const text = readFileSync(join(root, file), 'utf8');
-  for (const match of text.matchAll(LINK)) {
-    const target = match[1];
+  const targets = [
+    ...[...text.matchAll(LINK)].map((m) => m[1]),
+    ...[...text.matchAll(HTML_SRC)].map((m) => m[1]),
+  ];
+  for (const target of targets) {
     if (EXTERNAL.test(target)) continue;
     // A link may carry a fragment; the file part is what has to exist.
     const path = decodeURIComponent(target.split('#')[0]);

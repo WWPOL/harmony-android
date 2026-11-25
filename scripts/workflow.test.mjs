@@ -35,6 +35,16 @@ function uses(doc, file) {
 // Every `run:` in a job, joined: the shell of the job is what most of these check.
 const shell = (job) => job.steps.map((s) => s.run || '').join('\n');
 
+// One section of a Markdown document: the text under its `#… Name` heading, up to the next
+// heading of the same or a higher level. Whatever level the document uses.
+function sectionOf(markdown, name) {
+  const heading = new RegExp(`\\n(#{1,6}) ${name}\\n`).exec(markdown);
+  if (!heading) return null;
+  const start = heading.index;
+  const next = new RegExp(`\\n#{1,${heading[1].length}} `).exec(markdown.slice(start + 1));
+  return markdown.slice(start, next ? start + 1 + next.index : undefined);
+}
+
 test('every action is pinned to a full commit SHA', () => {
   for (const file of WORKFLOWS) {
     for (const u of uses(parse(file), file)) {
@@ -660,18 +670,48 @@ test('nothing publishes the APK as a container package', () => {
     }
   }
   // And the documentation offers the release, not a package, as where to download: no
-  // Markdown file links a package page, and the README's Download section is the release's
+  // Markdown file links a package page, and the README's Install section is the release's
   // download URL.
   for (const doc of globSync('**/*.md', { cwd: root, exclude: (p) => p.startsWith('node_modules/') })) {
     assert.ok(!/pkgs\/container/.test(read(doc)), `${doc} links a package page`);
   }
-  const download = read('README.md').slice(read('README.md').indexOf('# Download'));
-  const section = download.slice(0, download.indexOf('\n# '));
+  const readme = read('README.md');
+  // The section that says how to install, whatever heading level it uses.
+  const section = sectionOf(readme, 'Install');
+  assert.ok(section, 'the README has an Install section');
   assert.match(section, /releases\/download\/android-rolling-main\/Brapmony-latest\.apk/,
     'the README links the APK itself, which is what a phone taps');
-  // No command a person has to run to get the file: the link is the download.
+  // No command a person has to run to get the file: the link is the download, and the
+  // numbered steps come after it.
   const beforeSteps = section.slice(0, section.indexOf('1. Open that link'));
+  assert.ok(beforeSteps.length > 0, 'the install steps follow the download link');
   assert.ok(!/oras|docker pull/.test(beforeSteps), 'and asks no tool but a browser to fetch it');
+  assert.ok(section.includes('adb install'), 'the cable route is in the same section');
+});
+
+// A client that shows no picture of itself is a claim, not a page. The README carries the
+// app's own screens, sized so a tall capture cannot fill the width, with alt text for a
+// reader who cannot see them, and near the top where somebody deciding whether to install
+// is looking.
+test('the README shows the app, near the top, in pictures that resolve', () => {
+  const readme = read('README.md');
+  const firstImage = readme.search(/<img\s[^>]*src="/);
+  assert.ok(firstImage > 0 && firstImage < 2500,
+    `the README shows the app near the top (first picture at character ${firstImage})`);
+  const images = [...readme.matchAll(/<img\s([^>]*)>/g)].map((m) => m[1]);
+  const captures = images
+    .map((attrs) => /src="(docs\/evidence\/[^"]+)"/.exec(attrs))
+    .filter(Boolean)
+    .map((m) => m[1]);
+  assert.ok(captures.length >= 3, `the README shows the app: ${captures.length} capture(s)`);
+  for (const attrs of images) {
+    const src = /src="([^"]+)"/.exec(attrs);
+    if (!src) continue;
+    assert.ok(existsSync(join(root, src[1])), `${src[1]} exists`);
+    assert.match(attrs, /alt="[^"]+"/, `${src[1]} has alt text`);
+    assert.match(attrs, /(?:width|height)="\d+"/,
+      `${src[1]} is sized, so a tall capture cannot fill the page`);
+  }
 });
 
 // The APK carries a signed build-provenance attestation, and it is read back from outside

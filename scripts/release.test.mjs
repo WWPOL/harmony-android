@@ -364,7 +364,7 @@ test('rolling tag and name are derived from the branch and cannot collide with a
   assert.equal(rollingTag('master'), `${ROLLING_TAG_PREFIX}master`);
   assert.equal(rollingTag('task/build-native-android-app-with-parity-v8hy4zr4'),
     'android-rolling-task-build-native-android-app-with-parity-v8hy4zr4');
-  assert.equal(rollingName('master'), 'Brapmony (rolling) master');
+  assert.equal(rollingName('master'), 'Brapmony for Android \u2014 newest build of master');
   for (const branch of ['v1.9.6', 'v2.0.0', 'release/1.9.6']) {
     assert.ok(!/^v\d/.test(rollingTag(branch)), `a branch named ${branch} must not make a version tag`);
   }
@@ -378,16 +378,21 @@ test('rolling tag and name are derived from the branch and cannot collide with a
 // build (in the body, beside its commit) or to a tag release (in its title); not to a
 // release that holds a different build every day.
 test('a rolling release is named for its branch, never for a version', () => {
-  assert.equal(releaseTitle('master'), 'Brapmony (rolling) master');
-  assert.equal(releaseTitle('main'), 'Brapmony (rolling) main');
-  assert.equal(releaseTitle('feature/x'), 'Brapmony (rolling) feature/x');
+  assert.equal(releaseTitle('master'), 'Brapmony for Android \u2014 newest build of master');
+  assert.equal(releaseTitle('main'), 'Brapmony for Android \u2014 newest build of main');
+  assert.equal(releaseTitle('feature/x'), 'Brapmony for Android \u2014 newest build of feature/x');
   // Whatever version it is given, none of it reaches the title.
   for (const version of ['1.9.6', '0.1.0', '2.0.0']) {
-    assert.equal(releaseTitle('main', version), 'Brapmony (rolling) main');
+    assert.equal(releaseTitle('main', version), 'Brapmony for Android \u2014 newest build of main');
   }
   // A branch name that is also a version cannot make a title that reads as a version.
-  assert.equal(releaseTitle('v1.9.6'), 'Brapmony (rolling) v1.9.6');
+  assert.equal(releaseTitle('v1.9.6'), 'Brapmony for Android \u2014 newest build of v1.9.6');
   assert.ok(!/^Brapmony \d/.test(releaseTitle('v1.9.6')), 'the app name alone is not the title');
+  // The title says what the release is to somebody who has never heard of a rolling
+  // release: the app, the platform, and which branch's build this is.
+  assert.match(releaseTitle('main'), /^Brapmony for Android/);
+  assert.match(releaseTitle('main'), /main$/);
+  assert.ok(!/\(rolling\)/.test(releaseTitle('main')), 'and does not use the internal word');
 });
 
 test('a publish creates one release and uploads the build plus the stable names', async () => {
@@ -406,7 +411,8 @@ test('a publish creates one release and uploads the build plus the stable names'
     // builds, and a version in its title would be one stale number for all of them --
     // which is exactly what `Brapmony 1.9.6` was, for every commit, when the version line
     // never moved. The version of the build that is on it is in the body.
-    assert.equal(release.name, 'Brapmony (rolling) master', 'the release is named for the branch');
+    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of master',
+      'the release is named for the branch');
     assert.ok(!/\d+\.\d+\.\d+/.test(release.name), 'and its title claims no version');
     const names = release.assets.map((a) => a.name).sort();
     assert.deepEqual(names, [
@@ -808,7 +814,7 @@ test('the first publish after the change turns the old release into the new one'
     // It becomes the repository's release, named for the branch it is a window on. Its
     // old title, `Brapmony 1.9.6`, was the version line the app had never bumped.
     assert.equal(release.prerelease, false);
-    assert.equal(release.name, 'Brapmony (rolling) main');
+    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of main');
     assert.equal(release.body, 'the new build');
     // The names it published are gone; the new ones are there.
     const names = release.assets.map((a) => a.name).sort();
@@ -963,7 +969,8 @@ test('a rolling release of the default branch is moved out of the prereleases', 
     assert.match(stdout, /Updated android-rolling-master: prerelease, name, body/);
     const release = gh.releases.find((r) => r.id === 60);
     assert.equal(release.prerelease, false, 'the default branch is a release, not a prerelease');
-    assert.equal(release.name, 'Brapmony (rolling) master', 'and says which branch it is');
+    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of master',
+      'and says which branch it is');
     assert.equal(release.body, 'the build of abc1234', 'and describes the build that is now there');
     // The build it held is kept: it is a name a download link may point at.
     assert.ok(release.assets.some((a) => a.name === 'Brapmony_Android_V1.9.6_debug-master-abc1234.apk'));
@@ -981,7 +988,7 @@ test('a build of another branch is a prerelease, and publishing it moves no rele
     assert.match(stdout, /Created rolling prerelease android-rolling-feature-x/);
     const release = gh.releases.find((r) => r.tag_name === `${ROLLING_TAG_PREFIX}feature-x`);
     assert.equal(release.prerelease, true, 'a branch build is not an offer to anybody');
-    assert.equal(release.name, 'Brapmony (rolling) feature/x');
+    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of feature/x');
     // And a default-branch publish afterwards leaves it alone.
     await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
     assert.equal(gh.releases.find((r) => r.tag_name === `${ROLLING_TAG_PREFIX}feature-x`).prerelease, true);

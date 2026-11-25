@@ -1,114 +1,91 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-# Harmony Android
-Native Android client for [Harmony](https://mony.lol). 
+# Brapmony
 
-# Table of Contents
-- [Overview](#overview)
-- [Download](#download)
-- [Development](#development)
-- [License](#license)
+A native Android client for [Harmony](https://mony.lol): Kotlin and Jetpack Compose, talking
+straight to your instance. Messages, servers, social, files, notifications and voice calls, all
+drawn by the app.
 
-# Overview
-Written in Kotlin using Jetpack Compose. 
+**[Download the APK](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony-latest.apk)**
+· [Releases](https://github.com/WWPOL/harmony-android/releases)
+· [What is not finished yet](docs/parity-audit.md)
 
-- **Package:** `io.github.wwpol.brapmony`
-- **Android Target:** 8.0 (API 26); compile and target SDK 37
+<p align="center">
+  <img src="docs/evidence/redesign/nav-phone-home.png" height="380" alt="Direct messages, with Home, a server and More in a bar at the bottom">
+  <img src="docs/evidence/redesign/nav-phone-server.png" height="380" alt="A server's channels, one tap from the conversation">
+  <img src="docs/evidence/redesign/page-social-dark.png" height="380" alt="The social feed: posts with replies, boosts and likes">
+</p>
+<p align="center"><sub>Direct messages · a server's channels · the social feed</sub></p>
 
-Supports:
+## Install
 
-- Servers, channels, threads and direct messages, with paging and optimistic sends
-- Message parts: text, mentions, emoji, images, links, attachments and stickers
-- Reactions, edits, deletes, pins, polls, and a thread sheet
-- Server management: channels, roles, members, invites and bans
-- Social feeds (following, local), profiles, follow/block lists, and posting
-- The Drive file browser, with ownership and sharing
-- Notifications: a local inbox, channels per kind of activity, and notification taps that
-  open the screen they name
-- Account settings, and the account's own appearance: theme, accent, density, text size
-- Voice and video channels over LiveKit
+**[Brapmony-latest.apk](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony-latest.apk)**
 
-**Not finished.** This is not yet a parity-complete client: end-to-end encryption and key
-recovery, push notifications, and several media and administration flows are missing.
-[docs/parity-audit.md](docs/parity-audit.md) names every gap, and
-[docs/parity-matrix.md](docs/parity-matrix.md) tracks each screen against the reference web
-client. Do not treat a green build as a claim of parity.
+1. Open it on the phone or tablet and tap the downloaded file.
+2. Allow the install when Android asks. The APK is test-signed, so Play Protect may warn.
+3. On first launch, enter your instance's address and sign in.
 
-# Download
-
-Every push to `main` publishes an installable APK as **the repository's release**. That is
-the only place it is published, and the only route you need:
-
-**[Download the latest APK](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony-latest.apk)**
-· **[the release](https://github.com/WWPOL/harmony-android/releases/latest)**
-
-1. Open that link on the Android device and tap the downloaded file, or run
-   `adb install -r Brapmony-latest.apk`.
-2. Allow installing from the browser or file manager when Android asks. The APK is
-   **test-signed**, not store-signed, so it installs over a build that was signed with the same
-   test key and not over one that was not; if Android refuses with a signature mismatch, uninstall
-   the older copy once and install again.
-3. The build needs Android 8.0 (API 26) or newer.
-
-**The build's version is its commit.** The app is at version `0.1.0`, the release line: a
-number that changes when the app reaches a milestone, not once per push. Which *build* you
-have is the commit it was built from, so the About row on the account screen reads
-`0.1.0-<commit>-debug` — the release line, the commit, and `-debug` for the test key. Nothing
-bumps a number per commit, and two builds never report the same version.
-
-The file names say what the file is:
-
-| Name | What it is |
-| --- | --- |
-| `Brapmony-latest.apk` | The newest build of `main`. The stable name to bookmark. |
-| `Brapmony-0.1.0-606ab10-debug.apk` | One build: the release line, the commit it was built from, and `-debug` for the test key it is signed with. |
-| `Brapmony-0.1.0.apk` | A version release, from a `v0.1.0` tag, signed with the release key. `-debug` when it is test-signed instead. |
-
-Each build is kept under its own name beside `Brapmony-latest.apk`, with a `.sha256` beside
-it, so a particular build stays downloadable after later pushes. A build of any other branch
-is a prerelease and is not offered as the repository's release.
-[docs/builds.md](docs/builds.md) describes exactly what is published where and which build
-installs over which.
-
-> The rolling release is a window on `main`, not an archive: it keeps the newest ten builds
-> of the branch and drops older ones. A version release (`vX.Y.Z`) is the archive.
-
-**One release per branch, not one per commit.** The rolling release is refreshed by every
-push, so the Releases page shows one entry for `main` — not one per commit, which would make
-it a commit log where no release means more than the next. A version release is cut by
-pushing a `vX.Y.Z` tag, and is the named point to download if you want something fixed. The
-rolling release is named for the branch (`Brapmony (rolling) main`), and the version, commit
-and checksum of the build that is on it are in its body.
-
-**What you downloaded, and which commit it came from.** Every APK published here carries a
-signed **build provenance attestation**. GitHub signs a statement that this exact file was
-produced by this repository's workflow at a particular commit, so the file can be checked
-without trusting the download page:
+Over a cable:
 
 ```sh
-gh attestation verify Brapmony-latest.apk --repo WWPOL/harmony-android
+adb install -r Brapmony-latest.apk
 ```
 
-To pin it to a workflow and a commit as well:
+Android 8.0 (API 26) or newer. A signature mismatch means an older build signed with a
+different key: uninstall it once.
 
-```sh
-gh attestation verify Brapmony-latest.apk --repo WWPOL/harmony-android \
-  --signer-workflow WWPOL/harmony-android/.github/workflows/android.yml \
-  --source-digest <the commit>
-```
+Each build also keeps its own file name, so it stays downloadable after later pushes. Names,
+keys and checksums: [docs/builds.md](docs/builds.md).
 
-GitHub also computes a digest of every release asset it stores, which is a check of the
-stored bytes that does not come from this build at all.
+## What it does
 
-There is deliberately **no container package**. The APK is a file on a release, which is what
-a phone can download and install; pushing it to a container registry made a `docker pull`-style
-package appear on the repository for something that is not an image and that no phone can
-fetch, so that is gone.
+- Direct messages, servers, channels and threads, paged.
+- Messages with mentions, custom and unicode emoji, images, links, attachments and stickers,
+  plus reactions, replies, edits, deletes and pins.
+- Server management: channels, roles, members, invites and bans.
+- A social feed — following, local and the fediverse — with profiles, follow and block lists,
+  and posting.
+- Drive: your files and the ones shared with you, with owners and quotas.
+- Notifications: a local inbox filtered by kind, and taps that open the screen they name.
+- Voice and video channels over LiveKit.
+- Your account's own look: theme, accent colour, density and text size.
 
-# Development
+## Screenshots
+
+The app's own render tests, with fixture data: JVM captures, not device photos. More in
+[docs/evidence/](docs/evidence/).
+
+<p align="center">
+  <img src="docs/evidence/redesign/page-instance-picker-dark.png" height="380" alt="The instance picker: a wordmark, an address field and Connect">
+  <img src="docs/evidence/redesign/page-alerts-dark.png" height="380" alt="The notification inbox, grouped by day, with unread rows toned">
+  <img src="docs/evidence/redesign/page-drive-dark.png" height="380" alt="The file browser: quota in the app bar, a filter row, files with size, kind and owner">
+</p>
+<p align="center"><sub>Connecting to an instance · notifications · Drive</sub></p>
+
+<p align="center">
+  <img src="docs/evidence/redesign/page-voice-lobby-dark.png" height="380" alt="A voice channel before joining: who is already in it, and one Join button">
+  <img src="docs/evidence/redesign/actions-sheet-dark.png" height="380" alt="The message actions sheet: quick reactions above reply, copy, thread, pin, edit and delete">
+  <img src="docs/evidence/redesign/page-you-light.png" height="380" alt="The account screen in the light theme: identity, then grouped settings rows">
+</p>
+<p align="center"><sub>Joining a voice channel · message actions · the account screen in the light theme</sub></p>
+
+<p align="center">
+  <img src="docs/evidence/redesign/nav-wide-home.png" width="720" alt="A tablet layout: the servers as a rail, the conversation list, and the conversation">
+</p>
+<p align="center"><sub>On a tablet: the servers as a rail beside the conversation</sub></p>
+
+## Status
+
+Work in progress: no end-to-end encryption or key recovery, no push notifications, and several
+media and administration flows are missing. Not a drop-in replacement for the official client.
+[docs/parity-audit.md](docs/parity-audit.md) has the gaps;
+[docs/parity-matrix.md](docs/parity-matrix.md) tracks each screen.
+
+Try it with a throwaway account.
+
 ## Build
 
-JDK 21 and the Android command-line tools are all that is needed beyond the wrapper:
+JDK 21 and the Android command-line tools:
 
 ```sh
 sdkmanager 'platform-tools' 'platforms;android-37.0' 'build-tools;37.0.0'
@@ -118,29 +95,27 @@ export JAVA_HOME=/path/to/jdk21
 ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
 ```
 
-The debug APK lands in `app/build/outputs/apk/debug/app-debug.apk`. AGP 9.5.1 supplies
-built-in Kotlin, so the project deliberately does **not** apply `org.jetbrains.kotlin.android`.
-The wrapper pins Gradle 9.9.1 and verifies its official SHA-256.
+The debug APK lands in `app/build/outputs/apk/debug/app-debug.apk`. AGP 9.5.1 supplies Kotlin,
+so there is no `org.jetbrains.kotlin.android` plugin; the wrapper pins Gradle 9.9.1 and its
+SHA-256.
 
-No signing keys, SDK installations, credentials or generated APKs belong in Git. Release
-builds are unsigned unless signing is configured externally; see
-[docs/builds.md](docs/builds.md).
+Package `io.github.wwpol.brapmony`, compiled and targeted at SDK 37. Signing keys, SDK paths
+and generated APKs stay out of Git: a release build uses a keystore from outside the tree, or
+the test key.
 
 ## Test
 
-Unit, model and MockWebServer tests run on the JVM and need no device:
+JVM only, no device:
 
 ```sh
 ./gradlew :app:testDebugUnitTest :app:lintDebug
 ```
 
-Some suites draw real composables through Robolectric's native graphics, so a screen's pixels
-can be captured and compared without an emulator. Anything that needs a real screen runs on an
-**emulator**, never on a person's phone: installing on a phone replaces an app somebody is
-using, and driving it takes their screen.
+Some suites draw real composables through Robolectric, so a screen's pixels are compared
+without an emulator. Anything needing a real screen runs on an emulator, never on a phone in
+use.
 
-The tooling that publishes APKs has its own tests, and the documentation's links are checked,
-which needs Node 24:
+Release tooling and the documentation's links, which need Node 24:
 
 ```sh
 npm ci
@@ -149,53 +124,45 @@ npm test
 
 ## Run it
 
-`demo.sh` builds a debug APK, installs it on an attached emulator and opens it:
+`demo.sh` builds, installs on an attached emulator and opens:
 
 ```sh
 export ANDROID_HOME=/path/to/android-sdk
 ./demo.sh
 ```
 
-It points the build at a Harmony instance on the emulator's host gateway
-(`http://10.0.2.2:54480` by default; override with `NATIVE_INSTANCE_URL` and
-`NATIVE_ANON_KEY`). Leave those unset for a build that starts on the instance picker instead.
-Use a disposable account: this preview is not parity-complete, and password reset needs an
-SMTP provider the instance may not have.
+The build points at an instance on the host gateway (`http://10.0.2.2:54480`; override with
+`NATIVE_INSTANCE_URL` and `NATIVE_ANON_KEY`). Unset, it starts on the instance picker.
 
-`doctor.sh` diagnoses a launch that aborts before any app code runs -- the platform's failure
-to mount the app's device-protected data directory -- and repairs it in place without losing
-data:
+`doctor.sh` repairs a launch that aborts before any app code runs — the platform failing to
+mount the app's device-protected data — without losing data:
 
 ```sh
 ./doctor.sh --serial emulator-5554
 ./doctor.sh --serial emulator-5554 --repair --apk app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`upgrade-test.sh` proves that two builds install one over the other with the app's data kept.
-See [docs/builds.md](docs/builds.md#signing) for what each signing configuration means.
+`upgrade-test.sh` installs two builds one over the other and checks the data survived. Signing
+configurations: [docs/builds.md](docs/builds.md#signing).
 
 ## Documentation
 
-| Topic | Document |
-| --- | --- |
-| Architecture, appearance compatibility, completion criteria | [docs/design.md](docs/design.md) |
-| How builds are published, signed and updated | [docs/builds.md](docs/builds.md) |
-| What is verified, and what is not | [docs/verification.md](docs/verification.md) |
-| Gap audit against the reference client | [docs/parity-audit.md](docs/parity-audit.md) |
-| Screen-by-screen parity matrix | [docs/parity-matrix.md](docs/parity-matrix.md) |
-| Message body decoding and drawing | [docs/message-content.md](docs/message-content.md) |
-| Captured screens and logs | [docs/evidence/](docs/evidence/) |
-| The release page as it was, the asset names the fix produces, and the 1.9.6 version history | [docs/evidence/release/](docs/evidence/release/) |
-| How the repository was restructured to hold the app alone | [docs/restructure.md](docs/restructure.md) |
+- [Design](docs/design.md)
+- [Builds](docs/builds.md)
+- [Verification](docs/verification.md)
+- [Parity audit](docs/parity-audit.md)
+- [Parity matrix](docs/parity-matrix.md)
+- [Message content](docs/message-content.md)
+- [Evidence](docs/evidence/)
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
+Bugs, features and pull requests: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports go to
+[SECURITY.md](SECURITY.md), not a public issue.
 
-# License
+## License
 
-Copyright (C) 2026-present the WWPOL contributors. This program is free software under the
-[GNU General Public License, version 3 or later](LICENSE); there are no additional terms.
+Copyright (C) 2024-present the WWPOL contributors. Free software under the
+[GNU General Public License, version 3 or later](LICENSE); no additional terms.
 
-The app links against AndroidX, Kotlin, OkHttp, Coil and LiveKit, all under the Apache
-License 2.0. See [COPYRIGHT](COPYRIGHT).
+AndroidX, Kotlin, OkHttp, Coil and LiveKit are Apache 2.0; see [COPYRIGHT](COPYRIGHT).

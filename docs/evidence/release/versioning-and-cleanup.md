@@ -35,8 +35,8 @@ See [docs/builds.md](../../builds.md) for the whole of it. In short:
   `versionCode='2000014' versionName='0.1.0-049bcbb-debug'` (14 commits, base 2 000 000).
 - A tag build reports the plain release line: `versionCode='2000014' versionName='0.1.0'`,
   from `-PharmonyReleaseBuild`.
-- The rolling release is `Brapmony (rolling) main`, with the build's version, versionCode,
-  commit and checksum in its body.
+- The rolling release is `Brapmony for Android — newest build of main`, with the build's
+  version, versionCode, commit and checksum in its body.
 - `node scripts/release.mjs cleanup` (and the `Clean up releases and builds` workflow, a
   manual dispatch) removes stale rolling releases, orphan rolling tags, and old artifacts.
 
@@ -87,6 +87,6 @@ stand-in for the API, including that it refuses a version tag and leaves a live 
 release alone (`scripts/release.test.mjs`).
 
 After the first push to `main` with this change, the rolling release will exist again, as
-`Brapmony (rolling) main`, holding `Brapmony-0.1.0-<sha7>-debug.apk` and
+`Brapmony for Android — newest build of main`, holding `Brapmony-0.1.0-<sha7>-debug.apk` and
 `Brapmony-latest.apk`. Its old title, `Brapmony 1.9.6`, is what the body and title are
 rewritten away from on that first publish.

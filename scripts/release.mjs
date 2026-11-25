@@ -4,7 +4,8 @@
 //   node scripts/release.mjs rolling --apk <file> --branch <ref> --commit <sha> \
 //       --default-branch <ref> [--version <x.y.z>] [--keep <n>] [--body <markdown>] \
 //       [--dry-run]
-//     Publishes a rolling build of one branch: `Brapmony (rolling) <branch>` tagged
+//     Publishes a rolling build of one branch: `Brapmony for Android — newest build of
+//     <branch>` tagged
 //     `android-rolling-<slug>`. Each run adds its APK under its own name and refreshes
 //     the stable `Brapmony-latest.apk` (and its `.sha256`) to the same bytes. The build
 //     of the repository's default branch is published as a **release**, so it is what the
@@ -129,15 +130,16 @@ export function rollingTag(branch) {
 }
 
 export function rollingName(branch) {
-  return `Brapmony (rolling) ${String(branch || '').trim()}`;
+  const name = String(branch || '').trim();
+  return `Brapmony for Android \u2014 newest build of ${name}`;
 }
 
-// The name a rolling release carries. It is named for the branch, not for a version: a
-// rolling release is a window on a branch, refreshed by every push, so a version in its
-// title would be one stale number standing for a stream of different builds -- which is
-// what `Brapmony 1.9.6` was, for every commit, because the version line never changed.
-// The version of the build that is actually on it is in its body, beside the commit.
-// A version release is the one named by a version, and its tag is `vX.Y.Z`.
+// The name a rolling release carries. It names the branch and not a version: a rolling
+// release is a window on a branch, refreshed by every push, so a version in its title would
+// be one stale number standing for a stream of different builds -- which is what
+// `Brapmony 1.9.6` was, for every commit, because the version line never changed. The
+// version of the build that is actually on it is in its body, beside the commit. A version
+// release is the one named by a version, and its tag is `vX.Y.Z`.
 export function releaseTitle(branch) {
   return rollingName(branch);
 }

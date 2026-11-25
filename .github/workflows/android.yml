@@ -386,20 +386,34 @@ jobs:
           # repository's Releases page and /releases/latest offer. Another branch's is a
           # prerelease: a branch build is not an offer to anybody.
           #
-          # --version is the release line and names the release; the build is the commit,
-          # and the body says which one, because a rolling release's title does not: it is
-          # the branch's window on `main`, not a version. A release per commit would be a
-          # Releases page that is a commit log; the version releases are the tags.
+          # --version is the release line, and the body names the build by its commit: a
+          # rolling release's title names the branch, not a version, because it carries a
+          # different build every day. The body is written for the person deciding whether
+          # to install: what the app is, how to install it, which build this is, and how to
+          # check the file. What the rolling release *is* -- one per branch, ten builds
+          # kept -- is in docs/builds.md, not repeated at a downloader.
           node scripts/release.mjs rolling --apk "$apk" \
             --branch "$BRANCH" --commit "$COMMIT" \
             --default-branch "$DEFAULT_BRANCH" --version "$VERSION" \
             --body "$(printf '%s\n' \
-              "The newest build of \`$BRANCH\` for the Android client." \
+              "Brapmony is a native Android client for [Harmony](https://mony.lol): messages," \
+              "servers, social, files, notifications and voice calls." \
               "" \
               "**[Download Brapmony-latest.apk](https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/Brapmony-latest.apk)**" \
               "" \
-              "That link always names the newest build of this branch, so it can be bookmarked." \
-              "The assets below are the same file under its own name." \
+              "## Install" \
+              "" \
+              "1. Open it on the phone or tablet and tap the downloaded file." \
+              "2. Allow the install when Android asks. The APK is test-signed, so Play Protect" \
+              "   may warn." \
+              "3. On first launch, enter your instance's address and sign in." \
+              "" \
+              "Over a cable: \`adb install -r Brapmony-latest.apk\`." \
+              "" \
+              "Android 8.0 (API 26) or newer. A signature mismatch means an older build signed" \
+              "with a different key: uninstall it once." \
+              "" \
+              "## This build" \
               "" \
               "| | |" \
               "| --- | --- |" \
@@ -408,30 +422,24 @@ jobs:
               "| Commit | [\`$COMMIT\`](https://github.com/$GITHUB_REPOSITORY/commit/$COMMIT) |" \
               "| Checksum | \`$SHA256\` |" \
               "" \
-              "\`Brapmony-latest.apk\` always names the newest build of this branch; the" \
-              "other APK is the build of the commit above and never changes. Both are **debug-signed" \
-              "with a test key**: installable, but Android will not install one over a release-signed" \
-              "build, and neither is a production release. Those are cut from version tags" \
-              "(\`vX.Y.Z\`), which is where a named release lives." \
+              "The other APK is this build under its commit's name, and never changes. This" \
+              "release is a window on \`$BRANCH\`, keeping the ten newest builds; a named" \
+              "release is cut from a version tag (\`vX.Y.Z\`)." \
               "" \
-              "There is one rolling release per branch, not one per commit: it is this" \
-              "branch's window on its newest builds, refreshed by every push, and it keeps" \
-              "the newest ten. A release of its own for every commit would make the Releases" \
-              "page a commit log, and no release there would mean more than the next one." \
+              "## Check the download" \
               "" \
-              "### Verify what you downloaded" \
-              "" \
-              "The APK carries a signed build-provenance attestation naming the repository," \
-              "the workflow and the commit it was built from. With the GitHub CLI:" \
+              "With the GitHub CLI:" \
               "" \
               '```sh' \
               "gh attestation verify Brapmony-latest.apk --repo $GITHUB_REPOSITORY" \
               '```' \
               "" \
-              "The checksum beside the file is the build's own; GitHub also computes a digest" \
-              "of every stored asset, shown on this release's asset list and returned by the" \
-              "API, so \`sha256sum -c Brapmony-latest.apk.sha256\` and the API's \`digest\`" \
-              "should agree.")"
+              "Or \`sha256sum -c Brapmony-latest.apk.sha256\`." \
+              "" \
+              "No end-to-end encryption, no push notifications, and several media and" \
+              "administration flows are missing: not yet a drop-in replacement for the official" \
+              "client. [The gap audit](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/parity-audit.md)" \
+              "lists what is not there.")"
       # Provenance. The attestation is what binds these bytes to this commit: GitHub signs
       # a statement that this digest was produced by this workflow, in this repository, at
       # this commit, and keeps it where a downloader can check it. The subject is the APK
@@ -528,22 +536,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ github.ref_name }}
-          VERSION: ${{ needs.build.outputs.version }}
           VERSION_NAME: ${{ needs.build.outputs.version-name }}
           VERSION_CODE: ${{ needs.build.outputs.version-code }}
           COMMIT: ${{ github.sha }}
         run: |
           tag=$(node -e "import('./scripts/release.mjs').then(m => console.log(m.rollingTag(process.env.BRANCH)))")
           {
-            echo "### Brapmony \`$VERSION_NAME\`: build of \`$BRANCH\`"
+            echo "### Brapmony \`$VERSION_NAME\`"
             echo ""
-            echo "versionCode $VERSION_CODE, release line $VERSION, commit \`$COMMIT\`."
+            echo "Newest build of \`$BRANCH\`; versionCode $VERSION_CODE, commit \`$COMMIT\`."
             echo ""
-            echo "- [Brapmony-latest.apk](https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony-latest.apk) (newest build of this branch)"
+            echo "- [Brapmony-latest.apk](https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony-latest.apk)"
             echo "- [The release](https://github.com/${{ github.repository }}/releases/tag/$tag)"
             echo "- [This run's artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-            echo "- [The commit it was built from](https://github.com/${{ github.repository }}/commit/$COMMIT)"
-            echo "- [The provenance attestation](https://github.com/${{ github.repository }}/attestations)"
+            echo "- [The commit](https://github.com/${{ github.repository }}/commit/$COMMIT)"
+            echo "- [The attestation](https://github.com/${{ github.repository }}/attestations)"
             echo ""
-            echo "Debug-signed with the test key; not a production release."
+            echo "Test-signed, not store-signed."
           } >> "$GITHUB_STEP_SUMMARY"
