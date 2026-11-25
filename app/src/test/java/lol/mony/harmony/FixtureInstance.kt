@@ -86,10 +86,20 @@ internal class FixtureInstance : AutoCloseable {
             path.contains("/drive_") || path.contains("/drive-") -> DRIVE_FILES
             path.contains("/servers") -> SERVERS
             path.contains("/channel_categories") -> CHANNEL_CATEGORIES
-            path.contains("/channels") -> CHANNELS
+            // The same is true of one channel: the room reads its own row by `id=eq.…` and takes
+            // the first, so answering with every channel titled the room "welcome" while it was
+            // reading "general" -- a fixture bug that reads like a navigation bug.
+            path.contains("/channels") -> rowsFor(path, CHANNELS)
             path.contains("/conversation_participants") -> CONVERSATION_PARTICIPANTS
             path.contains("/conversations") -> CONVERSATIONS
             path.contains("/messages") -> MESSAGES
+            // The channel's threads. Three rows, in the three states a real channel's threads
+            // are in: one still open, one the instance archived, and one whose own auto-archive
+            // clock has run out before any sweep archived it. The Threads list has to draw all
+            // three -- the sidebar nests only the first -- and a client that applies the
+            // sidebar's rule to the list claims the channel has none, which is the report this
+            // fixture is here to keep fixed.
+            path.contains("/threads") -> THREADS
             path.contains("/roles") -> ROLES
             path.contains("/members") -> MEMBERS
             path.contains("/invites") -> INVITES
@@ -130,6 +140,21 @@ internal class FixtureInstance : AutoCloseable {
             wanted.any { key -> row.contains("\"id\":\"$key\"") || row.contains("\"auth_user_id\":\"$key\"") }
         }
         return "[" + selected.joinToString(",") + "]"
+    }
+
+    /**
+     * The rows of [rows] a request actually asked for by `id`, or all of them.
+     *
+     * A read that names one row (`id=eq.…`) has to get one row back. Answering every such read
+     * with the whole table made a room that was reading "general" title itself "welcome" -- the
+     * first row -- which is a fixture bug that looks like a navigation bug.
+     */
+    private fun rowsFor(path: String, rows: String): String {
+        val eq = Regex("[?&]id=eq\\.([^&]+)").find(path)?.groupValues?.get(1) ?: return rows
+        val wanted = rows.trim().removePrefix("[").removeSuffix("]")
+            .split(Regex("(?<=\\}),\\s*(?=\\{)"))
+            .filter { row -> row.contains("\"id\":\"$eq\"") }
+        return "[" + wanted.joinToString(",") + "]"
     }
 
     private companion object {
@@ -351,15 +376,48 @@ internal class FixtureInstance : AutoCloseable {
               "participants":[{"id":"p2","name":"Grace Hopper","username":"grace","avatar_url":null}]}]
         """.trimIndent()
 
+        /**
+         * The channel's history, in the shape the app actually reads.
+         *
+         * `messages.content` is an array of parts, not a sentence: a fixture that wrote
+         * `"content":"text"` failed to decode the whole page, and the room drew its own error
+         * banner over an empty history -- a picture of the fixture, not of the app.
+         */
         val MESSAGES = """
-            [{"id":"m1","channel_id":"c2","conversation_id":null,"author_id":"p2",
-              "content":"The redesign is in. Have a look at the frame on a wide window.",
-              "created_at":"2026-11-20T09:12:00Z",
-              "author":{"id":"p2","name":"Grace Hopper","username":"grace","avatar_url":null}},
-             {"id":"m2","channel_id":"c2","conversation_id":null,"author_id":"p3",
-              "content":"The list stays put while I read now, which is the whole point.",
-              "created_at":"2026-11-20T09:14:00Z",
-              "author":{"id":"p3","name":"Alan Turing","username":"alan","avatar_url":null}}]
+            [{"id":"m1","channel_id":"c2","conversation_id":null,"thread_id":null,"user_id":"p2",
+              "content":[{"type":"text","text":"The redesign is in. Have a look at the frame on a wide window."}],
+              "created_at":"2026-11-20T09:12:00Z"},
+             {"id":"m2","channel_id":"c2","conversation_id":null,"thread_id":null,"user_id":"p3",
+              "content":[{"type":"text","text":"The list stays put while I read now, which is the whole point."}],
+              "created_at":"2026-11-20T09:14:00Z"}]
+        """.trimIndent()
+
+        /**
+         * The channel's threads, in the three states a real one's are in.
+         *
+         * The dates are relative to the run, not fixed in the past: a thread is only *open*
+         * while its own auto-archive clock has not run out, so a fixture dated last week would
+         * have every thread closed by the time it was read -- which is the bug this fixture is
+         * here to catch, not a way to catch it. `t-open` was replied to half an hour ago inside
+         * its day; `t-expired` two days ago with the same 1440-minute window this client asks
+         * for on create, so its clock ran out before any sweep archived it; `t-archived` was
+         * archived by the instance. The Threads list must draw all three, and the channel
+         * sidebar must nest only the first.
+         */
+        private fun minutesAgo(minutes: Long): String =
+            java.time.Instant.now().minusSeconds(minutes * 60).toString()
+
+        val THREADS: String
+            get() = """
+            [{"id":"t-open","channel_id":"c2","parent_message_id":"m1","name":"Release planning",
+              "message_count":4,"archived":false,"locked":false,"auto_archive_duration":1440,
+              "created_at":"${minutesAgo(2880)}","last_message_at":"${minutesAgo(30)}"},
+             {"id":"t-expired","channel_id":"c2","parent_message_id":"m2","name":"Frame sketches",
+              "message_count":2,"archived":false,"locked":false,"auto_archive_duration":1440,
+              "created_at":"${minutesAgo(4320)}","last_message_at":"${minutesAgo(2880)}"},
+             {"id":"t-archived","channel_id":"c2","parent_message_id":"m1","name":"Buried thread",
+              "message_count":9,"archived":true,"locked":false,"auto_archive_duration":1440,
+              "created_at":"${minutesAgo(10080)}","last_message_at":"${minutesAgo(4320)}"}]
         """.trimIndent()
 
         val ROLES = """

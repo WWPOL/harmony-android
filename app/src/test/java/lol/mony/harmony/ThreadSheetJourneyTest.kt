@@ -59,6 +59,24 @@ class ThreadSheetJourneyTest {
         compose.onAllNodesWithContentDescription("Message actions").fetchSemanticsNodes().isNotEmpty()
     }
 
+    /**
+     * Opens the room's Threads sheet the way a thumb does: the overflow, then the item.
+     *
+     * The action is a `DropdownMenuItem` whose *text* is "Threads"; nothing carries that as a
+     * content description, which is what the three calls here used to look for. They never ran
+     * -- this class skips itself without an instance -- so the lookup was never proved.
+     */
+    private fun openThreads() {
+        compose.onNodeWithContentDescription("More").performClick()
+        compose.onNodeWithText("Threads").performClick()
+    }
+
+    /** The pinned sheet is the same shape: the overflow's "Pinned messages" item. */
+    private fun openPinned() {
+        compose.onNodeWithContentDescription("More").performClick()
+        compose.onNodeWithText("Pinned messages").performClick()
+    }
+
     /** The seeded channel, with one fresh message that carries a thread of its own. */
     private class Fixture(val state: AppState, val channelId: String, val threadName: String)
 
@@ -89,7 +107,7 @@ class ThreadSheetJourneyTest {
         }
         waitFor(text = "Text channel")
 
-        compose.onNodeWithContentDescription("Threads").performClick()
+        openThreads()
         waitFor(tag = "thread-list", text = fixture.threadName)
         compose.capture("thread-sheet-open")
 
@@ -114,7 +132,7 @@ class ThreadSheetJourneyTest {
         }
         waitFor(text = "Text channel")
 
-        compose.onNodeWithContentDescription("Pinned messages").performClick()
+        openPinned()
         waitFor(tag = "pinned-list")
         compose.capture("pinned-sheet")
         compose.onAllNodes(androidx.compose.ui.test.isRoot())[1]
@@ -122,7 +140,7 @@ class ThreadSheetJourneyTest {
         compose.waitUntil(180_000) { compose.onAllNodesWithTag("pinned-list").fetchSemanticsNodes().isEmpty() }
         waitFor(text = "Text channel")
 
-        compose.onNodeWithContentDescription("Pinned messages").performClick()
+        openPinned()
         waitFor(tag = "pinned-list")
         compose.capture("pinned-sheet-again")
     }
@@ -158,7 +176,7 @@ class ThreadSheetJourneyTest {
         }
         waitFor(text = "Text channel")
 
-        compose.onNodeWithContentDescription("Threads").performClick()
+        openThreads()
         waitFor(tag = "thread-list")
         compose.capture("thread-sheet-dismiss-before")
 
@@ -170,7 +188,7 @@ class ThreadSheetJourneyTest {
         waitFor(text = "Text channel")
         compose.capture("thread-sheet-dismissed")
 
-        compose.onNodeWithContentDescription("Threads").performClick()
+        openThreads()
         waitFor(tag = "thread-list", text = fixture.threadName)
         compose.onNodeWithText(fixture.threadName).performClick()
         waitFor(text = "Thread in")

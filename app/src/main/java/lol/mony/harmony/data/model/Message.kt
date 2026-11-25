@@ -629,21 +629,49 @@ data class Thread(
     @SerialName("last_message_at") val lastActivityAt: String? = null,
 ) {
     /**
-     * Whether this thread still belongs in the sidebar's open list, by the reference's rule
-     * (`isThreadExpired` in `src/stores/useThreads.ts`): a thread that was archived is gone,
-     * and so is one whose own auto-archive clock ran out after its last message.
+     * Where this thread stands: open, archived by the instance, or merely past its own clock.
      *
-     * A thread with neither a last message nor a duration cannot expire, which is what keeps
-     * a just-created thread visible before its first reply arrives.
+     * The reference has exactly two rules, and they are not the same rule. Its *sidebar* keeps
+     * the open threads only (`activeChannelThreads`: not archived, and not past
+     * `isThreadExpired` in `src/stores/useThreads.ts`). Its **Threads list** keeps everything
+     * (`AllThreadsModal.vue` reads `channelThreads(id, { includeArchived: true })`, which
+     * filters nothing but the channel). A client that applies the sidebar's rule to the list
+     * claims a channel has no threads while the instance is holding them -- which is what this
+     * app did, and every thread it creates carries a 1440-minute window, so a day after the
+     * last reply the whole channel looked empty.
+     *
+     * A thread with neither a last message nor a duration cannot expire, which is what keeps a
+     * just-created thread visible before its first reply arrives.
      */
-    fun isActive(now: java.time.Instant = java.time.Instant.now()): Boolean {
-        if (archived) return false
+    fun state(now: java.time.Instant = java.time.Instant.now()): ThreadState {
+        if (archived) return ThreadState.Archived
         val last = lastActivityAt?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }
-            ?: return true
-        val minutes = autoArchiveDuration ?: return true
-        if (minutes <= 0) return true
-        return last.plusSeconds(minutes.toLong() * 60).isAfter(now)
+            ?: return ThreadState.Active
+        val minutes = autoArchiveDuration ?: return ThreadState.Active
+        if (minutes <= 0) return ThreadState.Active
+        return if (last.plusSeconds(minutes.toLong() * 60).isAfter(now)) ThreadState.Active
+        else ThreadState.Expired
     }
+
+    /** Whether this thread still belongs in the sidebar's open list, by the reference's rule. */
+    fun isActive(now: java.time.Instant = java.time.Instant.now()): Boolean = state(now) == ThreadState.Active
+}
+
+/**
+ * Why a thread is, or is not, in the channel's open list.
+ *
+ * [Archived] and [Expired] are both "not open", and both are still threads a person can read:
+ * the list says which, rather than dropping them and claiming the channel has none.
+ */
+enum class ThreadState {
+    /** Unarchived, and its auto-archive clock has not run out: it is in the sidebar too. */
+    Active,
+
+    /** The instance archived it. Closed, out of the sidebar, and still readable. */
+    Archived,
+
+    /** Unarchived, but its own clock ran out before the instance's sweep archived it. */
+    Expired,
 }
 
 /** A direct-message conversation and the people in it. */

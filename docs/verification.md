@@ -132,6 +132,13 @@ sheet, and does the same for pinned messages and message actions. It is the
 regression for `threads!!` (and its `pins!!` twin) being read inside a deferred
 `LazyColumn` after the tap had already set the state to null.
 
+`ThreadsSheetTest` is the regression for the sheet claiming a channel had no threads. It runs
+**offline**, against `FixtureInstance`, so it is checked in CI rather than skipped: the fixture
+answers the channel's `threads` read with one thread in each of the three states -- open, past
+its own auto-archive window, and archived -- and the test drives the real `RoomScreen` from the
+overflow to the sheet and requires all three on screen, the closed ones marked with the reason,
+and the "no threads" sentence gone. `docs/evidence/render/threads-sheet.png` is its capture.
+
 ### Journeys: `NativeJourneyTest`
 
 These drive the semantics tree, which is what a touch target and a TalkBack user

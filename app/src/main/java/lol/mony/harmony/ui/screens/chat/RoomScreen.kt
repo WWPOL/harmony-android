@@ -968,13 +968,42 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     if (openThreads != null) {
         val listed = openThreads
         ModalBottomSheet(onDismissRequest = { threads = null }) {
-            Text("Threads", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
-            LazyColumn(Modifier.testTag("thread-list")) {
-                val active = listed.filter { it.isActive() }
-                if (active.isEmpty()) item { Text("No open threads. Long-press a message to start one.", Modifier.padding(16.dp)) }
-                items(active, key = { it.id }) { row -> ListItem(headlineContent = { Text(row.name ?: "Thread") },
-                    supportingContent = { Text(countLabel(row.messageCount, "message")) },
-                    modifier = Modifier.combinedClickable(onClick = { thread = row; threads = null })) }
+            Column(Modifier.fillMaxWidth().testTag("thread-sheet")) {
+                Text("Threads", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
+                LazyColumn(Modifier.testTag("thread-list")) {
+                    // Every thread the instance returned, as the reference's Threads list draws
+                    // them (`AllThreadsModal.vue`: `channelThreads(id, { includeArchived: true })`
+                    // filters nothing but the channel). This used to keep the *sidebar's* rule
+                    // instead -- open threads only -- so a channel whose threads had all been
+                    // archived, or had merely gone quiet past their own auto-archive window,
+                    // claimed it had none. The instance still held them and the web listed them.
+                    if (listed.isEmpty()) item {
+                        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("threads-empty")) {
+                            Text("No threads yet", style = MaterialTheme.typography.titleMedium)
+                            Text("Start a thread from any message.", style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    items(listed, key = { it.id }) { row ->
+                        val threadState = row.state()
+                        ListItem(
+                            headlineContent = { Text(row.name ?: "Thread", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            // A thread that is not open is marked rather than hidden: it is out
+                            // of the sidebar, and it is still a conversation a person can open.
+                            supportingContent = {
+                                Text(
+                                    countLabel(row.messageCount, "message") +
+                                        (if (threadState == ThreadState.Active) "" else " · " + threadStateLabel(row, threadState)),
+                                )
+                            },
+                            trailingContent = if (threadState == ThreadState.Archived) {
+                                { Icon(Icons.Default.Archive, null, Modifier.size(18.dp)) }
+                            } else null,
+                            modifier = Modifier.testTag("thread-" + row.id)
+                                .combinedClickable(onClick = { thread = row; threads = null }),
+                        )
+                    }
+                }
             }
         }
     }
@@ -1157,6 +1186,31 @@ internal val COMPOSER_MIN_HEIGHT = 72.dp
 /** `1 message`, `2 messages`: a count and its noun, as the web client writes it. */
 internal fun countLabel(count: Int, noun: String): String =
     count.toString() + " " + noun + (if (count == 1) "" else "s")
+
+/**
+ * Why a thread is not in the channel's open list, in the words the row shows beside its count.
+ *
+ * The window is the thread's own `auto_archive_duration` in minutes -- 1440 by default, which is
+ * what this client asks for when it creates a thread -- so the sentence says the number that
+ * actually applied rather than a fixed "24 hours" that would be wrong for a thread created with
+ * another window.
+ */
+internal fun threadStateLabel(thread: Thread, state: ThreadState = thread.state()): String = when (state) {
+    ThreadState.Active -> ""
+    ThreadState.Archived -> "Archived"
+    ThreadState.Expired -> {
+        val minutes = thread.autoArchiveDuration ?: 0
+        // Whole days and whole hours read as such ("1 day", "2 hours"); anything else is the
+        // number of minutes that actually applied, never rounded to a window it was not.
+        val window = when {
+            minutes <= 0 -> "auto-archive window"
+            minutes % 1440 == 0 -> "window of " + countLabel(minutes / 1440, "day")
+            minutes % 60 == 0 -> "window of " + countLabel(minutes / 60, "hour")
+            else -> "window of " + countLabel(minutes, "minute")
+        }
+        "Idle past its " + window
+    }
+}
 
 /**
  * The connection banner: what the live connection is doing when it is not simply connected.

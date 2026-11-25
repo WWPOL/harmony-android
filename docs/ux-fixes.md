@@ -3,8 +3,10 @@
 Reports from using the built APK, and what each one turned out to be. The first four are recorded
 together because three of them share a cause worth naming: **the app drew itself as if the
 phone's window were the whole screen and as if every stored image were an absolute URL.** The
-last two were found by using that same build: a preferences file that bricked the app, and a
-notification the tray would not stop repeating.
+next two were found by using that same build: a preferences file that bricked the app, and a
+notification the tray would not stop repeating. The last two are the same kind of report from the
+same habit: a keyboard-sized deadspace under the composer, and a channel that had threads told it
+had none.
 
 ## 1. The rail sat under the status bar and the cutout
 
@@ -212,6 +214,64 @@ in this one layout and leave every future destination to remember the rule -- wh
 this bug arose. Hiding only the bar's *padding* and keeping the bar visible behind the keyboard
 would leave an untappable control on screen.
 
+## 8. A channel with threads said it had none
+
+A person opened a channel's Threads sheet and was told, in the app's own words, that there were
+none: *"No open threads. Long-press a message to start one."* The channel had threads. The
+instance still had them, and the reference web client's own Threads list drew them.
+
+**Cause.** The sheet filtered the instance's answer with `Thread.isActive()` and then reported
+emptiness:
+
+```kotlin
+val active = listed.filter { it.isActive() }
+if (active.isEmpty()) item { Text("No open threads. Long-press a message to start one.") }
+```
+
+`isActive()` is the reference's **sidebar** rule (`activeChannelThreads`: not archived, and not
+past `isThreadExpired`). The reference applies it to the channel list and nowhere else: its
+Threads list reads `channelThreads(id, { includeArchived: true })`, which filters nothing but the
+channel (`AllThreadsModal.vue`). So this client took the narrower of the two rules and used it to
+answer the broader question, and the answer it gave was wrong in two ordinary cases:
+
+- a thread the instance had archived -- by the sweep, or by a moderator -- was dropped;
+- a thread whose own auto-archive clock had run out was dropped, and this client is what sets
+  that clock: `createThread` asks for `p_auto_archive_duration = 1440`, so **every thread it
+  creates leaves the sheet 24 hours after its last reply**, whether or not the instance has swept
+  it yet.
+
+A channel whose threads were all older than that showed the empty sentence, and the person had no
+way to reach them from the app at all.
+
+**Fix.** The two rules are now named and kept apart. `Thread.state(now)` answers `Active`,
+`Archived` or `Expired`, and `isActive()` is defined as `state == Active`, so the sidebar's rule
+is unchanged and stated once. The Threads sheet lists **every** thread the instance returned, as
+the reference's list does, and marks the closed ones with the reason instead of hiding them:
+
+```
+Threads
+  Release planning     4 messages
+  Frame sketches       2 messages · Idle past its window of 1 day
+  Buried thread        9 messages · Archived                      (archive glyph)
+```
+
+The empty state is drawn only when the instance returned no threads, and it now says "No threads
+yet", because that is the claim it is entitled to make. The window named is the thread's own
+`auto_archive_duration` (1 day, 2 hours, 90 minutes), not a fixed "24 hours", since a thread
+created with another window would make that sentence false.
+
+The sidebar is deliberately untouched: `AppState.rememberThreads` still keeps only the open
+threads, which is what the reference's channel list does. A test pins the pair, so a later change
+to the sheet cannot quietly reopen the sidebar's list either.
+
+**Alternatives rejected.** Dropping the expiry rule everywhere would have put closed threads in
+the sidebar, which the reference does not do and which is the bug an earlier round fixed. Keeping
+the sheet's filter and only rewording the sentence ("No open threads" instead of "No threads")
+would have been honest but useless: the threads would still have been unreachable. Removing
+`auto_archive_duration` from `createThread` would have made this client's threads never expire,
+but the instance's own sweep and every other client still read that column, so the threads would
+still have been archived by the instance a day later and still needed to be listed.
+
 ## How this is verified, and what is not
 
 - **JVM render and interaction tests** (`ShellRailTest`, `ReactionGestureTest`,
@@ -238,6 +298,13 @@ would leave an untappable control on screen.
   rule fails seven of the fifteen.
 - **The branding test fetches over HTTP** from a local server that 404s the hyphenated bucket
   names, so a wrong bucket is a missing picture rather than a passing string comparison.
+- **The Threads sheet** is pinned offline, so the check runs in CI rather than skipping without an
+  instance: `ThreadsSheetTest` drives the real `RoomScreen` against `FixtureInstance`, whose
+  `threads` read answers with one thread in each state, and requires all three on screen with the
+  closed ones marked and the empty sentence gone. It was mutation-checked: restoring the
+  `filter { it.isActive() }` the sheet used to apply fails two of its three tests, the first with
+  "the sheet dropped the thread \"Frame sketches\"". `VoiceAndRoutingTest` pins the three states
+  and the label; `docs/evidence/render/threads-sheet.png` is the capture.
 - **Emulator evidence** is two runs, and they are worth different things.
   `docs/evidence/emulator/` is the `aosp_atd` run: the real debug APK against a stub instance,
   driven with `adb shell input`, recording the accessibility tree and the rail's measured

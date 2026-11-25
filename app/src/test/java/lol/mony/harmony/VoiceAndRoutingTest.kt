@@ -5,11 +5,13 @@ import lol.mony.harmony.data.model.NotificationChannelIds
 import lol.mony.harmony.data.model.NotificationDestination
 import lol.mony.harmony.data.model.NotificationRouter
 import lol.mony.harmony.data.model.Thread
+import lol.mony.harmony.data.model.ThreadState
 import lol.mony.harmony.data.repo.VoiceRepository
 import lol.mony.harmony.data.voice.DistanceModel
 import lol.mony.harmony.data.voice.SpatialAudio
 import lol.mony.harmony.data.voice.SpatialAudioSettings
 import lol.mony.harmony.data.voice.UserPosition
+import lol.mony.harmony.ui.screens.chat.threadStateLabel
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -165,5 +167,40 @@ class VoiceAndRoutingTest {
     @Test fun aThreadWithNoClockNeverExpires() {
         assertTrue(thread(lastAt = null, minutes = null).isActive())
         assertTrue(thread(lastAt = Instant.now().minusSeconds(999_999).toString(), minutes = null).isActive())
+    }
+
+    // ---- but "not in the sidebar" is not "not there", which the Threads list draws ---------
+
+    @Test fun aThreadSaysWhichOfTheThreeStatesItIsIn() {
+        assertEquals(ThreadState.Active,
+            thread(lastAt = Instant.now().toString(), minutes = 1440).state())
+        assertEquals(ThreadState.Archived,
+            thread(archived = true, lastAt = Instant.now().toString(), minutes = 1440).state())
+        assertEquals(ThreadState.Expired,
+            thread(lastAt = Instant.now().minusSeconds(3 * 60 * 60).toString(), minutes = 60).state())
+    }
+
+    /**
+     * The list's own question is not the sidebar's.
+     *
+     * `isActive` is the sidebar's rule and stays exactly as it was; what changed is that the
+     * Threads list no longer asks it. A closed thread is still a thread, and the row says which
+     * kind of closed it is, so a person can tell an archived thread from one whose clock ran out.
+     */
+    @Test fun aClosedThreadIsNamedRatherThanJustDropped() {
+        val archived = thread(archived = true, lastAt = Instant.now().toString(), minutes = 1440)
+        val expired = thread(lastAt = Instant.now().minusSeconds(3 * 60 * 60).toString(), minutes = 60)
+        val open = thread(lastAt = Instant.now().toString(), minutes = 1440)
+        assertEquals("Archived", threadStateLabel(archived))
+        assertEquals("Idle past its window of 1 hour", threadStateLabel(expired))
+        assertEquals("", threadStateLabel(open))
+    }
+
+    /** The window named is the thread's own, so a 1440-minute thread reads in days. */
+    @Test fun theWindowNamedIsTheThreadsOwnDuration() {
+        val day = thread(lastAt = Instant.now().minusSeconds(3 * 24 * 60 * 60).toString(), minutes = 1440)
+        val minutes = thread(lastAt = Instant.now().minusSeconds(3 * 60 * 60).toString(), minutes = 90)
+        assertEquals("Idle past its window of 1 day", threadStateLabel(day))
+        assertEquals("Idle past its window of 90 minutes", threadStateLabel(minutes))
     }
 }
