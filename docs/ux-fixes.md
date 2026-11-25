@@ -4,9 +4,10 @@ Reports from using the built APK, and what each one turned out to be. The first 
 together because three of them share a cause worth naming: **the app drew itself as if the
 phone's window were the whole screen and as if every stored image were an absolute URL.** The
 next two were found by using that same build: a preferences file that bricked the app, and a
-notification the tray would not stop repeating. The last three are the same kind of report from
+notification the tray would not stop repeating. The last four are the same kind of report from
 the same habit: a keyboard-sized deadspace under the composer, a message body that selected itself
-whenever it was pressed, and a channel that had threads told it had none.
+whenever it was pressed, a channel that had threads told it had none, and a reactor list that named
+nobody.
 
 ## 1. The rail sat under the status bar and the cutout
 
@@ -314,6 +315,54 @@ would have been honest but useless: the threads would still have been unreachabl
 `auto_archive_duration` from `createThread` would have made this client's threads never expire,
 but the instance's own sweep and every other client still read that column, so the threads would
 still have been archived by the instance a day later and still needed to be listed.
+
+## 10. Every reactor was called "Someone"
+
+The report: **tap a reaction pill and every person listed has reacted as "Someone"**, whoever
+they are. The list was drawn from a lookup nothing had filled:
+
+```kotlin
+val person = reaction.userId?.let { people[it] }
+val name = person?.shownName ?: reaction.userId?.let { "Account " + it.take(8) } ?: "Someone"
+```
+
+`people` is filled by `AppState.resolveAuthors`, which is called with **messages** -- and a person
+who only reacted never wrote one. So a reactor was resolved only if they happened to have posted
+on the page that was loaded, and everybody else fell through to the placeholder. Three shapes of
+row produced it, and the second and third produced it always:
+
+1. **A local account** whose profile had not been read: `people[userId]` was null, and the list
+   drew `Account 3f2a9c1e` -- or "Someone" where the id was missing.
+2. **A bot** (`bot_id`, no `user_id`): the list read only `user_id`, so the row had no reactor at
+   all.
+3. **A Discord person a bridge relayed** (`metadata.discord_user`, no `user_id`): likewise. The
+   bridge writes the person's name and picture into the reaction row itself, because there is no
+   local profile to look up, and nothing read that either.
+
+**Fix.** Reactor identity is now resolved and drawn in three layers, mirroring the reference
+client's `toReactionUser`:
+
+- **`ReactionActor`** (`data/model/ReactionActor.kt`) is who a reaction is from, read in the
+  reference's order: `metadata.discord_user` first, then `bot_id` when there is no `user_id`,
+  then `user_id`. The order is load-bearing: a bridged row usually carries the bridge's own
+  `bot_id` too, so reading the bot first would attribute every Discord person's reaction to the
+  bridge.
+- **`AppState.resolveReactionActors`** reads the profiles and bots a page's reactions name, in one
+  `profiles` read and one `bots` read per page rather than one per pill -- the same shape as
+  `resolveAuthors`, which now shares its body. A bridged row is skipped: its name travels with it,
+  and a lookup could only come back empty. It runs wherever the reactions are read, both when a
+  page loads and after a reaction is toggled.
+- **`ReactorList`** (`ui/components/ReactorList.kt`) draws each reactor with their picture, name,
+  `@handle`, and a `BOT`/`bridged`/`you` marker, and opens that person's profile on a tap. A row
+  whose profile could not be read says **"Unknown account"** rather than a name it does not have:
+  `reactions.user_id` cascades with its profile, so an unread row is a failed read, not a deleted
+  account, and guessing "Deleted account" would be a claim the client cannot make.
+
+**Alternatives rejected.** Keeping the list and resolving lazily per row would issue one read per
+reactor per pill, which is the N+1 the page-level read exists to avoid. Drawing the id
+(`Account 3f2a9c1e`) is what the app already did for an unresolved profile and is unreadable on a
+phone. Naming a bridged person by the bridge's bot row -- which is what reading `bot_id` first
+would do -- is worse than "Someone", because it is confidently wrong.
 
 ## How this is verified, and what is not
 

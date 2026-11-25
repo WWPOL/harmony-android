@@ -58,6 +58,12 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
 - `message-emoji-fallback.png` -- an emoji whose file cannot load draws its
   shortcode in place. An `AsyncImage` with no error branch leaves a hole, which
   is the other half of the same bug.
+- `reactors-named.png` -- the people behind one reaction pill, drawn by
+  `ReactorList`: a local account with `@ada` and a "you" marker, a second
+  account, a `BOT`-tagged bot row, and a Discord person a bridge relayed (marked
+  "bridged", named from the reaction's own metadata). Before
+  [ux-fixes.md](../../ux-fixes.md) §10 every one of these rows read "Someone",
+  because nothing had read the profiles a reaction names.
 - `message-links.png` -- a message with a `url` part the instance previewed:
   the link on the sentence's line and its card beneath. The card is Harmony's
   own embed style, not this app's invention -- an 80dp **square thumbnail on

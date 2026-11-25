@@ -20,6 +20,7 @@ import lol.mony.harmony.data.model.Thread
 import lol.mony.harmony.data.model.Channel
 import lol.mony.harmony.data.model.Profile
 import lol.mony.harmony.data.model.UnreadCountRow
+import lol.mony.harmony.data.model.discordUser
 import lol.mony.harmony.data.repo.BotRepository
 import lol.mony.harmony.data.repo.ChatRepository
 import lol.mony.harmony.data.repo.ProfileRepository
@@ -230,11 +231,52 @@ class AppState(
         token: String,
         messages: Collection<lol.mony.harmony.data.model.Message>,
     ) {
+        resolveIdentities(
+            endpoint, token,
+            userIds = messages.mapNotNull { it.userId },
+            botIds = messages.mapNotNull { it.botId },
+        )
+    }
+
+    /**
+     * Resolves the people and bots a page of reactions names, so the reactor list can name them.
+     *
+     * A reaction's `user_id` is a `profiles.id`, exactly as a message's author is, but nothing
+     * resolved it: [resolveAuthors] is called with messages, and a person who only reacted never
+     * wrote one. Every reactor therefore fell through the list's own lookup to a placeholder,
+     * which is the reported bug. A bridged Discord reaction is skipped because it has no local
+     * row -- its name and picture travel in the reaction's metadata -- and so is a reaction with
+     * neither id, which is a row this build cannot read.
+     */
+    suspend fun resolveReactionActors(
+        endpoint: lol.mony.harmony.data.api.Endpoint,
+        token: String,
+        reactions: Collection<lol.mony.harmony.data.model.Reaction>,
+    ) {
+        val local = reactions.filter { it.discordUser == null }
+        resolveIdentities(
+            endpoint, token,
+            userIds = local.mapNotNull { it.userId },
+            botIds = local.filter { it.userId == null }.mapNotNull { it.botId },
+        )
+    }
+
+    /** Reads the profiles and bots in [userIds] and [botIds] that are not already held. */
+    private suspend fun resolveIdentities(
+        endpoint: lol.mony.harmony.data.api.Endpoint,
+        token: String,
+        userIds: Collection<String>,
+        botIds: Collection<String>,
+    ) {
         val known = _people.value
-        val userIds = messages.mapNotNull { it.userId }.filter { it !in known }.distinct()
-        val botIds = messages.mapNotNull { it.botId }.filter { it !in _bots.value }.distinct()
-        if (userIds.isNotEmpty()) runCatching { rememberPeople(container.profiles.byIds(endpoint, token, userIds).values) }
-        if (botIds.isNotEmpty()) runCatching { rememberBots(botRepo.byIds(endpoint, token, botIds).values) }
+        val missingPeople = userIds.filter { it !in known }.distinct()
+        val missingBots = botIds.filter { it !in _bots.value }.distinct()
+        if (missingPeople.isNotEmpty()) {
+            runCatching { rememberPeople(container.profiles.byIds(endpoint, token, missingPeople).values) }
+        }
+        if (missingBots.isNotEmpty()) {
+            runCatching { rememberBots(botRepo.byIds(endpoint, token, missingBots).values) }
+        }
     }
 
     private val _threadsByChannel = MutableStateFlow<Map<String, List<Thread>>>(emptyMap())

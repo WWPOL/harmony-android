@@ -316,6 +316,9 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     // A reaction row carries an emoji's id and no picture; the picture is one
                     // `emojis` read for the page rather than one per pill.
                     state.resolveReactionEmojis(session.endpoint, token, it.values.flatten())
+                    // The row names its reactor by id too, so the person is one `profiles` read
+                    // for the page: without it the reactor list has no name to draw.
+                    state.resolveReactionActors(session.endpoint, token, it.values.flatten())
                 }
             if (!older && page.isNotEmpty()) {
                 val last = page.last().id
@@ -370,6 +373,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
             .onSuccess {
                 state.rooms.reactions(cacheKey, it)
                 state.resolveReactionEmojis(session.endpoint, token, it[message.id].orEmpty())
+                state.resolveReactionActors(session.endpoint, token, it[message.id].orEmpty())
             }
     }
 
@@ -1031,8 +1035,8 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
         }
     }
     // Who reacted: the pill shows a count, this names them. The identities come from the
-    // reaction rows the page already loaded, resolved through the same people map the row
-    // drew its author from, so a reactor is never a placeholder.
+    // reaction rows the page already loaded -- resolved by `AppState.resolveReactionActors` for
+    // every reactor's profile, not only for the people who wrote a message on the page.
     val openReactors = reactors
     if (openReactors != null) {
         val (reactedMessage, emoji) = openReactors
@@ -1051,17 +1055,14 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     Text(pill.count.toString(), style = MaterialTheme.typography.titleMedium)
                 }
                 Spacer(Modifier.height(8.dp))
-                if (who.isEmpty()) Text("Nobody has reacted with this yet.", style = MaterialTheme.typography.bodyMedium)
-                for (reaction in who) {
-                    val person = reaction.userId?.let { people[it] }
-                    val name = person?.shownName ?: reaction.userId?.let { "Account " + it.take(8) } ?: "Someone"
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                        Avatar(name, person?.avatarUrl, size = 32.dp, baseUrl = session.endpoint.baseUrl)
-                        Spacer(Modifier.width(10.dp))
-                        Text(name, style = MaterialTheme.typography.bodyLarge)
-                    }
-                }
+                ReactorList(
+                    reactions = who,
+                    people = people,
+                    bots = bots,
+                    myId = myId,
+                    baseUrl = session.endpoint.baseUrl,
+                    onOpenProfile = { id -> reactors = null; selectedProfile = id },
+                )
             }
         }
     }
