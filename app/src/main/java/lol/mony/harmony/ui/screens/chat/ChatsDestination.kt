@@ -42,7 +42,8 @@ import lol.mony.harmony.ui.theme.VisualThemeSettings
  *
  * - **Compact** (a phone): one pane at a time, which is the only honest thing to do with 400dp.
  *   Choosing a channel slides the room in over the list and the back gesture returns; the room's
- *   own back arrow says the same thing, so a person who does not know the gesture is not stuck.
+ *   own back arrow says the same thing, and so does a drag out of the start edge
+ *   ([SwipeToChannelList]), so a person who does not know either gesture is not stuck.
  *   Switching server is still one tap, because the bar at the bottom is the frame and it does
  *   not go away when a room opens.
  * - **Medium and expanded**: the list keeps its width and the room takes the rest, so choosing a
@@ -93,6 +94,10 @@ fun ChatsDestination(
             }
         }
     } else {
+        val closeRoom = {
+            state.openChannelId.value = null
+            state.openConversationId.value = null
+        }
         Box(Modifier.fillMaxSize()) {
             RoomList(state, appearance)
             // The room covers the list rather than replacing it, so returning is a reverse
@@ -102,11 +107,14 @@ fun ChatsDestination(
                 enter = if (motion.still) fadeIn() else slideInHorizontally { it } + fadeIn(),
                 exit = if (motion.still) fadeOut() else slideOutHorizontally { it } + fadeOut(),
             ) {
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    RoomPane(state, channelId, conversationId, appearance, onBack = {
-                        state.openChannelId.value = null
-                        state.openConversationId.value = null
-                    })
+                // A drag out of the start edge is the same move as the back arrow, made with a
+                // thumb: it slides the room off the list of the server it belongs to. Only the
+                // one-pane layout has a list hidden behind the room to reveal, which is why the
+                // gesture lives here and not around both layouts.
+                SwipeToChannelList(onClose = closeRoom) {
+                    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        RoomPane(state, channelId, conversationId, appearance, onBack = closeRoom)
+                    }
                 }
             }
         }

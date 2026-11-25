@@ -140,6 +140,26 @@ the one it slides over. The drag stays horizontal-only, so the message list's ve
 never taken from it, and the reply remains reachable from the actions sheet and from a custom
 accessibility action.
 
+**A drag the other way, from the start edge, is how the room gives the list back.** A phone
+shows one pane at a time, so the channel list of the server a room belongs to was reachable only
+by the room's back arrow or the system's back -- the gesture a person's thumb tries first had
+nowhere to go. `SwipeToChannelList` (`ui/screens/chat/SwipeToChannelList.kt`) now wraps the room
+in the one-pane layout, and it owns the half of the horizontal axis the reply does not: the reply
+travels away from the start edge, this travels towards it. Three rules keep the two from being one
+gesture. The drag has to begin in a 24dp strip at the start edge, so a row dragged the wrong way
+in the middle of a message is still just a row. Only the end-wards direction is claimed, so a
+leftward drag from that same strip is still a reply and a vertical one is still the list's
+scroll. And the pane claims the drag in the `Initial` pointer pass, because a message row's
+`detectHorizontalDragGestures` does not care which way the finger went and would otherwise take
+the gesture first. The pane follows the finger, and a release past a third of its width -- or a
+flick from 64dp at 500dp/s -- closes the room, which uncovers the list by the movement the person
+started rather than by a second, unrelated slide. A release short of that slides the pane back.
+The direction comes from `LocalLayoutDirection`, as the reply's does, so a mirrored layout starts
+at its own start edge. On a phone in gesture navigation the system's back gesture owns that strip
+first and closes the same room, so both routes end where the thumb expected; this one is what
+makes the move reachable on a three-button device, and what lets the pane move with the finger
+instead of jumping.
+
 ## The other pages
 
 The frame and Chats were the first round's work, and they left the rest of the app looking like

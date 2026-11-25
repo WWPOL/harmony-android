@@ -123,6 +123,13 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
   gesture composable directly, which is the point of the capture: the direction
   is what it records. A row dragged the other way would put the arrow on the
   leading edge, and the same test asserts where it lands.
+- `swipe-to-channel-list.png` -- a room held mid-drag the *other* way: the pane
+  has moved off the start edge and the server's channel list is uncovered
+  underneath it. `SwipeToChannelListTest` writes it and also injects the drags
+  that must not do this -- a leftward one (the reply), a vertical one (the
+  list's scroll) and one that does not start at the edge -- so the picture and
+  the assertions are the two halves of one claim about direction. It needs no
+  instance either.
 - `keyboard-composer-before-*.png`, `keyboard-composer-after-*.png` -- a room
   with the keyboard up, drawn before the frame counted the IME twice and after
   it stopped. The keyboard is a **synthetic** 300dp strip drawn at the bottom:
