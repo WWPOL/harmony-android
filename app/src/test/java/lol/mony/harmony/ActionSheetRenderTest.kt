@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -65,6 +66,9 @@ class ActionSheetRenderTest {
     private fun actions() = listOf(
         ActionItem("Reply", Icons.AutoMirrored.Filled.Reply) {},
         ActionItem("Copy text", Icons.Default.ContentCopy) {},
+        // Selection is an action now, not something the body's own long press starts: the sheet
+        // offers the whole body and a container for a part of it (docs/ux-fixes.md, report 8).
+        ActionItem("Select text", Icons.Default.TextFields) {},
         ActionItem("Start thread", Icons.Default.Forum, detail = "Replies collect away from the channel") {},
         ActionItem("Pin to this channel", Icons.Default.PushPin) {},
         ActionItem("Edit", Icons.Default.Edit) {},

@@ -81,6 +81,16 @@ Every branch carries the same test tag and the shortcode as its content
 description, so a screen reader and a test see the same node whichever way a
 particular emoji happens to draw.
 
+### The body is not a selection surface
+
+`MessageContent` draws text and does not wrap it in a `SelectionContainer`. It used to, and on a
+phone that made one long press both select a word and open the message actions, because a
+selection container claims the first long press and the row's only gesture is that same press. A
+double tap selected a word as well. Selection is now an action of the message rather than a
+property of its text: the actions sheet copies the whole body or opens it in a container of its
+own. [ux-fixes.md](ux-fixes.md#8-text-selected-itself-whenever-a-message-was-pressed) has the
+measurement and the alternatives.
+
 ## The crash: deferred content reads a snapshot
 
 `RoomScreen` guards a sheet with `if (threads != null)` and then read

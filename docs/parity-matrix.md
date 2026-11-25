@@ -50,6 +50,7 @@ not do it. Nothing is marked closed on the strength of a type definition or a te
 | Header grouping | `shouldShowHeader`: same author, within five minutes, no reply, no system event | Header on every row | Grouped by the same rule | `consecutiveMessagesFromOneAuthorGroupUnderOneHeader` |
 | Grouping key | `messageAuthorKey` separates discord, webhook, remote, bot and user | Not applicable | The same five keys | `aBotAndAPersonWithTheSameIdDoNotGroupTogether` |
 | Row actions | Hover toolbar, or long-press on a phone | A three-dot button on every row | No per-row button: long-press a row, or tap a reaction pill | `RoomScreen.MessageRow` |
+| Text selection | A body is selectable text on the web | Every body was a `SelectionContainer`, so a long press selected a word *and* opened the actions, and a double tap selected a word | A body is not a selection surface: a long press opens the actions and paints nothing. The actions sheet copies the whole body (**Copy text**) or opens it for selection (**Select text**); a post's body and a profile's bio are plain text, and a post's menu copies it | `MessageSelectionTest` (6 tests, pixel-measured, mutation-checked), `SocialPostSelectionTest`; `message-long-press-no-selection.png`, `message-select-text-sheet.png`, `social-post-long-press-no-selection.png` |
 | Timestamp | Localised time with an edited marker | Time only, no edited marker | Time only | **Partial** -- edited marker open |
 | Reply reference | Shows the replied-to author and text, above the author's name | The bare word `Reply`, drawn under the name and above the body | The bare word `Reply`, drawn above the author's name | **Partial** -- where it sits is fixed, the replied-to text is still open; `ReplyReferencePlacementTest` |
 | Reactions | Pills with count; a tooltip names who reacted; a picker adds one | Pills with count, no identities | Tapping a pill names every reactor with their own name and picture; long-pressing a pill adds or removes your reaction, and the actions sheet's quick row reacts while its "+" opens the full picker. A custom emoji draws its **picture** -- on a pill, from the `emojis` row the reaction names, and in a message body from the row a typed `:shortcode:` names -- and is never drawn as its name or its id | `RoomScreen` reactors sheet; `EmojiPicker`; `reactionPills`; `textTokens`; `ReactionEmojiTest`, `TextEmojiTest`, `EmojiPillRenderTest`, `EmojiPickerTest` |
@@ -93,7 +94,7 @@ not do it. Nothing is marked closed on the strength of a type definition or a te
 - `AppState` keeps the server tree, the DM list and the threads per channel, and drops all of them on sign-out or an account change.
 - The channel list nests each channel's open threads under it, with their reply counts.
 
-## 6. The seven reports from using the app
+## 6. The eight reports from using the app
 
 | Report | What was wrong | What it does now | Evidence |
 | --- | --- | --- | --- |
@@ -104,6 +105,7 @@ not do it. Nothing is marked closed on the strength of a type definition or a te
 | 5. Generic Android, not Harmony | 36dp avatar, 10dp gap, semi-bold name, text BOT marker | The reference's metrics and a primary-coloured BOT tag | `author-header-grouping.png` |
 | 6. Open threads missing from the sidebar | Threads were only in a sheet | Each channel nests its threads with reply counts; a new thread appears at once | `AppStateCacheTest` (3 thread tests) |
 | 7. Lists reload on every navigation | The channel tree and DM list were re-read each visit | Both are kept, cleared by a refresh, and dropped on sign-out or an account change | `AppStateCacheTest` (2 cache tests) |
+| 8. Text selected itself whenever a message was pressed | Every body was a `SelectionContainer`, so a long press both selected a word and opened the actions, and a double tap selected one | A body is not selectable: the press opens the actions and paints nothing. Copy and Select are two actions in the sheet | `MessageSelectionTest` (6 tests), `SocialPostSelectionTest` (2) |
 
 ## 8. Genuine remaining limitations
 

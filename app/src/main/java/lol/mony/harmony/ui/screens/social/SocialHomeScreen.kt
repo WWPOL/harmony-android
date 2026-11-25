@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -344,7 +343,11 @@ private fun SocialProfileContent(
                         Text(person.handle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
-                if (!person.bio.isNullOrBlank()) SelectionContainer { Text(person.bio, style = MaterialTheme.typography.bodyMedium) }
+                // Not in a selection container: a bio is read, and a long press on it used to
+                // select a word and do nothing else. Selecting a message is an action of the
+                // message now, from its actions sheet (docs/ux-fixes.md); a bio has no such
+                // sheet, and nothing on this screen wanted a selection.
+                if (!person.bio.isNullOrBlank()) Text(person.bio, style = MaterialTheme.typography.bodyMedium)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = { navigate(SocialRoute.People(targetId, true)) }) { Text("${person.followersCount} followers") }
                     TextButton(onClick = { navigate(SocialRoute.People(targetId, false)) }) { Text("${person.followingCount} following") }

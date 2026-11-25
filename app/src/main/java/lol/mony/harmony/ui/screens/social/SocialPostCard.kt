@@ -3,7 +3,6 @@ package lol.mony.harmony.ui.screens.social
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.ClickableText
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.*
@@ -80,9 +79,20 @@ internal fun SocialPostCard(
                 Text(author?.handle ?: "", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Box {
+                val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                 IconButton(onClick = { menu = true }, enabled = !busy) { Icon(Icons.Outlined.MoreHoriz, contentDescription = "Post options") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("Open post") }, onClick = { menu = false; onOpen(post.id) })
+                    // A post's body does not select (it is a tap target for its hashtags and
+                    // mentions), so copying it is a verb here rather than a long press.
+                    DropdownMenuItem(
+                        text = { Text("Copy text") },
+                        onClick = {
+                            menu = false
+                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(post.plainText))
+                        },
+                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                    )
                     if (post.authorId == profileId && !row.isBoost) {
                         DropdownMenuItem(text = { Text("Edit post") }, onClick = { menu = false; onEdit(post) }, leadingIcon = { Icon(Icons.Outlined.Edit, null) })
                         DropdownMenuItem(text = { Text("Delete post", color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; onDelete(post) }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) })
@@ -184,17 +194,15 @@ private fun SocialRichText(post: SocialPost, onProfile: (String) -> Unit, onHash
             }
         }
     }
-    if (text.isNotEmpty()) SelectionContainer {
-        ClickableText(text = text, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface), onClick = { offset ->
-            text.getStringAnnotations(offset, offset).firstOrNull()?.let {
-                when (it.tag) {
-                    "hashtag" -> onHashtag(it.item)
-                    "mention" -> if (runCatching { java.util.UUID.fromString(it.item) }.isSuccess) onProfile(it.item)
-                    "url", "link" -> if (it.item.startsWith("https://") || it.item.startsWith("http://")) uriHandler.openUri(it.item)
-                }
+    if (text.isNotEmpty()) ClickableText(text = text, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface), onClick = { offset ->
+        text.getStringAnnotations(offset, offset).firstOrNull()?.let {
+            when (it.tag) {
+                "hashtag" -> onHashtag(it.item)
+                "mention" -> if (runCatching { java.util.UUID.fromString(it.item) }.isSuccess) onProfile(it.item)
+                "url", "link" -> if (it.item.startsWith("https://") || it.item.startsWith("http://")) uriHandler.openUri(it.item)
             }
-        })
-    }
+        }
+    })
 }
 
 internal fun socialMediaUrl(baseUrl: String, value: String?): String? = value?.takeIf(String::isNotBlank)?.let {

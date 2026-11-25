@@ -4,9 +4,9 @@ Reports from using the built APK, and what each one turned out to be. The first 
 together because three of them share a cause worth naming: **the app drew itself as if the
 phone's window were the whole screen and as if every stored image were an absolute URL.** The
 next two were found by using that same build: a preferences file that bricked the app, and a
-notification the tray would not stop repeating. The last two are the same kind of report from the
-same habit: a keyboard-sized deadspace under the composer, and a channel that had threads told it
-had none.
+notification the tray would not stop repeating. The last three are the same kind of report from
+the same habit: a keyboard-sized deadspace under the composer, a message body that selected itself
+whenever it was pressed, and a channel that had threads told it had none.
 
 ## 1. The rail sat under the status bar and the cutout
 
@@ -214,7 +214,50 @@ in this one layout and leave every future destination to remember the rule -- wh
 this bug arose. Hiding only the bar's *padding* and keeping the bar visible behind the keyboard
 would leave an untappable control on screen.
 
-## 8. A channel with threads said it had none
+## 8. Text selected itself whenever a message was pressed
+
+The report was one line: **text should not be selectable so easily.** It was not a rare accident.
+`MessageContent` wrapped every message body in a `SelectionContainer`, and a selection container
+claims the first long press for itself -- which is the *same* gesture a message row uses to open
+its actions sheet. So one press did both things at once, and a double tap selected a word where a
+messaging app does nothing:
+
+- A long press on a body painted a word selection -- highlight, two handles, and on API 28+ the
+  magnifier -- *and* opened the actions sheet behind it.
+- A double tap selected the word under the finger, with no other effect.
+- The same container was around a social post's body and a profile's bio, where a long press
+  selected a word and nothing else happened at all.
+
+Measured, not guessed: `MessageSelectionTest` injects the touches and reads the pixels. On the
+tree before this change a long press changed **1594 pixels** of a one-line row, and a double tap
+changed the same 1594. That the measurement can still see a selection at all is re-proven on
+every run: one case draws the row with the container back and requires it to paint one, so the
+zero above cannot be the zero of a test that sees nothing.
+
+**Fix.** The body is drawn as text, not as a selection surface. Selection is now *asked for*:
+
+- `MessageContent` no longer wraps anything in a `SelectionContainer`; the only one left in the
+  app is inside the sheet the actions open (below).
+- The message actions sheet keeps **Copy text** (the whole body, as before) and gains **Select
+  text**, which opens a sheet with that message's body in a `SelectionContainer` and says "Hold a
+  word, then drag the handles." So partial copy is still possible -- one deliberate tap further
+  away than the row's own gesture, which is the whole point.
+- A social post's body and a profile's bio are plain text. A post's overflow menu gains **Copy
+  text**, because a post body is a tap target for its hashtags and mentions and cannot also be a
+  selection surface.
+- Inputs keep their selection: the composer and the search field are text fields, and selecting
+  inside what you are typing is what selection is for.
+
+**Alternatives rejected.** Making the row's long press win the race by consuming the event first
+would have left the double tap and the drag-to-select still selecting, and it would have depended
+on pointer-pass ordering between two composables that each think they own the press -- the kind of
+fragile ordering that broke the reaction pill's tap and long press (report 3). Turning selection
+off globally with `DisableSelection` at the app root would also take it from the text fields, which
+need it. Keeping the container and making the *actions* the second step instead (a tap on the row
+opens the sheet, a long press selects) inverts the gesture every messaging app has and the rest of
+this app already documents: long-press a row for its actions.
+
+## 9. A channel with threads said it had none
 
 A person opened a channel's Threads sheet and was told, in the app's own words, that there were
 none: *"No open threads. Long-press a message to start one."* The channel had threads. The
@@ -289,6 +332,23 @@ still have been archived by the instance a day later and still needed to be list
   `ComposerKeyboardRenderTest` draws the same cases as pictures, before and after
   (`docs/evidence/render/keyboard-composer-*.png`); the "before" half is the old arithmetic
   expressed through the frame's own parameters, so the two halves cannot drift apart.
+- **A message's words are not selectable, and the test measures the paint.** `MessageSelectionTest`
+  injects a long press, a double tap and a drag at SDK 27 -- no selection magnifier there, so a
+  selection is only paint -- and compares the row's pixels before and after. Restoring one
+  `SelectionContainer` fails two of its six cases with
+  `a long press must not paint a text selection, but 1594 pixels changed`; the same press opens
+  the actions, a leftward drag still replies and leaves no selection behind, and a link in the
+  body still opens. Two cases keep the measurement honest rather than merely green: the same row
+  wrapped in a `SelectionContainer` still paints one, and the **Select text** sheet -- the one
+  place selection is meant -- still paints one too, so a change that removed selection everywhere
+  would fail instead of passing. The pictures are in
+  [evidence/render](evidence/render/README.md): `message-long-press-no-selection.png` and
+  `message-double-tap-no-selection.png` (the row, pressed), `message-selection-before.png` (the
+  same press with the container back, which is what the report saw),
+  `message-select-text-sheet.png` (the deliberate way to select), `social-post-long-press-no-selection.png`
+  and `social-post-menu-copy-text.png` (a post's body is not selectable either, and its menu is
+  where the copy went), and `actions-sheet-dark.png`/`actions-sheet-light.png`, which now carry
+  **Select text** under **Copy text**.
 - **Notification delivery** is pinned twice. `NotificationDeliveryTest` covers the rule as a pure
   function: a fresh install delivers nothing, a days-old unread row is never delivered, a row is
   delivered once, a row read elsewhere withdraws its entry, and an unreadable timestamp is not

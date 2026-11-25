@@ -70,7 +70,9 @@ a phone sees -- that style is:
 | `.link-embed-card__placeholder` | the site's icon on a tint of the accent colour where the picture failed, not a hole |
 
 The whole card is the tap target. The message's own row keeps its long press: a tap on the text
-still does nothing, so the action sheet does not fight the link.
+still does nothing, so the action sheet does not fight the link. The text is not a selection
+surface either -- a long press on a body opens the actions and paints nothing, and selection is a
+step inside the actions sheet; see [ux-fixes.md](ux-fixes.md#8-text-selected-itself-whenever-a-message-was-pressed).
 
 A URL inside a `text` part is linked too. Messages written by an older build of this client, or
 by any other client, store one text part, and a link a person can read but cannot tap is the bug

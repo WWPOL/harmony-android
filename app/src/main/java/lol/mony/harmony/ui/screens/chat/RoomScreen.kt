@@ -12,7 +12,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
@@ -107,6 +106,10 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     // recent picks. The library is read once per room, not once per open, because a person
     // opens and closes the picker far more often than a server's emoji change.
     var pickerFor by remember(cacheKey) { mutableStateOf<Message?>(null) }
+    // The message whose body is open in the select sheet. Selection is asked for here rather
+    // than taken by a long press on the row: the row's long press opens the actions, and a body
+    // that also selected on that press did both at once (docs/ux-fixes.md).
+    var selecting by remember(cacheKey) { mutableStateOf<Message?>(null) }
     var customEmoji by remember(cacheKey) { mutableStateOf<List<CustomEmoji>>(emptyList()) }
     var recentEmoji by remember(cacheKey) { mutableStateOf<List<String>>(emptyList()) }
     // The channel's server, which is what the custom-emoji section is headed by and what the
@@ -581,6 +584,7 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     val openSearchRows = searchRows
     val openSearchOpen = searchOpen
     val openPicker = pickerFor
+    val openSelecting = selecting
     val rows = room.rows
     val reactions = room.reactions
 
@@ -870,6 +874,13 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     add(ActionItem("Copy text", Icons.Default.ContentCopy, onClick = {
                         clipboard.setText(AnnotatedString(message.plainText)); selected = null
                     }))
+                    // Copy takes the whole body; this is how a part of it is taken. It is a
+                    // deliberate second step because the body itself must not select: a long
+                    // press on a message is the actions, and a body that selected on the same
+                    // press would do both at once (docs/ux-fixes.md).
+                    add(ActionItem("Select text", Icons.Default.TextFields, onClick = {
+                        selecting = message; selected = null
+                    }))
                     if (!direct) {
                         add(ActionItem("Start thread", Icons.Default.Forum,
                             detail = "Replies collect away from the channel",
@@ -926,6 +937,18 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                     scope.launch { runCatching { state.sessionStore.clearRecentEmoji() } }
                 },
             )
+        }
+    }
+    // The body in a selection container, opened on purpose from the actions sheet. This is the
+    // one place a message's words can be selected, so a long press on the row never has to
+    // choose between selecting and the actions: it opens the actions, and this is an action.
+    if (openSelecting != null) {
+        val message = openSelecting
+        ModalBottomSheet(onDismissRequest = { selecting = null }) {
+            SelectTextSheetContent(message = message, fontSize = sizes.messageSp,
+                baseUrl = session.endpoint.baseUrl,
+                signedUrl = { path -> media[path]?.url },
+                emojis = emojiRows, onOpenLink = openLink)
         }
     }
     if (openEdit != null) {

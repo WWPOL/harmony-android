@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Audiotrack
@@ -53,6 +52,14 @@ import lol.mony.harmony.ui.theme.LocalSizes
  * bridged emoji whose file was purged) the shortcode shows instead, so nothing disappears.
  * Mentions, channel references and hashtags read as they do on the web. Anything this build does
  * not draw yet says so on its own line; it never throws.
+ *
+ * **It is not selectable, deliberately.** A body used to be wrapped in a `SelectionContainer`,
+ * and on a phone that made the words fight the row for the same gesture: a long press both
+ * selected a word and opened the message actions, and a double tap selected a word where a
+ * messaging app has nothing. The row's long press belongs to the row ([MessageRow] opens the
+ * actions with it), so selection here is reached on purpose instead -- the actions sheet's
+ * "Select text" draws the same body in a container ([SelectTextSheetContent]), and "Copy text"
+ * copies all of it. See [lol.mony.harmony.ui.screens.chat.MessageRow] and docs/ux-fixes.md.
  */
 @Composable
 fun MessageContent(
@@ -90,11 +97,11 @@ fun MessageContent(
     val color = if (message.isSystem) muted else MaterialTheme.colorScheme.onSurface
 
     if (encryptedNotice != null) {
-        SelectionContainer { Text(encryptedNotice, style = style, color = muted, modifier = modifier) }
+        Text(encryptedNotice, style = style, color = muted, modifier = modifier)
         return
     }
     if (message.content.isEmpty()) {
-        SelectionContainer { Text("This message has no content.", style = style, color = muted, modifier = modifier) }
+        Text("This message has no content.", style = style, color = muted, modifier = modifier)
         return
     }
 
@@ -305,36 +312,32 @@ private fun TextWithEmoji(
         // A single link in the prose is tagged by its address, so a test can name the node it is
         // in without knowing where in the sentence the sender put it.
         val onlyLink = remember(text) { linkSpans(text).singleOrNull()?.url }
-        SelectionContainer {
-            LinkedText(text, style, color, modifier, onLink = onOpenLink,
-                linkTag = onlyLink?.let { "text-link-" + it })
-        }
+        LinkedText(text, style, color, modifier, onLink = onOpenLink,
+            linkTag = onlyLink?.let { "text-link-" + it })
         return
     }
-    SelectionContainer {
-        FlowRow(modifier = modifier, itemVerticalAlignment = Alignment.CenterVertically) {
-            for (token in tokens) when (token) {
-                is TextToken.Literal -> LinkedText(token.text, style, color, onLink = onOpenLink)
-                // A URL in the prose of a message somebody else stored: the same link a `url`
-                // part draws, because a person reading a sentence does not know or care which
-                // part kind the client that wrote it chose.
-                is TextToken.Link -> LinkedText(token.url, style, color, target = token.url, onLink = onOpenLink)
-                is TextToken.Shortcode -> {
-                    val emoji = emojiNamed(emojis, token.name)
-                    if (emoji == null) {
-                        // What the reference renders when its resolver has nothing: the text as
-                        // written, so a `:name:` an instance does not have is not a hole.
-                        Text(":" + token.name + ":", style = style, color = color)
-                    } else {
-                        EmojiGlyph(
-                            emoji = emoji,
-                            label = ":" + token.name + ":",
-                            size = (messageSp + 6.0).dp,
-                            baseUrl = baseUrl,
-                            textStyle = style,
-                            modifier = Modifier.testTag("text-emoji-" + token.name),
-                        )
-                    }
+    FlowRow(modifier = modifier, itemVerticalAlignment = Alignment.CenterVertically) {
+        for (token in tokens) when (token) {
+            is TextToken.Literal -> LinkedText(token.text, style, color, onLink = onOpenLink)
+            // A URL in the prose of a message somebody else stored: the same link a `url`
+            // part draws, because a person reading a sentence does not know or care which
+            // part kind the client that wrote it chose.
+            is TextToken.Link -> LinkedText(token.url, style, color, target = token.url, onLink = onOpenLink)
+            is TextToken.Shortcode -> {
+                val emoji = emojiNamed(emojis, token.name)
+                if (emoji == null) {
+                    // What the reference renders when its resolver has nothing: the text as
+                    // written, so a `:name:` an instance does not have is not a hole.
+                    Text(":" + token.name + ":", style = style, color = color)
+                } else {
+                    EmojiGlyph(
+                        emoji = emoji,
+                        label = ":" + token.name + ":",
+                        size = (messageSp + 6.0).dp,
+                        baseUrl = baseUrl,
+                        textStyle = style,
+                        modifier = Modifier.testTag("text-emoji-" + token.name),
+                    )
                 }
             }
         }

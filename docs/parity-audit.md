@@ -539,7 +539,8 @@ actually paints by waiting for a pixel of a local PNG's colour in the
 capture. `ThreadSheetJourneyTest` is the regression for the phone crash: it
 opens Threads, taps a thread, requires the thread's own messages, then
 dismisses and reopens the sheet, and does the same for pinned messages and
-message actions. 208 tests pass.
+message actions. `./gradlew :app:testDebugUnitTest` runs 638 cases, 24 of which skip
+themselves without a local instance or an emulator.
 
 These are supporting evidence. They show what the composables draw and which
 nodes they expose, given real rows; they cannot show touch, IME, lifecycle,

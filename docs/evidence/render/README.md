@@ -81,7 +81,7 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
   `FixtureInstance`, with a channel's three threads in their three states: one open, one whose
   own auto-archive window has run out, and one the instance archived. All three are listed and
   the closed ones say why. Before
-  [the fix in ux-fixes.md](../../ux-fixes.md#7-a-channel-with-threads-said-it-had-none) the
+  [the fix in ux-fixes.md](../../ux-fixes.md#9-a-channel-with-threads-said-it-had-none) the
   sheet filtered the last two out and told the person the channel had none.
 - `emoji-picker-dark.png`, `emoji-picker-light.png` -- the emoji picker, which
   replaced a row of five hardcoded faces: the search box, the account's recents,
@@ -114,6 +114,24 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
   row says it is loading rather than showing a broken picture.
 - `pinned-sheet.png`, `actions-sheet.png` -- the pinned-messages sheet and the
   message-actions sheet, both of which read the same cleared nullable.
+  `actions-sheet-dark.png` and `actions-sheet-light.png` are the sheet redrawn with
+  **Select text** under **Copy text**: selection became an action of the message
+  rather than a property of its body (see [ux-fixes.md](../../ux-fixes.md)).
+- `message-long-press-no-selection.png`, `message-double-tap-no-selection.png` -- one
+  message row after a long press and after a double tap, at SDK 27 so no selection
+  magnifier can hide the question: the pixels are identical to the row before the
+  press. Before this change the same press painted 1594 pixels of highlight and
+  handles. `message-selection-before.png` is that "before", drawn by the same test:
+  the same row with its body back in the `SelectionContainer` the app used to wrap
+  every body in, pressed the same way -- the pair is what the report saw and what
+  it sees now.
+- `message-select-text-sheet.png` -- the **Select text** sheet, the one place a
+  body is selectable, after a long press: a word selected with its two handles. It
+  is the other half of the claim above, so a change that removed selection
+  everywhere would not pass as a fix.
+- `social-post-long-press-no-selection.png`, `social-post-menu-copy-text.png` -- a
+  post's body is not a selection surface either, and a post's overflow menu is
+  where the copy went.
 - `reply-reference-above-username.png` -- one row that answers an earlier message:
   the `Reply` reference first, then the author's name and time, then the body.
   Unlike the captures above it needs no instance -- `ReplyReferencePlacementTest`
