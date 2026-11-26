@@ -24,8 +24,13 @@ import {
   ROLLING_TAG_PREFIX,
   BOT_LOGIN,
   LEGACY_OWNER,
+  RETRY_ATTEMPTS,
+  RETRY_BACKOFF_MS,
   client,
   deleteArtifact,
+  isTransientStatus,
+  retryAfterMs,
+  retrySettings,
   deleteTag,
   deleteStaleRelease,
   ensureRollingRelease,
@@ -80,6 +85,26 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
   const state = {
     failUploads, corruptUploads, digests: true, uploader: null, ignoresLabel: false,
     branches: [], artifacts: [],
+    // Transient failures, keyed by `${METHOD} ${path}` or a RegExp over that key, with the
+    // number of attempts still to fail. `transient` answers the failure without doing the
+    // request; `lostAnswers` does the request and then answers the failure anyway, which is
+    // what a proxy or a dropped connection does to an upload that landed; `cutOff` answers
+    // the headers and then drops the connection, so the body never finishes arriving.
+    transient: new Map(),
+    lostAnswers: new Map(),
+    cutOff: new Map(),
+  };
+  // The failure a request is owed, if any, and whether it is owed before or after the
+  // request is served. A count of 1 fails one attempt and then lets the next through, which
+  // is what a retry is for.
+  const owed = (kind, key) => {
+    for (const [pattern, left] of state[kind]) {
+      const matches = typeof pattern === 'string' ? pattern === key : pattern.test(key);
+      if (!matches || left <= 0) continue;
+      state[kind].set(pattern, left - 1);
+      return true;
+    }
+    return false;
   };
   let nextId = 900;
   const server = http.createServer(async (req, res) => {
@@ -88,9 +113,29 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
+    const key = `${req.method} ${url.pathname}`;
     calls.push({ method: req.method, path: url.pathname, name: url.searchParams.get('name'), label: url.searchParams.get('label') });
-    const send = (status, data, headers = {}) => {
-      res.writeHead(status, { 'content-type': 'application/json', ...headers });
+    // A request that never reaches the handler: the server failing to answer it at all.
+    if (owed('transient', key)) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ message: 'Server Error' }));
+    }
+    // The headers arrive and the body never finishes: a connection that dropped part way
+    // through the answer. The promise `res.text()` then rejects, which is the same "no usable
+    // answer" as no connection at all.
+    if (owed('cutOff', key)) {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '4096' });
+      res.write('{"id":1,');
+      return res.destroy();
+    }
+    const send = (statusCode, data, headers = {}) => {
+      // The request was served, and the answer is lost on the way back. The next attempt
+      // finds whatever this one did, which is the case a retry has to be safe for.
+      if (owed('lostAnswers', key)) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ message: 'Server Error' }));
+      }
+      res.writeHead(statusCode, { 'content-type': 'application/json', ...headers });
       res.end(data === undefined ? '' : JSON.stringify(data));
     };
     const page = (items) => {
@@ -108,6 +153,12 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
     if (req.method === 'GET' && url.pathname === `/repos/${OWNER_REPO}/releases`) return page(releases);
     if (req.method === 'POST' && url.pathname === `/repos/${OWNER_REPO}/releases`) {
       const payload = JSON.parse(body.toString());
+      // A tag names at most one release, so a second create for a tag that has one is a 422
+      // rather than a second release, as GitHub answers it. This is the answer a retried
+      // create gets when its first attempt landed and the answer was lost.
+      if (releases.some((r) => r.tag_name === payload.tag_name)) {
+        return send(422, { message: 'Validation Failed', errors: [{ code: 'already_exists' }] });
+      }
       const id = nextId++;
       const release = {
         id,
@@ -337,6 +388,16 @@ function workspace(commit = 'abc1234', bytes = null) {
 // release or a prerelease, and `--version` names the release.
 const DEFAULT_BRANCH = 'master';
 
+// The publisher retries a request that got no usable answer, waiting longer each time, which
+// is fifteen seconds of waiting for a request that fails every attempt. What these tests
+// check is which requests are retried and what a retry does, not how long it waits, so the
+// wait is nothing here. It is set in this process as well as passed to the child, because
+// some tests call the publisher's functions directly; the one test that checks the shipped
+// waits passes an empty environment, so it sees them. Nothing in the workflow sets either
+// variable, so the run in CI waits as the constants say.
+process.env.HARMONY_RETRY_BACKOFF_MS = '0';
+const FAST_RETRIES = { HARMONY_RETRY_BACKOFF_MS: '0', HARMONY_RETRY_ATTEMPTS: String(RETRY_ATTEMPTS) };
+
 async function publish(args, { gh: existing, releases, failUploads, corruptUploads } = {}) {
   const gh = existing ?? (await fakeGitHub({ releases, failUploads, corruptUploads }));
   // A reused server may be told to fail this publish's uploads.
@@ -351,6 +412,7 @@ async function publish(args, { gh: existing, releases, failUploads, corruptUploa
   const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'rolling', ...full], {
     env: {
       ...process.env,
+      ...FAST_RETRIES,
       GITHUB_TOKEN: 'test-token',
       GITHUB_REPOSITORY: OWNER_REPO,
       GITHUB_API_URL: gh.url,
@@ -596,6 +658,286 @@ test('a failed stable upload leaves the previous stable build in place', async (
     await first.cleanup();
     await second.cleanup();
   }
+});
+
+// The failure this exists for: a run whose build succeeded and whose publish died on one
+// `500` from the upload endpoint. GitHub answers a healthy request immediately, so a 5xx is
+// one request failing rather than a verdict on the request, and a publish that gives up on
+// the first of them loses a thirty-minute build over nothing.
+test('a request that fails transiently is sent again, and the publish goes through', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    const { id } = await seedRolling(gh);
+    const name = 'Brapmony-1.9.6-abc1234-debug.apk';
+    // The first upload attempt is answered 500 before the request is served, as a request
+    // that never got a usable answer. The second is served.
+    gh.state.transient.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, 1);
+    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name });
+    assert.equal(build.uploaded, true);
+    assert.equal(build.name, name);
+    const uploads = gh.calls.filter((c) => c.method === 'POST' && c.name === name);
+    assert.equal(uploads.length, 2, 'the request was sent twice, not once');
+    const asset = gh.releases[0].assets.filter((a) => a.name === name);
+    assert.equal(asset.length, 1, 'and only one asset is on the release, not two');
+    assert.equal(asset[0].digest, `sha256:${sha(readFileSync(ws.apk))}`);
+    await gh.close();
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// The dangerous half of a retry: the request landed and the answer was lost on the way back,
+// which is what a proxy or a dropped connection does to an upload. Sending it again must not
+// leave two assets, and must not fail the publish on its own 422 -- the release already
+// holds exactly the bytes this attempt was uploading, and GitHub's own digest says so.
+test('an upload whose answer was lost is not uploaded twice', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    const { id } = await seedRolling(gh);
+    const name = 'Brapmony-1.9.6-abc1234-debug.apk';
+    // Served, then answered 500. The retry finds the name taken by its own first attempt.
+    gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, 1);
+    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name });
+    assert.equal(build.name, name);
+    const assets = gh.releases[0].assets.filter((a) => a.name === name);
+    assert.equal(assets.length, 1, 'the lost answer did not leave a second asset behind');
+    assert.equal(assets[0].digest, `sha256:${sha(readFileSync(ws.apk))}`, 'and the one asset holds the build');
+    assert.equal(build.uploaded, true, 'the build is reported as published');
+    await gh.close();
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// The same for the stable name, which is moved by upload-then-rename rather than by an
+// upload that replaces anything. A retried staging upload finds its own first attempt under
+// the staging name, and the swap goes on from there.
+test('a stable name whose upload answer was lost is still moved onto the new build', async () => {
+  const first = workspace('abc1234');
+  const second = workspace('def5678');
+  try {
+    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
+    const gh = firstRun.gh;
+    const id = gh.releases[0].id;
+    gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, 1);
+    const secondRun = await publish(['--apk', second.apk, '--branch', 'master', '--commit', 'def5678'], { gh });
+    assert.equal(gh.releases[0].assets.find((a) => a.name === LATEST_ASSET).content,
+      gh.releases[0].assets.find((a) => a.name.endsWith('-def5678-debug.apk')).content,
+      'the stable name holds the new build');
+    assert.ok(!gh.releases[0].assets.some((a) => a.name.includes('.staging-')),
+      'no staging asset was left behind');
+    assert.match(secondRun.stdout, /Updated Brapmony-latest\.apk/);
+  } finally {
+    await first.cleanup();
+    await second.cleanup();
+  }
+});
+
+// A retry is bounded: a service that is failing for every attempt must end the publish
+// rather than loop until the job times out. What is checked is that it fails with the
+// server's own answer, after the attempts it was given.
+test('a request that keeps failing ends the publish after a bounded number of attempts', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    const { id } = await seedRolling(gh);
+    const name = 'Brapmony-1.9.6-abc1234-debug.apk';
+    gh.state.transient.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, RETRY_ATTEMPTS);
+    await assert.rejects(
+      publishBuild(gh, { releaseId: id, file: ws.apk, name }),
+      /500/,
+    );
+    const uploads = gh.calls.filter((c) => c.method === 'POST' && c.name === name);
+    assert.equal(uploads.length, RETRY_ATTEMPTS, 'exactly the attempts it was given, and no more');
+    assert.ok(!gh.releases[0].assets.some((a) => a.name === name), 'nothing was published');
+    await gh.close();
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// A 4xx is an answer about the request, not a failure to answer it: sending it again would
+// get the same answer, so it is not retried. Checked on the client itself, because that is
+// where the decision is made.
+test('a 4xx is an answer, and is not sent again', async () => {
+  const gh = await fakeGitHub();
+  try {
+    const before = gh.calls.length;
+    await assert.rejects(gh.json('GET', '/releases/999999'), /404/);
+    assert.equal(gh.calls.length - before, 1, 'a 404 was answered once, not five times');
+    // And a 422, which is the answer an upload of a taken name gets.
+    const dir = mkdtempSync(join(tmpdir(), 'brapmony-422-'));
+    const file = join(dir, 'Brapmony-1.9.6-abc1234-debug.apk');
+    writeFileSync(file, Buffer.from('bytes'));
+    const { id } = await seedRolling(gh);
+    gh.state.uploader = { login: 'a-person', type: 'User' };
+    await gh.json('POST', `/releases/${id}/assets?name=Brapmony-1.9.6-abc1234-debug.apk`, {
+      body: Buffer.from('not ours'),
+      contentType: 'application/octet-stream',
+    });
+    gh.state.uploader = null;
+    const attempts = gh.calls.length;
+    await assert.rejects(
+      publishBuild(gh, { releaseId: id, file, name: 'Brapmony-1.9.6-abc1234-debug.apk' }),
+      /was not uploaded by this workflow; refusing to replace it/,
+    );
+    const uploads = gh.calls.slice(attempts).filter((c) => c.method === 'POST' && c.name);
+    assert.equal(uploads.length, 0, 'the refusal was read off the asset list, and nothing was uploaded over it');
+    rmSync(dir, { recursive: true, force: true });
+  } finally {
+    await gh.close();
+  }
+});
+
+// An answer that arrives as headers and then stops: a connection that dropped part way
+// through the body. Nothing usable was read, so it is the same failure as no connection at
+// all, and the same retry -- a body parsed from half an answer would be worse than none.
+test('an answer cut off part way through is sent again', async () => {
+  const gh = await fakeGitHub();
+  try {
+    const { id } = await seedRolling(gh);
+    gh.state.cutOff.set(`GET /repos/${OWNER_REPO}/releases/${id}`, 1);
+    const release = await gh.json('GET', `/releases/${id}`);
+    assert.equal(release.id, id, 'the retried read got the whole answer');
+    const reads = gh.calls.filter((c) => c.method === 'GET' && c.path.endsWith(`/releases/${id}`));
+    assert.equal(reads.length, 2, 'the read was sent twice, and the second answer is the one used');
+  } finally {
+    await gh.close();
+  }
+});
+
+// A connection that is refused, or a name that does not resolve: nothing was sent, so there
+// is no answer to act on and the same retry applies. A publish that is a few calls after a
+// thirty-minute build should not die because one of them met a closed port.
+test('a request that cannot connect is sent again', async () => {
+  const gh = await fakeGitHub();
+  const url = gh.url;
+  try {
+    await gh.close();
+    // Nothing is listening now. The client is given a single attempt, so what is checked is
+    // that the failure is reported as one rather than that it waits for a server to return.
+    const dead = client({ token: 't', repository: OWNER_REPO, apiUrl: url, attempts: 1, backoff: [0], log: () => {} });
+    await assert.rejects(dead.json('GET', '/releases'), /GET \/releases: /);
+    // And with more attempts it is tried the number of times it was given, then reported.
+    const tries = [];
+    const retrying = client({
+      token: 't', repository: OWNER_REPO, apiUrl: url, attempts: 3, backoff: [0],
+      sleep: async (ms) => { tries.push(ms); },
+      log: () => {},
+    });
+    await assert.rejects(retrying.json('GET', '/releases'));
+    assert.equal(tries.length, 2, 'three attempts, so two waits between them');
+  } finally {
+    await gh.close().catch(() => {});
+  }
+});
+
+// The rolling release's own create, retried after its answer was lost: the second attempt is
+// answered 422 because the tag is now taken, and the release the first attempt made is read
+// back rather than reported as a failure. What it must not do is create a second release.
+test('a release create whose answer was lost does not fail the publish, or make a second release', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/releases`, 1);
+    const { stdout } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
+    assert.equal(gh.releases.length, 1, 'one release, not two');
+    assert.equal(gh.releases[0].tag_name, `${ROLLING_TAG_PREFIX}master`);
+    assert.match(stdout, /Created rolling release/);
+    // The build still went on: the assets are on the release the first attempt made.
+    const names = gh.releases[0].assets.map((a) => a.name).sort();
+    assert.deepEqual(names, ['Brapmony-1.9.6-abc1234-debug.apk', LATEST_ASSET, LATEST_SHA256_ASSET].sort());
+    // And what the release says was brought up to date, because the read-back is the release
+    // as it really is rather than a create that was assumed to have happened.
+    assert.equal(gh.releases[0].name, 'Brapmony for Android \u2014 newest build of master');
+    assert.equal(gh.releases[0].prerelease, false);
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// The same for a version release, which release.yml creates before it attaches the APK: a
+// retried create reads the release back by tag instead of failing the tag's build.
+test('a version release whose create answer was lost is found again, not refused', async () => {
+  const gh = await fakeGitHub();
+  try {
+    gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/releases`, 1);
+    const out = join(mkdtempSync(join(tmpdir(), 'brapmony-tag-')), 'output');
+    writeFileSync(out, '');
+    const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'tag', '--tag', 'v1.9.6'], {
+      env: { ...process.env, ...FAST_RETRIES, GITHUB_TOKEN: 't', GITHUB_REPOSITORY: OWNER_REPO, GITHUB_API_URL: gh.url, GITHUB_OUTPUT: out },
+    });
+    assert.match(stdout, /Created release v1\.9\.6/);
+    assert.equal(gh.releases.length, 1, 'one release, not two');
+    assert.equal(gh.releases[0].tag_name, 'v1.9.6');
+    assert.match(readFileSync(out, 'utf8'), new RegExp(`id=${gh.releases[0].id}\\n`),
+      'the id it prints is the release that is really there');
+  } finally {
+    await gh.close();
+  }
+});
+
+// The rolling tag is moved onto each build, and the first publish creates its ref. A retried
+// create is answered 422 because the ref now exists; reading it back says it points where
+// this attempt was putting it, so the publish carries on rather than failing on its own work.
+test('a tag ref create whose answer was lost leaves the tag where the publish put it', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/git/refs`, 1);
+    await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
+    assert.equal(gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'abc1234', 'the tag names this build');
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+test('only a failure to answer is transient, and a 4xx is not', () => {
+  for (const status of [500, 502, 503, 504, 429, 408]) {
+    assert.ok(isTransientStatus(status), `${status} is a failure to answer`);
+  }
+  for (const status of [400, 401, 403, 404, 409, 422, 200, 201, 204]) {
+    assert.ok(!isTransientStatus(status), `${status} is an answer, and is not retried`);
+  }
+});
+
+// The waits are what a run in CI gets when nothing overrides them. An unset environment
+// variable must not read as a backoff of nothing -- `''.split(',')` is one empty item and
+// `Number('')` is 0 -- or every retry would fire at once, which is the opposite of what the
+// wait is for.
+test('an unset retry setting falls back to the waits the publisher ships with', () => {
+  assert.deepEqual(retrySettings({}), { attempts: RETRY_ATTEMPTS, backoff: RETRY_BACKOFF_MS });
+  assert.deepEqual(retrySettings({ HARMONY_RETRY_BACKOFF_MS: '' }).backoff, RETRY_BACKOFF_MS);
+  assert.deepEqual(retrySettings({ HARMONY_RETRY_BACKOFF_MS: ' , ' }).backoff, RETRY_BACKOFF_MS);
+  // What is set is used, including a wait of nothing, which is what the tests run with.
+  assert.deepEqual(retrySettings({ HARMONY_RETRY_BACKOFF_MS: '0' }).backoff, [0]);
+  assert.deepEqual(retrySettings({ HARMONY_RETRY_BACKOFF_MS: '10,20' }).backoff, [10, 20]);
+  assert.equal(retrySettings({ HARMONY_RETRY_ATTEMPTS: '3' }).attempts, 3);
+  // A value that names no number is not a setting.
+  assert.equal(retrySettings({ HARMONY_RETRY_ATTEMPTS: 'lots' }).attempts, RETRY_ATTEMPTS);
+  assert.equal(retrySettings({ HARMONY_RETRY_ATTEMPTS: '0' }).attempts, RETRY_ATTEMPTS);
+  // And the shipped waits grow, so a service that is overwhelmed gets the calls thinned out.
+  for (let i = 1; i < RETRY_BACKOFF_MS.length; i += 1) {
+    assert.ok(RETRY_BACKOFF_MS[i] > RETRY_BACKOFF_MS[i - 1], 'each wait is longer than the one before');
+  }
+  // In all, well inside the publish job's fifteen-minute timeout.
+  const total = RETRY_BACKOFF_MS.slice(0, RETRY_ATTEMPTS - 1).reduce((a, b) => a + b, 0);
+  assert.ok(total < 60_000, `the waits add up to ${total} ms, which is too long beside a build`);
+});
+
+test('a retry-after the response names is honoured, within a bound', () => {
+  assert.equal(retryAfterMs('3'), 3000);
+  assert.equal(retryAfterMs(null), null);
+  assert.equal(retryAfterMs(''), null);
+  assert.equal(retryAfterMs('soon'), null);
+  // A value larger than a job can afford is capped rather than waited out.
+  assert.equal(retryAfterMs('86400'), 60_000);
+  const now = Date.parse('2026-01-01T00:00:00Z');
+  assert.equal(retryAfterMs('Thu, 01 Jan 2026 00:00:05 GMT', now), 5000);
+  // A date in the past is no wait at all.
+  assert.equal(retryAfterMs('Thu, 01 Jan 2026 00:00:00 GMT', now + 10_000), 0);
 });
 
 // GitHub computes a SHA-256 over every asset it stores and reports it as `digest`. It is

@@ -49,6 +49,16 @@
 // release of a tag is the archive, and nothing here touches it.
 //
 // Environment: GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_API_URL, GITHUB_OUTPUT.
+//
+// A request that gets no usable answer -- a 5xx, a 429, a 408, or a connection that fails or
+// closes before the answer -- is sent again, a few times with a growing wait, and says so as
+// a warning in the log. GitHub answers a healthy request immediately, so a 5xx from it is
+// one request failing rather than a verdict on the request, and losing a whole publish to one
+// of them costs a thirty-minute build and leaves the release a commit behind. Every write
+// here is written so that sending it twice leaves what one send would: an upload whose first
+// attempt landed but whose answer was lost is recognised by GitHub's own digest of the stored
+// asset, a create whose first attempt landed is read back by tag, and a delete that finds
+// nothing treats that as done.
 import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -182,15 +192,73 @@ export function checkAssetDigest(asset, sha256, { name = asset?.name } = {}) {
   return { checked: true, digest: reported };
 }
 
+// How many times a request that got no usable answer is sent before the publish gives up,
+// and how long to wait between attempts. GitHub answers a healthy request immediately, so a
+// 5xx from it is a transient failure of one request rather than a verdict on the request:
+// publishing an APK is a handful of calls after a thirty-minute build, and losing the whole
+// run to one of them costs the build and leaves the release a commit behind.
+//
+// The wait grows, because a service that is briefly overwhelmed needs the calls to thin out
+// rather than to arrive again at once. Fifteen seconds in all, which is nothing beside the
+// build and well inside the publish job's own timeout.
+export const RETRY_ATTEMPTS = 5;
+export const RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000];
+
+// The same, overridable from the environment. The tests set both to nothing so a publish
+// that is meant to fail does not sit through the waits; nothing in the workflow does, so
+// what runs in CI is what the constants above say.
+export function retrySettings(env = process.env) {
+  const attempts = Number(env.HARMONY_RETRY_ATTEMPTS);
+  // An unset variable is not a backoff of nothing: `''.split(',')` is one empty item, and
+  // `Number('')` is 0, so the items are dropped unless they name a number.
+  const backoff = String(env.HARMONY_RETRY_BACKOFF_MS ?? '')
+    .split(',')
+    .map((n) => n.trim())
+    .filter((n) => n !== '' && Number.isFinite(Number(n)) && Number(n) >= 0)
+    .map(Number);
+  return {
+    attempts: Number.isInteger(attempts) && attempts > 0 ? attempts : RETRY_ATTEMPTS,
+    backoff: backoff.length ? backoff : RETRY_BACKOFF_MS,
+  };
+}
+
+// Whether a failed request may be sent again. 5xx is the server failing to answer, 429 is
+// "too many requests" (which says so with retry-after), and 408 is a request that timed out
+// on the way. Everything else in the 4xx range is an answer about the request -- a 401, a
+// 404, a 422 -- and sending it again would get the same answer, so it is not retried.
+export function isTransientStatus(status) {
+  return status >= 500 || status === 429 || status === 408;
+}
+
+// The wait a response asks for, when it names one. A number of seconds or an HTTP date, as
+// the header allows. Capped so a hostile or mistaken value cannot hold a job until its
+// timeout; the job is what a longer wait would eat.
+export function retryAfterMs(header, now = Date.now()) {
+  if (!header) return null;
+  const text = String(header).trim();
+  if (/^\d+$/.test(text)) return Math.min(Number(text) * 1000, 60_000);
+  const at = Date.parse(text);
+  if (Number.isNaN(at)) return null;
+  return Math.min(Math.max(at - now, 0), 60_000);
+}
+
 export function client({
   token = process.env.GITHUB_TOKEN,
   repository = process.env.GITHUB_REPOSITORY,
   apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com',
+  attempts,
+  backoff,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  log = () => {},
 } = {}) {
   if (!token) throw new PublishError('GITHUB_TOKEN is not set');
   if (!/^[^/]+\/[^/]+$/.test(repository || '')) {
     throw new PublishError(`GITHUB_REPOSITORY is not owner/repo: ${repository}`);
   }
+  const settings = retrySettings();
+  const tries = Math.max(1, attempts ?? settings.attempts);
+  const waits = backoff ?? settings.backoff;
+  const waitFor = (attempt) => waits[Math.min(attempt - 1, waits.length - 1)] ?? 0;
   const base = apiUrl.replace(/\/$/, '');
   const repoUrl = `${base}/repos/${repository}`;
   const headers = {
@@ -199,12 +267,78 @@ export function client({
     'user-agent': LEGACY_OWNER,
   };
 
-  async function request(method, url, { body, accept = 'application/vnd.github+json', contentType } = {}) {
-    return fetch(url.startsWith('http') ? url : `${repoUrl}${url}`, {
-      method,
-      headers: { ...headers, accept, ...(contentType ? { 'content-type': contentType } : {}) },
-      body,
-    });
+  // One attempt. A request that cannot be sent at all (a connection refused, a DNS failure,
+  // a socket that closed before the answer) is reported as a failure with no status, which
+  // is the same thing as far as the caller is concerned: no usable answer.
+  async function send(method, url, opts) {
+    try {
+      return await fetch(url.startsWith('http') ? url : `${repoUrl}${url}`, {
+        method,
+        headers: { ...headers, accept: opts.accept, ...(opts.contentType ? { 'content-type': opts.contentType } : {}) },
+        body: opts.body,
+      });
+    } catch (error) {
+      const failure = new PublishError(`${method} ${url}: ${error.message}`);
+      failure.status = null;
+      throw failure;
+    }
+  }
+
+  // Every request goes through here, so a transient failure is retried wherever it happens
+  // rather than in one call site. A request that got a 5xx or a network error is sent again
+  // after a wait; the answer is returned as it came back otherwise, and a 4xx is never
+  // retried. What a retry may do twice is the caller's problem -- each write here is written
+  // so that sending it twice leaves the repository in the state one send would have.
+  //
+  // The answer's body is read here rather than by the caller, so that a body cut off part way
+  // through -- a connection that dropped after the headers -- is the same kind of failure as
+  // no answer at all, and gets the same retry. What is returned is the status, the headers
+  // and the body, not a stream that is still arriving.
+  async function request(method, url, opts = {}) {
+    const options = { accept: 'application/vnd.github+json', ...opts };
+    for (let attempt = 1; ; attempt += 1) {
+      const last = attempt >= tries;
+      let res;
+      try {
+        res = await send(method, url, options);
+      } catch (error) {
+        // A connection that never produced an answer. The same rule as a 5xx, and the same
+        // bound: after the last attempt the failure is the caller's to report.
+        if (last) throw error;
+        const wait = waitFor(attempt);
+        log(`::warning::${method} ${url}: ${error.message}; retrying in ${wait} ms (attempt ${attempt} of ${tries})`);
+        await sleep(wait);
+        continue;
+      }
+      const transient = isTransientStatus(res.status);
+      let body;
+      try {
+        body = await res.text();
+      } catch (error) {
+        // Headers arrived and the body did not finish: the same "no usable answer", so the
+        // same retry. The status is not known to be transient here, but an answer that was
+        // never fully read is not an answer at all.
+        if (last) throw new PublishError(`${method} ${url}: the answer was cut off (${error.message})`);
+        const wait = waitFor(attempt);
+        log(`::warning::${method} ${url}: the answer was cut off (${error.message}); retrying in ${wait} ms (attempt ${attempt} of ${tries})`);
+        await sleep(wait);
+        continue;
+      }
+      const answer = {
+        ok: res.status >= 200 && res.status < 300,
+        status: res.status,
+        headers: res.headers,
+        text: async () => body,
+        json: async () => JSON.parse(body),
+      };
+      if (!transient || last) return answer;
+      // A wait the response asked for wins over the backoff, so a rate limit is respected
+      // rather than argued with.
+      const asked = retryAfterMs(res.headers.get('retry-after'));
+      const wait = asked ?? waitFor(attempt);
+      log(`::warning::${method} ${url}: ${res.status}; retrying in ${wait} ms (attempt ${attempt} of ${tries})`);
+      await sleep(wait);
+    }
   }
 
   async function json(method, url, opts = {}) {
@@ -278,15 +412,29 @@ export async function ensureRollingRelease(gh, { branch, commit, defaultBranch, 
     }
     return { id: existing.id, tag, created: false, wanted, current: existing };
   }
-  const created = await gh.json('POST', '/releases', {
-    contentType: 'application/json',
-    body: JSON.stringify({
-      tag_name: tag,
-      ...wanted,
-      ...(commit ? { target_commitish: commit } : {}),
-    }),
-  });
-  return { id: created.id, tag, created: true, wanted, current: null };
+  // A create whose first attempt landed answers 422 when it is sent again, because the tag
+  // is now taken. The release is read back by tag then: if this workflow's release is there,
+  // the earlier attempt landed and the answer was lost, which is the outcome asked for. What
+  // is read back is the release's current state, so the page is whatever is really there.
+  let created;
+  let landedOnRetry = false;
+  try {
+    created = await gh.json('POST', '/releases', {
+      contentType: 'application/json',
+      body: JSON.stringify({
+        tag_name: tag,
+        ...wanted,
+        ...(commit ? { target_commitish: commit } : {}),
+      }),
+    });
+  } catch (error) {
+    if (error.status !== 422) throw error;
+    const landed = await findByTag(gh, tag);
+    if (!landed) throw error;
+    created = landed;
+    landedOnRetry = true;
+  }
+  return { id: created.id, tag, created: true, wanted, current: landedOnRetry ? created : null };
 }
 
 // Brings an existing rolling release in line with this build: the title and body describe
@@ -324,17 +472,26 @@ export async function ensureTagRelease(gh, { tag, name, body }) {
     }
     return { id: existing.id, tag, created: false, draft: Boolean(existing.draft) };
   }
-  const created = await gh.json('POST', '/releases', {
-    contentType: 'application/json',
-    body: JSON.stringify({
-      tag_name: tag,
-      name: name || `Brapmony ${version}`,
-      body: body ?? '',
-      draft: false,
-      prerelease: false,
-    }),
-  });
-  return { id: created.id, tag, created: true, draft: Boolean(created.draft) };
+  // As above: a create sent again after a lost answer answers 422, and the release the
+  // first attempt made is read back by tag rather than reported as a failure.
+  try {
+    const created = await gh.json('POST', '/releases', {
+      contentType: 'application/json',
+      body: JSON.stringify({
+        tag_name: tag,
+        name: name || `Brapmony ${version}`,
+        body: body ?? '',
+        draft: false,
+        prerelease: false,
+      }),
+    });
+    return { id: created.id, tag, created: true, draft: Boolean(created.draft) };
+  } catch (error) {
+    if (error.status !== 422) throw error;
+    const landed = (await gh.paginate('/releases')).find((r) => r.tag_name === tag) || null;
+    if (!landed) throw error;
+    return { id: landed.id, tag, created: true, draft: Boolean(landed.draft) };
+  }
 }
 
 async function listAssets(gh, releaseId) {
@@ -353,8 +510,16 @@ async function listAssets(gh, releaseId) {
 // What GitHub stored is then compared with what was sent (checkAssetDigest): the digest in
 // the response is computed by GitHub over the bytes it holds, so a mismatch means the file
 // a downloader would get is not the file this run built.
+//
+// The upload is the one write here that a retry can duplicate: a request that is sent again
+// after a lost answer may find its own first attempt's asset already under the name. So a
+// 422 is not immediately a failure -- the release's assets are read back, and if GitHub
+// holds these exact bytes under that name (its own digest says so) then the upload landed
+// and the answer was lost, which is the outcome the caller wanted. Bytes under the name that
+// are not this file are somebody else's and still fail.
 async function uploadFile(gh, { releaseId, file, name }) {
   if (!existsSync(file)) throw new PublishError(`no such file: ${file}`);
+  const sha256 = sha256File(file);
   const release = await gh.json('GET', `/releases/${releaseId}`);
   const base = release.upload_url.replace(/\{.*\}$/, '');
   const query = new URLSearchParams({ name });
@@ -365,12 +530,14 @@ async function uploadFile(gh, { releaseId, file, name }) {
       contentType: 'application/octet-stream',
     });
   } catch (error) {
-    if (error.status === 422) {
-      throw new PublishError(`asset ${name} is already on release ${releaseId}`);
-    }
-    throw error;
+    if (error.status !== 422) throw error;
+    const stored = (await listAssets(gh, releaseId)).filter((a) => a.name === name);
+    const landed = stored.find((a) => storedBytes(a, sha256, statSync(file).size));
+    if (!landed) throw new PublishError(`asset ${name} is already on release ${releaseId}`);
+    // The earlier attempt's asset, which holds the bytes this one was uploading.
+    return landed;
   }
-  checkAssetDigest(asset, sha256File(file), { name });
+  checkAssetDigest(asset, sha256, { name });
   return asset;
 }
 
@@ -438,7 +605,7 @@ export async function replaceStable(gh, { releaseId, file, name }) {
       body: JSON.stringify({ name }),
     });
     // Only now, with the new bytes in place, is the old one removed.
-    for (const id of moved) await gh.json('DELETE', `/releases/assets/${id}`);
+    for (const id of moved) await deleteIfPresent(gh, `/releases/assets/${id}`);
     return { asset: { ...uploaded, name }, replaced: moved.length };
   } catch (error) {
     // Put the previous file back under the stable name if the swap did not finish.
@@ -454,7 +621,7 @@ export async function replaceStable(gh, { releaseId, file, name }) {
       }
     }
     try {
-      await gh.json('DELETE', `/releases/assets/${uploaded.id}`);
+      await deleteIfPresent(gh, `/releases/assets/${uploaded.id}`);
     } catch {
       /* the staging asset is harmless and pruned next run */
     }
@@ -500,7 +667,7 @@ export async function retireAssets(gh, { releaseId, names = RETIRED_ASSETS }) {
   for (const asset of await listAssets(gh, releaseId)) {
     if (!names.includes(asset.name)) continue;
     if (!isOwned(asset)) continue;
-    await gh.json('DELETE', `/releases/assets/${asset.id}`);
+    await deleteIfPresent(gh, `/releases/assets/${asset.id}`);
     retired.push(asset.name);
   }
   return retired;
@@ -523,7 +690,7 @@ export async function pruneRollingAssets(gh, { releaseId, keep = DEFAULT_KEEP, p
   const oldest = builds.sort((a, b) => b.id - a.id).slice(keep);
   const pruned = [];
   for (const a of oldest) {
-    await gh.json('DELETE', `/releases/assets/${a.id}`);
+    await deleteIfPresent(gh, `/releases/assets/${a.id}`);
     pruned.push(a.name);
   }
   return pruned;
@@ -556,15 +723,38 @@ export async function moveRollingTag(gh, { tag, commit }) {
     });
     return { moved: true, sha: commit };
   }
-  await gh.json('POST', '/git/refs', {
-    contentType: 'application/json',
-    body: JSON.stringify({ ref: `refs/tags/${tag}`, sha: commit }),
-  });
+  // A create sent again after a lost answer answers 422, because the ref now exists. Reading
+  // it back says whether it points where this attempt was putting it, which is the state the
+  // publish wanted; a ref at another commit is not this attempt's and still fails.
+  try {
+    await gh.json('POST', '/git/refs', {
+      contentType: 'application/json',
+      body: JSON.stringify({ ref: `refs/tags/${tag}`, sha: commit }),
+    });
+  } catch (error) {
+    if (error.status !== 422) throw error;
+    const landed = await gh.json('GET', `/git/ref/tags/${tag}`).catch(() => null);
+    if (!landed || landed.object?.sha !== commit) throw error;
+  }
   return { moved: true, created: true, sha: commit };
 }
 
 function required(values, keys) {
   for (const k of keys) if (!values[k]) throw new PublishError(`--${k} is required`);
+}
+
+// A delete is the one write that a retry cannot duplicate, so a 404 is the state it was
+// after rather than a failure: the thing is not there. A 404 is not retried by the client
+// (it is an answer, not a transient failure), but a delete sent again after a lost answer
+// finds its first attempt had already removed the thing, and that is the same outcome.
+export async function deleteIfPresent(gh, path) {
+  try {
+    await gh.json('DELETE', path);
+    return true;
+  } catch (error) {
+    if (error.status === 404) return false;
+    throw error;
+  }
 }
 
 // Every release and tag a rolling workflow left behind that no branch will publish to
@@ -643,11 +833,7 @@ export async function deleteTag(gh, { tag, log = () => {} }) {
   if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) {
     throw new PublishError(`refusing to delete ${tag}: not a rolling tag`);
   }
-  try {
-    await gh.json('DELETE', `/git/refs/tags/${tag}`);
-  } catch (error) {
-    if (error.status !== 404) throw error;
-  }
+  await deleteIfPresent(gh, `/git/refs/tags/${tag}`);
   log(`Deleted tag ${tag}`);
   return { tag };
 }
@@ -660,16 +846,12 @@ export async function deleteStaleRelease(gh, { id, tag, log = () => {} }) {
   if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) {
     throw new PublishError(`refusing to delete ${tag}: not a rolling tag`);
   }
-  await gh.json('DELETE', `/releases/${id}`);
+  await deleteIfPresent(gh, `/releases/${id}`);
   log(`Deleted release ${tag} (${id})`);
   // A tag with no release is still a tag on the repository, so it is removed too. A 404
   // means it was never created or is already gone, which is the state wanted.
-  try {
-    await gh.json('DELETE', `/git/refs/tags/${tag}`);
-    log(`Deleted tag ${tag}`);
-  } catch (error) {
-    if (error.status !== 404) throw error;
-  }
+  await deleteIfPresent(gh, `/git/refs/tags/${tag}`);
+  log(`Deleted tag ${tag}`);
   return { id, tag };
 }
 
@@ -689,7 +871,7 @@ export async function oldArtifacts(gh, { keep = DEFAULT_ARTIFACT_KEEP } = {}) {
 }
 
 export async function deleteArtifact(gh, { id, name, log = () => {} }) {
-  await gh.json('DELETE', `/actions/artifacts/${id}`);
+  await deleteIfPresent(gh, `/actions/artifacts/${id}`);
   log(`Deleted artifact ${name} (${id})`);
   return { id, name };
 }
@@ -726,7 +908,7 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       log(`Would publish ${basename(values.apk)} to ${kind} ${tag}`);
       return { tag, dryRun: true, prerelease: !published };
     }
-    const gh = ghOverride ?? client();
+    const gh = ghOverride ?? client({ log });
     const { id, created, wanted, current } = await ensureRollingRelease(gh, {
       branch: values.branch,
       commit: values.commit,
@@ -782,7 +964,7 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       log(`Would create or find the release for ${values.tag}`);
       return { tag: values.tag, dryRun: true };
     }
-    const gh = ghOverride ?? client();
+    const gh = ghOverride ?? client({ log });
     const { id, created } = await ensureTagRelease(gh, {
       tag: values.tag,
       name: values.name,
@@ -798,7 +980,7 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
   if (command === 'upload') {
     required(values, ['release-id']);
     if (!positionals.length) throw new PublishError('upload needs at least one file');
-    const gh = ghOverride ?? client();
+    const gh = ghOverride ?? client({ log });
     const releaseId = values['release-id'];
     const assets = await listAssets(gh, releaseId);
     const uploaded = [];
@@ -811,7 +993,7 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
         if (!isOwned(a) && !ownName(a.name)) {
           throw new PublishError(`asset ${name} was not uploaded by this workflow; refusing to replace it`);
         }
-        await gh.json('DELETE', `/releases/assets/${a.id}`);
+        await deleteIfPresent(gh, `/releases/assets/${a.id}`);
       }
       uploaded.push(await uploadFile(gh, { releaseId, file, name }));
     }
@@ -821,7 +1003,7 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
 
   if (command === 'cleanup') {
     required(values, ['default-branch']);
-    const gh = ghOverride ?? client();
+    const gh = ghOverride ?? client({ log });
     const apply = values['apply'] === true;
     const branches = (await gh.paginate('/branches')).map((b) => b.name);
     const defaultBranch = values['default-branch'];

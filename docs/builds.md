@@ -395,6 +395,24 @@ would quietly change what one means. Each row is a test in `scripts/release.test
 | The run's own upload fails | Nothing else is touched; the stable name still points at the last good build |
 | The stable name's upload fails | The previous stable build is still there and still downloadable |
 | An older build is pruned | Only builds this workflow uploaded, keeping the newest ten |
+| A request gets no answer, or a `5xx` | Sent again, five attempts in all with a growing wait; the run's log warns on each |
+| An upload landed but its answer was lost | The retry finds its own asset, and GitHub's digest says it holds these bytes: no second upload |
+| Every attempt fails | The publish stops with GitHub's own error, as it did before |
+
+The last three are the same rule seen from different sides: a `5xx` is one request failing,
+not a verdict on it, and giving up on the first of them loses a thirty-minute build over
+nothing. The wait grows — a second, two, four, eight — so a service that is briefly
+overwhelmed gets the calls thinned out rather than repeated at once; a `429` that names
+`retry-after` is waited for as long as it asks, up to a minute. A `4xx` is an answer about
+the request and is never sent again: the same request would get the same answer.
+
+Retrying is only safe if a write can tell "it landed and the answer was lost" from "it never
+happened", so each write is written to be sent twice without changing what one send would.
+An upload answered `422` reads the release's assets back and accepts the name only when
+GitHub's own digest says it holds these bytes — bytes that are not this build are somebody
+else's, and still fail. A release or tag create answered `422` is read back by tag and
+accepted when it points where this attempt was putting it. A delete that finds nothing treats
+that as done.
 
 Ownership is recorded in each asset's label (`brapmony-android sha256:<hash>`), so a file
 somebody attached by hand is not mistaken for this workflow's. The swap of the stable name
