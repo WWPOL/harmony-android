@@ -89,6 +89,11 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
   the closed ones say why. Before
   [the fix in ux-fixes.md](../../ux-fixes.md#9-a-channel-with-threads-said-it-had-none) the
   sheet filtered the last two out and told the person the channel had none.
+- `channel-threads.png` -- the channel column from `ChannelThreadsTest`, drawn offline against
+  `FixtureInstance`: the open thread of one channel nested under it, behind a rail, with the
+  channels on either side at their own inset. Before
+  [the fix in ux-fixes.md](../../ux-fixes.md#12-a-thread-being-read-had-no-row-in-the-channel-column)
+  the thread was only in the column when the Threads sheet had happened to read it.
 - `emoji-picker-dark.png`, `emoji-picker-light.png` -- the emoji picker, which
   replaced a row of five hardcoded faces: the search box, the account's recents,
   the skin-tone row, the category tabs, the server's custom emoji and the whole

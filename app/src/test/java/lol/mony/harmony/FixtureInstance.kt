@@ -99,7 +99,12 @@ internal class FixtureInstance : AutoCloseable {
             // three -- the sidebar nests only the first -- and a client that applies the
             // sidebar's rule to the list claims the channel has none, which is the report this
             // fixture is here to keep fixed.
-            path.contains("/threads") -> THREADS
+            //
+            // All three belong to `general`; the read is filtered by `channel_id` like the
+            // app's own, so a channel with no threads is answered with none rather than with
+            // another channel's -- which is what a path-routed fixture did, and what made a
+            // column that nests every thread it read under every channel look right.
+            path.contains("/threads") -> threadsFor(path)
             path.contains("/roles") -> ROLES
             path.contains("/members") -> MEMBERS
             path.contains("/invites") -> INVITES
@@ -155,6 +160,23 @@ internal class FixtureInstance : AutoCloseable {
             .split(Regex("(?<=\\}),\\s*(?=\\{)"))
             .filter { row -> row.contains("\"id\":\"$eq\"") }
         return "[" + wanted.joinToString(",") + "]"
+    }
+
+    /**
+     * The thread rows of the channel a request asked for.
+     *
+     * The app reads a channel's threads with `channel_id=eq.…`, and the Threads sheet and the
+     * channel column draw different subsets of one answer. Answering every channel with the
+     * same rows would make a column that nests everything it read look correct, so the filter is
+     * honoured here the way the instance honours it.
+     */
+    private fun threadsFor(path: String): String {
+        val channel = Regex("[?&]channel_id=eq\\.([^&]+)").find(path)?.groupValues?.get(1) ?: return THREADS
+        val rows = THREADS.trim().removePrefix("[").removeSuffix("]")
+            .split(Regex("(?<=\\}),\\s*(?=\\{)"))
+            .filter { row -> row.contains("\"channel_id\":\"$channel\"") }
+        if (rows.isEmpty()) return "[]"
+        return "[" + rows.joinToString(",") + "]"
     }
 
     private companion object {

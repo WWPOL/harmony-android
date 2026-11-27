@@ -320,11 +320,39 @@ class AppState(
         }
     }
 
+    /**
+     * Puts [thread] in its channel's sidebar list, if it still belongs there.
+     *
+     * This is what a room calls when it creates a thread from a message or answers one, so the
+     * thread is nested under its channel without waiting for the next read of the server. The
+     * list is the one the channel column draws, so it applies the column's rule: a thread the
+     * instance archived, or one whose own auto-archive clock has run out, is not nested under
+     * its channel ([Thread.isActive]). Remembering it unconditionally is how a closed thread
+     * ends up back in the sidebar, which is the bug an earlier round fixed.
+     */
     fun rememberThread(thread: Thread) {
         _threadsByChannel.update { current ->
-            val existing = current[thread.channelId].orEmpty()
-            current + (thread.channelId to (listOf(thread) + existing.filter { it.id != thread.id }))
+            val existing = current[thread.channelId].orEmpty().filter { it.id != thread.id }
+            val merged = (listOf(thread) + existing)
+                .filter { it.isActive() }
+                .sortedWith(compareByDescending<Thread> { it.lastActivityAt ?: it.createdAt ?: "" })
+            current + (thread.channelId to merged)
         }
+    }
+
+    /**
+     * Records a reply in [thread], and answers the thread as it now stands.
+     *
+     * Answering a thread is what keeps it in the channel column, and answering one that had
+     * gone quiet past its own auto-archive window brings it back: the reply moves the thread's
+     * clock, which is the whole of the reference's `activeChannelThreads` rule. The room holds
+     * the copy this returns, so the thread it is drawing and the thread in the list cannot
+     * disagree about when it was last active.
+     */
+    fun noteThreadReply(thread: Thread, at: java.time.Instant = java.time.Instant.now()): Thread {
+        val answered = thread.copy(lastActivityAt = at.toString())
+        rememberThread(answered)
+        return answered
     }
 
     /** Forgets every cached list, so nothing from one account can show under another. */

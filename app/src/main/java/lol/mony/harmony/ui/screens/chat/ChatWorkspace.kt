@@ -3,6 +3,7 @@
 package lol.mony.harmony.ui.screens.chat
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,6 +30,7 @@ import lol.mony.harmony.data.model.*
 import lol.mony.harmony.data.session.AuthState
 import lol.mony.harmony.ui.AppState
 import lol.mony.harmony.ui.components.*
+import lol.mony.harmony.ui.theme.LocalHarmonyColors
 import lol.mony.harmony.ui.theme.VisualThemeSettings
 import lol.mony.harmony.ui.screens.server.CreateOrJoinServerDialog
 import lol.mony.harmony.ui.screens.server.ServerManagementScreen
@@ -57,6 +59,9 @@ fun ChatWorkspace(state: AppState, appearance: VisualThemeSettings) {
             else ChannelList(state, serverId!!, Modifier.fillMaxSize())
     }
 }
+
+/** How far in a channel's open threads start, in the column. */
+private val ThreadIndent = 56.dp
 
 @Composable
 internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) {
@@ -87,12 +92,23 @@ internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) 
             tree = loaded
             state.serverTrees.value = state.serverTrees.value + (serverId to loaded)
             state.channelsByServer.value = state.channelsByServer.value + (serverId to loaded.channels)
-            // The open threads are part of the channel list, as they are on the web.
-            for (channel in loaded.channels) {
-                runCatching { state.chats.threads(session.endpoint, token, channel.id).getOrThrow() }
-                    .onSuccess { state.rememberThreads(channel.id, it) }
-            }
         } catch (error: Exception) { failure = error.message }
+    }
+    // The open threads are part of the channel list, as they are on the web: a channel's
+    // unarchived threads that are still inside their own auto-archive clock nest under it.
+    //
+    // They are read whenever the column opens on a server, including one whose channels came
+    // from the cache, because they change far more often than the server's shape does. The
+    // threads this app starts or answers are put in the list as it goes (`AppState.rememberThread`,
+    // `AppState.noteThreadReply`), so the column is current without a read of its own.
+    LaunchedEffect(serverId, tree) {
+        val channels = tree?.channels ?: return@LaunchedEffect
+        val session = state.auth.state.value as? AuthState.SignedIn ?: return@LaunchedEffect
+        val token = state.auth.freshToken() ?: return@LaunchedEffect
+        for (channel in channels) {
+            runCatching { state.chats.threads(session.endpoint, token, channel.id).getOrThrow() }
+                .onSuccess { state.rememberThreads(channel.id, it) }
+        }
     }
     val baseUrl = state.auth.state.collectAsState().value.let { (it as? AuthState.SignedIn)?.endpoint?.baseUrl }
     Column(modifier.fillMaxHeight()) {
@@ -166,19 +182,46 @@ internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) 
                                     modifier = Modifier.testTag("channel-" + channel.name).clickable {
                                         if (channel.channelType.isVoice) voice = channel else state.openChannelId.value = channel.id
                                     })
-                                // Open threads nest under their channel, as the web client's sidebar does.
-                                for (openThread in threads[channel.id].orEmpty()) {
-                                    ListItem(
-                                        headlineContent = { Text(openThread.name ?: "Thread", maxLines = 1) },
-                                        leadingContent = { Icon(Icons.Default.Forum, null, Modifier.size(16.dp)) },
-                                        supportingContent = { Text(openThread.messageCount.toString() + " replies") },
-                                        modifier = Modifier.padding(start = 24.dp)
-                                            .testTag("thread-" + openThread.id)
-                                            .clickable {
-                                                state.openChannelId.value = channel.id
-                                                state.openThreadId.value = openThread.id
-                                            },
-                                    )
+                                // The open threads nest under their channel, as the web client's
+                                // sidebar draws them. A hairline down their start edge is what
+                                // says they belong to the row above rather than to the list:
+                                // an indent alone reads as a narrower row, which is what a
+                                // second channel looks like.
+                                val openThreads = threads[channel.id].orEmpty()
+                                if (openThreads.isNotEmpty()) {
+                                    Row(Modifier.padding(start = ThreadIndent).height(IntrinsicSize.Min)) {
+                                        Box(
+                                            Modifier
+                                                .width(2.dp)
+                                                .fillMaxHeight()
+                                                .background(LocalHarmonyColors.current.borderStrong),
+                                        )
+                                        Column {
+                                            for (openThread in openThreads) {
+                                                ListItem(
+                                                    headlineContent = {
+                                                        Text(openThread.name ?: "Thread", maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            style = MaterialTheme.typography.bodyLarge)
+                                                    },
+                                                    leadingContent = {
+                                                        Icon(Icons.Default.Forum, null, Modifier.size(16.dp),
+                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                    },
+                                                    supportingContent = {
+                                                        Text(countLabel(openThread.messageCount, "reply"),
+                                                            style = MaterialTheme.typography.bodySmall)
+                                                    },
+                                                    modifier = Modifier
+                                                        .testTag("thread-" + openThread.id)
+                                                        .clickable {
+                                                            state.openChannelId.value = channel.id
+                                                            state.openThreadId.value = openThread.id
+                                                        },
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -569,6 +569,63 @@ swipe-only interactions have button/keyboard alternatives" checklist item. Its
 `references/pro-rules.md` pre-delivery checklist is what caught the missing 48dp dismiss target
 and the scroll content hidden behind a fixed bar.
 
+## 12. A thread being read had no row in the channel column
+
+**The report:** "if you are in a thread and the thread is considered active then it should show up
+in the channel list indented under the channel it is in."
+
+The column already nested open threads, and a test pinned that. What it pinned was the *state*:
+`AppState.rememberThreads` filtered the instance's answer to the open threads and filed them per
+channel. What nothing pinned was the way the screen got there, and two ordinary paths never
+reached it.
+
+**Cause.** Three holes, all of them between a thread and the column:
+
+- The threads were read **only on the branch that fetched the server tree**. The column shows a
+  cached tree at once and returns, so from the second visit on it drew whatever the last full
+  fetch had filed -- and a thread started after that fetch was never in it.
+- A thread was remembered in the column by **one** path: the Threads sheet's own read
+  (`state.rememberThreads(roomId, …)`). Starting a thread from a message, opening one from the
+  column, and opening one from a notification all left the column untouched. Since the room's
+  overflow sheet is the least-used way into a thread, the common case was the broken one: in a
+  thread, thread active, no row under its channel.
+- `AppState.rememberThread` -- the call the room made -- did **not** apply the column's rule. It
+  put the thread in the list unconditionally, so a closed thread that somebody opened to read
+  would have been nested as though it were open, which is the bug an earlier round fixed.
+
+**Fix.** The thread is now reported by the one place that knows it is being read, and the rule
+that decides whether it belongs in the column is applied there.
+
+- `RoomScreen` watches the thread it is drawing and calls `AppState.rememberThread` for it, so
+  every way in -- a message's **Start thread**, the sheet, the column, a notification -- ends in
+  the same call.
+- `AppState.rememberThread` filters by `Thread.isActive()`, the column's own rule, and sorts by
+  last activity, exactly as `rememberThreads` does. A closed thread opened to read stays out.
+- Answering a thread calls `AppState.noteThreadReply`, which moves the thread's own clock and
+  files it: a reply is what keeps a thread open, and what brings back one that had gone quiet
+  past its auto-archive window. Without it, a thread a person is answering would drop out of the
+  column under them.
+- `ChannelList` reads a channel's threads in an effect of its own, keyed on the tree it is
+  drawing, so a cached column reads them too. The server tree stays cached; only the threads are
+  re-read, because they are the part that changes while a person is in the app.
+- The nesting is drawn as a group: the threads start at the channel's own icon inset and a
+  hairline runs down their start edge. An indent alone reads as a narrower row -- which is what a
+  second channel looks like -- and the rail is what says these belong to the row above.
+
+```
+Text channels
+  # general        Everything and nothing
+  │  ▣ Release planning            4 replies
+  # design         Type, colour and motion
+```
+
+**Alternatives rejected.** Reading the whole server tree on every return to the column would keep
+the threads current and also re-fetch the categories and channels on every step out of a room,
+which is what made navigation slow before the cache. Re-reading every channel's threads from the
+room would be one request per channel per reply. Drawing the threads flat, with the channel's name
+in their supporting line, would list a thread under no channel at all, which is the opposite of
+what was asked.
+
 ## How this is verified, and what is not
 
 - **JVM render and interaction tests** (`ShellRailTest`, `ReactionGestureTest`,
@@ -632,6 +689,16 @@ and the scroll content hidden behind a fixed bar.
   rule fails seven of the fifteen.
 - **The branding test fetches over HTTP** from a local server that 404s the hyphenated bucket
   names, so a wrong bucket is a missing picture rather than a passing string comparison.
+- **A thread being read is pinned where the screen is**, by `ChannelThreadsTest`: it draws the
+  real `ChannelList` against `FixtureInstance` and measures the thread's own title starting
+  further in than its channel's name and sitting between that channel and the next one, so a
+  list that nests the wrong thread, nests it under the wrong channel, or drops it fails. A
+  second case drives the room: the thread's id is put where a notification puts it, the real
+  `RoomScreen` opens it, and the column's state has to gain the row. Mutation-checked by
+  removing the room's report, which fails it with "the thread being read is not nested under its
+  channel"; `AppStateCacheTest.aClosedThreadIsNotNestedUnderItsChannel` fails when
+  `rememberThread`'s filter is dropped, and `replyingToAThreadKeepsItInTheColumn` covers the
+  reply's clock. `docs/evidence/render/channel-threads.png` is the capture.
 - **The Threads sheet** is pinned offline, so the check runs in CI rather than skipping without an
   instance: `ThreadsSheetTest` drives the real `RoomScreen` against `FixtureInstance`, whose
   `threads` read answers with one thread in each state, and requires all three on screen with the

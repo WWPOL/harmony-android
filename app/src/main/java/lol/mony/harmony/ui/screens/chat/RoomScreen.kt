@@ -472,6 +472,12 @@ fun RoomScreen(
                         loaded = true)
                 }
                 state.resolveAuthors(session.endpoint, token, listOf(acknowledged))
+                // A reply is what keeps a thread in the channel column, and what brings back
+                // one that had gone quiet past its own auto-archive window: the clock the
+                // sidebar's rule reads is the last reply's. The room takes the updated copy so
+                // the thread it draws and the one in the list agree about when it was active.
+                val answered = thread
+                if (answered != null) thread = state.noteThreadReply(answered)
             } catch (error: Exception) {
                 val reason = error.message ?: "Not sent."
                 state.rooms.replace(key, retryKey ?: nonce, RoomRow(
@@ -494,6 +500,14 @@ fun RoomScreen(
             val token = state.auth.freshToken() ?: return@LaunchedEffect
             state.chats.thread(session.endpoint, token, wanted).getOrThrow()
         }.getOrNull()?.let { thread = it }
+    }
+    // Every way into a thread -- started from a message, chosen from the sheet, opened from the
+    // channel column or a notification -- ends with the thread being read here, so this is the
+    // one place that tells the channel column about it. A thread that is open belongs nested
+    // under its channel, and `rememberThread` applies the column's own rule to it, so a closed
+    // one that somebody opens to read does not land back in the list.
+    LaunchedEffect(thread?.id) {
+        thread?.let { state.rememberThread(it) }
     }
     LaunchedEffect(draftKey) {
         draft = state.sessionStore.draft(draftKey); draftReady = true
@@ -993,7 +1007,11 @@ fun RoomScreen(
                                 selected = null
                                 action {
                                     val token = state.auth.freshToken() ?: error("Sign in again.")
-                                    thread = state.chats.createThread(session.endpoint, token, roomId, message.id, "Discussion").getOrThrow()
+                                    // Opening the thread is what puts it in the channel column:
+                                    // the room's own effect reports every thread it reads
+                                    // (below), so creating it here is enough.
+                                    thread = state.chats.createThread(
+                                        session.endpoint, token, roomId, message.id, "Discussion").getOrThrow()
                                 }
                             }))
                         add(ActionItem(
