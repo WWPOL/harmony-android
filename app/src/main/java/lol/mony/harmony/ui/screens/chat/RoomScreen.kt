@@ -350,7 +350,20 @@ fun RoomScreen(
             // socket's to report: it retries by itself, and claiming an outage from one REST
             // failure is what used to put a Retry button in front of a person for a blip the app
             // was already handling.
-            failure = error.message ?: "Could not load messages."
+            //
+            // A transport failure on a *refresh* is the same rule taken one step further. The
+            // room already has its messages on screen, and a banner saying "the connection to
+            // the instance was lost" over them is the second disconnected notice this app used
+            // to show at once: the connection strip above it already says the socket is down,
+            // and repeating it in the room's own words is what made a two-second blip look like
+            // a failure. Only a page that has nothing to show reports one, and then the reason
+            // is a sentence rather than the exception's.
+            // `room` is the snapshot this composition read, which is stale by the time a failed
+            // refresh lands: the cache is asked again, so the answer is about the rows on screen
+            // now rather than the ones there were when the request was made.
+            val onScreen = state.rooms.snapshot(key)?.rows.orEmpty().isNotEmpty()
+            failure = if (onScreen && error is lol.mony.harmony.data.api.Offline) null
+            else error.message ?: "Could not load messages."
         } finally { loading = false; refreshing = false }
     }
     /**
@@ -635,19 +648,29 @@ fun RoomScreen(
         // The token is asked for on every attempt, not taken once: a reconnect after the
         // access token was refreshed must join with the token that is valid now.
         val realtime = state.realtime
-        realtime.room(
-            session.endpoint,
-            token = { state.auth.freshToken() },
-            roomId = roomId,
-            direct = direct,
-            retryNow = state.retryNow,
-        ).collect { event ->
-            when (event) {
-                LiveUpdate.Connected -> { state.markLive(LiveStatus.Connected); load() }
-                LiveUpdate.Changed -> load()
-                is LiveUpdate.Reconnecting -> state.markLive(LiveStatus.Reconnecting(event.attempt, event.reason))
-                is LiveUpdate.Unavailable -> state.markLive(LiveStatus.Unavailable(event.reason))
+        // The room owns the shared live status while it is open and gives it back as it closes,
+        // so a socket that is still winding down cannot put its "Reconnecting" over the room
+        // that replaced it.
+        state.ownLive(roomId)
+        try {
+            realtime.room(
+                session.endpoint,
+                token = { state.auth.freshToken() },
+                roomId = roomId,
+                direct = direct,
+                retryNow = state.retryNow,
+            ).collect { event ->
+                when (event) {
+                    LiveUpdate.Connected -> { state.markLive(roomId, LiveStatus.Connected); load() }
+                    LiveUpdate.Changed -> load()
+                    is LiveUpdate.Reconnecting ->
+                        state.markLive(roomId, LiveStatus.Reconnecting(event.attempt, event.reason))
+                    is LiveUpdate.Unavailable ->
+                        state.markLive(roomId, LiveStatus.Unavailable(event.reason))
+                }
             }
+        } finally {
+            state.releaseLive(roomId)
         }
     }
     BackHandler { if (thread != null) thread = null else onBack() }
@@ -1403,9 +1426,37 @@ internal fun threadStateLabel(thread: Thread, state: ThreadState = thread.state(
  * A connected client draws nothing here. The old always-on "Live updates connected" line took
  * a strip of every screen and made the one state worth noticing -- being offline -- look like
  * every other.
+ *
+ * **A reconnect that is over before it is read is not news.** A socket drops for reasons that
+ * heal themselves in a second -- a Wi-Fi handover, a radio waking up, an instance restarting
+ * under a load balancer -- and the loop puts it back without the person noticing anything except
+ * the strip appearing and leaving again. Drawing that is what made the app feel like it was
+ * permanently disconnecting. A reconnect is therefore held back for [RECONNECT_GRACE_MILLIS]:
+ * a room that is connected again before then draws nothing at all, and only an outage that lasts
+ * long enough to matter is worth a strip. A refusal is not held back -- it is not a blip, and
+ * waiting would only delay the one thing the person can act on.
+ *
+ * The grace is keyed on the *drop* rather than on the status value: the loop reports every
+ * attempt, so a status that is replaced by the next attempt's status must not restart the clock.
+ * It is reset by the connection coming back, which is the only thing that ends an outage.
  */
 @Composable
 internal fun ConnectionBanner(status: LiveStatus, onRetry: () -> Unit) {
+    // The drop this banner is timing, so an attempt count ticking up does not restart the wait.
+    // A refusal and a connection are not drops, and are drawn without one.
+    val drop = (status as? LiveStatus.Reconnecting)?.let { it.attempt }
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(drop) {
+        if (drop == null) {
+            shown = false
+            return@LaunchedEffect
+        }
+        // A new drop starts its own wait; the same drop only waits once, however many attempts
+        // it reports in the meantime.
+        if (shown) return@LaunchedEffect
+        delay(RECONNECT_GRACE_MILLIS)
+        shown = true
+    }
     val reason: String
     val action: String
     val container: androidx.compose.ui.graphics.Color
@@ -1415,6 +1466,7 @@ internal fun ConnectionBanner(status: LiveStatus, onRetry: () -> Unit) {
             // The reason says what happened; this says what the app is doing about it. The
             // attempt count only appears once it is worth knowing -- "Retrying (1)" would draw
             // attention to the first try of a blip that is already over.
+            if (!shown) return
             reason = status.reason + " Reconnecting" +
                 (if (status.attempt > 1) " (attempt ${status.attempt})" else "") + "."
             action = "Retry now"
@@ -1442,6 +1494,16 @@ internal fun ConnectionBanner(status: LiveStatus, onRetry: () -> Unit) {
         }
     }
 }
+
+/**
+ * How long a dropped socket is given to come back before the room says anything about it.
+ *
+ * Long enough to cover the cases the reconnect loop is *for* -- a handover, a radio waking, a
+ * rolling restart -- and short enough that a real outage is reported while the person is still
+ * looking at the screen. Three seconds is about the point at which a person would otherwise
+ * wonder whether the room had stopped updating.
+ */
+internal const val RECONNECT_GRACE_MILLIS = 3_000L
 
 /**
  * Whether a row repeats the author's header, as the web client's `shouldShowHeader` decides.

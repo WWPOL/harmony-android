@@ -409,11 +409,44 @@ class AppState(
      * The app shows a banner for [LiveStatus.Reconnecting] and nothing at all while it is
      * connected: an always-visible "connected" label is noise that makes a real outage harder
      * to notice.
+     *
+     * It is a *shared* value, so it also has to be a value that cannot outlive what wrote it: a
+     * room that closed while its socket was down left its "Reconnecting" here, and the next room
+     * opened under the previous room's banner until its own socket had joined. [markLive] is
+     * therefore told which room is speaking, and a status from a room that is not the one on
+     * screen is dropped rather than drawn.
      */
     private val _live = MutableStateFlow<LiveStatus>(LiveStatus.Connecting)
     val live: StateFlow<LiveStatus> = _live.asStateFlow()
 
-    fun markLive(status: LiveStatus) { _live.value = status }
+    /**
+     * The room whose socket owns [live], or null when no room is open.
+     *
+     * Set by the room as it opens and cleared as it closes, so a late event from a socket that
+     * is being torn down cannot write over the room that replaced it.
+     */
+    private var liveRoom: String? = null
+
+    /** The room that is opening now owns [live]; anything already reported was another room's. */
+    fun ownLive(room: String) {
+        if (liveRoom == room) return
+        liveRoom = room
+        // A fresh room starts from "nothing to say yet". Carrying the previous room's reconnect
+        // over would put a strip over a channel whose own socket has not even tried.
+        _live.value = LiveStatus.Connecting
+    }
+
+    /** The room is gone, so nothing it said is worth drawing. */
+    fun releaseLive(room: String) {
+        if (liveRoom != room) return
+        liveRoom = null
+        _live.value = LiveStatus.Connecting
+    }
+
+    fun markLive(room: String, status: LiveStatus) {
+        if (liveRoom != room) return
+        _live.value = status
+    }
 
     /**
      * Something to skip the reconnect backoff: the person pressed Retry, or the device regained

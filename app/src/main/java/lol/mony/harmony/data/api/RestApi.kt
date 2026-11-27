@@ -334,14 +334,17 @@ class RestApi(
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, error: java.io.IOException) {
                     if (!continuation.isActive) return
-                    continuation.resumeWithException(error)
+                    // The same mapping `networkResult` applies, because this path does not go
+                    // through it: an upload that fails on a network that is gone was the one
+                    // place left showing `Unable to resolve host "…"` in a banner.
+                    continuation.resumeWithException(error.asSentence())
                 }
 
                 override fun onResponse(call: Call, response: Response) {
                     val answer = try {
                         response.use { HttpAnswer(it.code, it.body.string(), it.header("Content-Range")) }
                     } catch (error: java.io.IOException) {
-                        if (continuation.isActive) continuation.resumeWithException(error)
+                        if (continuation.isActive) continuation.resumeWithException(error.asSentence())
                         return
                     }
                     if (continuation.isActive) continuation.resume(answer)

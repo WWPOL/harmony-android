@@ -77,6 +77,26 @@ says the app is reconnecting and offers to skip the wait, and nothing at all whi
 The socket is the only writer of that state; a failed REST read says a page did not load, not
 that the connection is down.
 
+Three rules keep that banner from becoming the noise the app used to be:
+
+- **It belongs to the room that is open.** `AppState.ownLive`/`releaseLive` are called by the
+  room as it opens and closes, and a status from any other room is dropped. Before this, a
+  channel closed while its socket was down left its "Reconnecting" in the shared state, and the
+  next channel opened under the previous channel's banner.
+- **A blip that heals is not news.** `ConnectionBanner` holds the reconnect back for
+  `RECONNECT_GRACE_MILLIS` (3 s). A handover or a radio waking is back inside that, and draws
+  nothing at all; an outage that lasts is reported, and its attempt count then updates in place.
+  A refusal is drawn at once, because waiting would only delay the one thing a person can act
+  on.
+- **A transport failure is a sentence, not an exception's message.** `data/api/Transport.kt`
+  maps every `IOException` to `Offline` with copy a person can read, so a screen that shows
+  `error.message` no longer prints `Unable to resolve host "…": No address associated with
+  hostname`. The instance's own refusals (`ApiException`) and this app's own checks keep their
+  wording, because those say something actionable.
+- **A refresh that fails over rows already on screen says nothing.** The connection strip above
+  it is the place for "the connection was lost"; repeating it in the room's own error banner is
+  what showed two disconnected notices at once.
+
 ```
 app/src/main/java/lol/mony/harmony/
   AppContainer.kt   the dependency graph, built once per process

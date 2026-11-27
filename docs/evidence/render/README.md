@@ -156,7 +156,9 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
 - `connection-reconnecting.png` -- a room whose live connection dropped: the banner
   says the app is putting it back, counts the attempt, and offers to skip the wait.
   `connection-unavailable.png` is the other banner state, an instance that refused
-  the join, where no retry on a timer can help.
+  the join, where no retry on a timer can help. The capture is of an outage that
+  *lasted*: `ReconnectBannerRenderTest` also pins that a drop which heals inside the
+  grace period draws no strip at all, and that a refusal is drawn without waiting.
 - `swipe-to-reply-direction.png` -- a message row held mid-drag: it has moved
   away from the start edge and the reply arrow is on the trailing edge it
   uncovered. This one needs no instance -- `SwipeToReplyTest` drives the
