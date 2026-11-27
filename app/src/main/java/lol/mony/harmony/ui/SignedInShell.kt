@@ -58,6 +58,10 @@ fun SignedInShell(
     val unread by state.unread.collectAsState()
     val selectedServerId by state.selectedServerId.collectAsState()
     val showingDms by state.showingDms.collectAsState()
+    val openChannelId by state.openChannelId.collectAsState()
+    val openConversationId by state.openConversationId.collectAsState()
+    // Whether a room is open, which is what the bar stands down for on a phone.
+    val roomOpen = openChannelId != null || openConversationId != null
     val signedIn = state.auth.state.collectAsState().value as? AuthState.SignedIn
     val baseUrl = signedIn?.endpoint?.baseUrl
 
@@ -167,6 +171,10 @@ fun SignedInShell(
         onAddServer = { state.showCreateServer.value = true },
         onMore = { more = true },
         moreCurrent = destination != null || more,
+        // A room is not a place to switch spaces from: the bar hides while one is open on a
+        // phone and comes back with the list. A wide window keeps its rail, which is beside the
+        // content rather than under it.
+        hideBar = destination == null && roomOpen,
         baseUrl = baseUrl,
     ) { layout ->
         // Back leaves a rare destination for the conversation before it leaves the app, which is

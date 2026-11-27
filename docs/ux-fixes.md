@@ -364,12 +364,237 @@ reactor per pill, which is the N+1 the page-level read exists to avoid. Drawing 
 phone. Naming a bridged person by the bridge's bot row -- which is what reading `bot_id` first
 would do -- is worse than "Someone", because it is confidently wrong.
 
+## 11. The space bar under a channel, and seven more from one report
+
+A single session with the built APK turned up seven things that are the same shape: the app drew
+a control that was not about the screen it was on. Each is below with what it was and what it is
+now. The design pass that produced them is recorded in
+[.agents/skills/ui-ux-pro-max](../.agents/skills/ui-ux-pro-max) -- see "The design skill" at the
+end of this section for why it lives there and not in `~/.claude`.
+
+### 11a. The bottom bar was drawn under a room
+
+**The report:** "the bottom bar showing home and your servers is a bit unnecessary feeling when
+you're viewing a channel."
+
+It was. The bar's job is choosing a *space* -- Home or a server -- and a room is not a space: it
+is the thing inside one. Drawn under a room it cost the message list about 64dp of the height a
+phone has least of, for a control whose whole purpose is navigating *away* from what is being
+read.
+
+**Fix.** `HarmonyShell` takes `hideBar`, and `SignedInShell` sets it while a room is open. On a
+compact window the bar is not composed at all, and the content takes back the bottom inset the
+bar used to own -- so the room is not merely taller, it reaches the navigation bar rather than
+stopping above it. A room is left the three ways a messaging app leaves one: the back arrow, the
+system's back gesture, or a drag out of the start edge (11f). The bar returns with the list it
+belongs to.
+
+A wide window keeps its rail. A rail is a column *beside* the content, so it costs the list no
+height and is where switching server while reading is one tap; the report was about a phone's
+bottom bar and a change that removed the rail as well would take away the navigation the wide
+layout is built around. `RoomKeepsTheSpaceRailTest` is the guard.
+
+**Alternatives rejected.** Keeping the bar and making it shorter fixes nothing: the complaint is
+that it is not about the screen, not that it is tall. Hiding it only while the keyboard is up
+would leave the reading case -- the one reported -- unchanged. Auto-hiding on scroll is worse
+than either, because a navigation bar that slides away while a thumb is moving is a control a
+person has to catch.
+
+### 11b. Videos had no player
+
+**The report:** "videos do not have a built in player."
+
+A video attachment drew a card reading `Video: standup.mp4` with a play glyph on it, and tapping
+it opened a bottom sheet offering the file to the browser. The app could *send* a video and could
+not *watch* one.
+
+**Fix.** `ui/components/VideoPlayer.kt`: Android's own media stack -- `ExoPlayer` behind the
+platform's `PlayerView` -- in the message row. Transport controls, seeking, the scrub bar and
+their accessibility come from the platform rather than from a second implementation that would
+be worse at all four. `playWhenReady = false` is deliberate: a channel of videos that all started
+on their own would spend the person's data and fill the room with sound nobody asked for. The
+player is released by `DisposableEffect` when its row is recycled, so scrolling past a video does
+not leak a decoder per video.
+
+A video opened from the attachment sheet gets the same player in a full-window dialog.
+
+**Dependency.** `androidx.media3:media3-exoplayer` and `media3-ui` 1.11.1, pinned in
+`gradle/libs.versions.toml`. They are the only new dependencies this change adds.
+
+**Alternatives rejected.** A WebView around an HTML `<video>` would bring a browser engine in for
+one element and lose the platform's media session, PiP and captions. `MediaPlayer` plus a
+hand-drawn control bar is the same work as `PlayerView` done worse. Autoplay is the reference
+client's behaviour for a *focused* video only, and there is no focused-video state here.
+
+### 11c. A picture opened into something smaller than itself
+
+**The report:** "when you click an image it should open a fullscreen viewer where you can zoom in
+and such."
+
+It opened a `ModalBottomSheet` with a 360dp copy of a picture that was already drawn in the row
+at up to 280dp. The viewer was smaller than the thing it was viewing and could not be looked at
+more closely.
+
+**Fix.** `ui/components/FullscreenImageViewer.kt`: a full-window `Dialog` over a black scrim.
+Pinch enlarges, a double tap toggles fit/2.5x about the point the finger landed, a drag pans, a
+tap or the close button closes it, and back closes it. Three rules keep the zoom from becoming a
+trap: the pan is clamped to the picture's own overflow, zooming back to fit recentres, and the
+zoom has **buttons** as well as gestures -- a pinch is the fast way and not the only way, which
+is the same rule the reaction gestures follow. The zoom level is drawn in words, so a screenshot
+and a screen reader both have something to say.
+
+**Alternatives rejected.** A third-party zoom library for one screen is a dependency for a
+`graphicsLayer` and two gesture detectors. Zooming the picture *inside* the message row would
+fight the list's vertical scroll.
+
+### 11d. A channel reopened a month back
+
+**The report:** "the app does not seem to remember where you were most recently in a channel and
+will often start you scrolled up a month before the most recent messages, even if you've already
+scrolled all the way down before."
+
+Two faults, and both had to go:
+
+1. The room scrolled to `room.rows.lastIndex` every time it composed, where `room` came from the
+   `RoomCache` -- the *first page* of history that was loaded. A channel whose first page was a
+   month old therefore opened a month back, and the refresh that followed appended the newest
+   messages *below* where the list already was. Scrolling to the end of the cache is not scrolling
+   to the end of the channel.
+2. Nothing remembered where the person had got to, so even a correct end-of-list was the end of a
+   list that started at the top of the first page.
+
+**Fix.** `SessionStore.lastReadMessage(room)` / `saveLastReadMessage(room, id)`: the id of the row
+at the top of the channel when it was left, keyed by account and instance like the drafts. An id
+and not an index, because messages arrive while a channel is closed -- the index that was the top
+is a different message by the time the channel reopens, while the id still names the same one. A
+channel left at its end stores **no** anchor, so the ordinary case -- read the newest, close it --
+opens at the newest next time rather than stranding the person a page back as soon as something
+arrives.
+
+The room reads the anchor once per opening, scrolls to it, and writes it back when the list
+settles (not on every frame of a fling: a fling crosses dozens of rows and each would be a
+DataStore write).
+
+**Alternatives rejected.** Storing the index would be wrong for the reason above. Storing the
+pixel offset is wrong as soon as a font size or a window width changes. Remembering the *newest*
+message and always opening at it is what the app effectively did, and it is the bug.
+
+### 11e. A reply did not say what it answered
+
+**The report:** "make it so the reply ui shows what it is replying to with a brief preview just
+like discord."
+
+The composer's banner said `Replying to Noah: the first sixty characters…` in one grey line, and
+the message row drew the bare word **Reply**. Neither named the thing being answered in a shape a
+person recognises, and the banner could not answer the question it raised -- "which message is
+this?".
+
+**Fix.** `ui/components/ReplyPreview.kt`, two composables:
+
+- `ReplyPreview` above the composer: a card with the accent bar, the author's name in the accent
+  colour, a muted snippet of the gist, a glyph naming the attachment kind when there is one, and
+  a tap that scrolls to the original. The dismiss is its own 48dp target so a thumb reaching for
+  "cancel" never jumps the list instead.
+- `ReplyReference` in the row: the same information at the size of one line, above the author's
+  name, which is where it already was -- it now says *what* rather than *that*.
+
+A reply whose original is older than the loaded history says "Reply" alone, which is what it drew
+for every reply before. A profile that has not been looked up reads as a deleted account, so the
+caller passes the name it already resolved for the original's own row rather than resolving it a
+second time.
+
+`replySnippet` reads the message's **text parts**, not `plainText`: `plainText` renders every
+attachment as this app's own placeholder (`[video: attachment]`), and a quote that repeated those
+would be a quote of the app's vocabulary rather than of the message. A message with no words is
+named by its kind -- Photo, Video, Sticker, Poll, Link.
+
+**Alternatives rejected.** Reusing the bottom sheet's action list as the quote is a sheet where a
+line is needed. Drawing the original's whole body above the composer would push the field off a
+phone with the keyboard up.
+
+### 11f. The swipe to the channel list did not fire
+
+**The report:** "the swipe left to right gesture does not open the channel list."
+
+`SwipeToChannelList` existed and was wired around the room. It only claimed a drag whose finger
+landed within **24dp of the start edge**, and that is the explanation for the report:
+
+- 24dp is inside the band Android's own back gesture owns on a gesture-navigation phone, so the
+  system took almost every drag the app was waiting for.
+- What was left over was a sliver narrower than a thumb can reliably land in, on the one screen
+  where a person is most likely to be swiping.
+- A three-button device had no such competitor and still made a person aim at a 24dp target to go
+  back, while the same drag anywhere else did nothing at all -- the message row had consumed it.
+
+**Fix.** The pane claims the whole room and decides by **direction**, which is a property of the
+drag rather than of where it began. The reply travels away from the start edge and this travels
+towards it, so the two can never be one drag; a mostly vertical drag is still the list's scroll.
+The composer is measured by the room and handed to the gesture as the one band it must not claim,
+because a horizontal drag in a text field is how a person selects what they wrote.
+
+A drag out of the system's own edge still goes to the system, which closes the room the same way:
+both routes end in the same place, which is the point.
+
+### 11g. The voice channel was see-through
+
+**The report:** "the voice channel ui background is transparent so it looks really odd overlapping
+with the different ui elements."
+
+`ChannelList` draws `VoiceChannelScreen` *inside its own column*, and the screen drew no
+background of its own. The channel list, the app bar and the frame's space bar all showed through
+it, and the call's controls floated over a list of channel names.
+
+**Fix.** The screen is an opaque `Surface` of its own, `fillMaxSize`, tagged `voice-screen`. A call
+is a place, not a sheet: it gets a background and covers what is under it.
+
+### The design skill, and why it is in `.agents`
+
+The pass above was made with **ui-ux-pro-max** (MIT, `nextlevelbuilder/ui-ux-pro-max-skill`),
+installed at [.agents/skills/ui-ux-pro-max](../.agents/skills/ui-ux-pro-max). It carries 141 UX
+guidelines with rationale, 194 product palettes, 51 active styles, 74 font pairings, motion data,
+and stack tables -- `jetpack-compose` among them -- searchable offline with
+`scripts/search.py`, so a query answers from the repository rather than from the model's memory.
+
+`.agents/skills` and not `.claude/skills` on purpose. `.claude` is one client's directory; the
+`.agents` layout is the one Antigravity, the skills CLI and this harness all read, so the skill is
+there for whichever agent works in this repository next rather than only for the one that
+installed it. A user-level copy at `~/.agents/skills` is the other half of that idea and is where
+it belongs for work outside this repository; it is not what is committed here, because a
+repository cannot own a person's home directory.
+
+The skill's own `scripts/search.py` needs Python 3 and nothing else. Two searches drove this
+change and both are recorded above: the video rule is the skill's "auto-play video" guideline
+(*prefer click-to-play; provide pause*), and the viewer's zoom buttons are its "dragging and
+swipe-only interactions have button/keyboard alternatives" checklist item. Its
+`references/pro-rules.md` pre-delivery checklist is what caught the missing 48dp dismiss target
+and the scroll content hidden behind a fixed bar.
+
 ## How this is verified, and what is not
 
 - **JVM render and interaction tests** (`ShellRailTest`, `ReactionGestureTest`,
   `ServerBrandingRenderTest`) draw the real composables under Robolectric's native graphics,
   inject real touches, and assert pixels and node bounds. Each was mutation-checked: reverting
   the inset padding, the collapse rule, the gesture mapping or the bucket names fails them.
+- **This change's seven fixes are pinned by eight test classes**, all of which run in CI with
+  no instance: `RoomHidesTheSpaceBarTest` and `RoomKeepsTheSpaceRailTest` (the bar is gone under a
+  room and the rail is not), `TheRoomReachesTheBottomTest` (the room ends at the window's own
+  bottom, so the bar's inset went to the room and not nowhere), `ReadAnchorTest` (an anchor
+  survives a restart, is per room and per account, and is cleared when a channel was left at its
+  end), `ReplyPreviewRenderTest` / `ReplyReferenceAuthorTest` (the quote names the author and the
+  gist; a quote of a picture says Photo; a reference with no loaded original says "Reply"),
+  `AttachmentKindTest` (a video is a video by type, by mime and by extension, and is never handed
+  to the picture viewer), `VideoAttachmentRenderTest` (a video draws a player and not the old
+  `Video: name` card) and `FullscreenImageViewerTest` (the viewer fills the window, the zoom
+  buttons change the level it announces, and a tap or the close button dismisses it).
+  `SwipeToChannelListTest` covers the gesture itself and `SwipeBackToChannelListJourneyTest` the
+  gesture wired into a real destination.
+- **The captures** are in [evidence/ux-report-2](evidence/ux-report-2/README.md): the reply quote,
+  the reply reference in a row, the full-window viewer at 150%, and the video player in a row.
+  Its README says which test made each and what it does not prove.
+- **What these cannot prove.** The video player is asserted as *present and shaped*, not as
+  *playing*: a JVM test has no decoder and no network, so the tile is drawn with a file that does
+  not exist and the capture shows the platform's own play button and scrub bar over it. Playback,
+  seeking and audio focus need the APK on a device, and are not claimed here.
 - **The keyboard's place is pinned by `KeyboardInsetTest`**, which passes a synthetic 300dp IME
   on a 640dp screen and asserts the content's real bounds: that it ends at the keyboard's top
   edge rather than above it, that the space bar is not drawn behind the keyboard and comes back

@@ -218,118 +218,129 @@ fun VoiceChannelScreen(state: AppState, channel: Channel, onClose: () -> Unit) {
     // The bar says what this screen is and what state the call is in. Its second line is the
     // one thing a person needs before deciding anything: who is already here, or why they
     // cannot join.
-    Column(Modifier.fillMaxSize().imePadding()) {
-        TopAppBar(
-            title = {
-                Column {
-                    Text(channel.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        when {
-                            !configLoaded -> "Checking voice…"
-                            config?.enabled != true -> "Voice is not available on this instance"
-                            config?.mode == "p2p" -> "Peer-to-peer calls are not supported by this client"
-                            inCall -> rosterSummary(connected, myId)
-                            roster.isNotEmpty() -> rosterSummary(null, myId)
-                            else -> "Voice channel"
+    //
+    // The whole screen is an opaque surface of its own. It is opened *over* the channel list --
+    // `ChannelList` draws it inside its own column, and the frame's bar is under both -- so a
+    // screen that drew no background let the channel list, the app bar and the space bar show
+    // through it, and the call's controls floated over a list of channel names. A call is a
+    // place, not a sheet: it gets a background and covers what is under it.
+    Surface(
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.fillMaxSize().testTag("voice-screen"),
+    ) {
+        Column(Modifier.fillMaxSize().imePadding()) {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(channel.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            when {
+                                !configLoaded -> "Checking voice…"
+                                config?.enabled != true -> "Voice is not available on this instance"
+                                config?.mode == "p2p" -> "Peer-to-peer calls are not supported by this client"
+                                inCall -> rosterSummary(connected, myId)
+                                roster.isNotEmpty() -> rosterSummary(null, myId)
+                                else -> "Voice channel"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = {
+                        if (joined) leave()
+                        else { lol.mony.harmony.voice.CallService.stop(context); scope.launch { engine.leave() }; onClose() }
+                    }) { Icon(Icons.Default.Close, "Close") }
+                },
+                actions = {
+                    // Spatial audio is a property of being in a call, so it is offered only there.
+                    // Offering it in the lobby is a control for something that cannot be heard yet.
+                    if (inCall) IconButton(onClick = { spatialOpen = true }) { Icon(Icons.Default.SurroundSound, "Spatial audio") }
+                },
+            )
+            val banner = failure
+            if (banner != null) ErrorBanner(banner) { failure = null }
+            val notice = permissionNotice
+            if (notice != null) ErrorBanner(notice) { permissionNotice = null }
+
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                when {
+                    joining -> LoadingBlock("Joining the call")
+                    callState is CallState.Connecting -> LoadingBlock("Connecting")
+                    callState is CallState.Ended -> CallEnded(
+                        reason = (callState as CallState.Ended).reason,
+                        onRejoin = { join() },
+                        onLeave = { onClose() },
+                    )
+                    inCall -> CallStage(
+                        connected = connected,
+                        roster = roster,
+                        people = people,
+                        myId = myId,
+                        positions = positions,
+                        spatial = spatial,
+                        baseUrl = session.endpoint.baseUrl,
+                        screenShares = screens,
+                        cameras = remoteVideo,
+                        engine = engine,
+                    )
+                    else -> JoinLobby(
+                        channel = channel,
+                        config = config,
+                        loaded = configLoaded,
+                        roster = roster,
+                        people = people,
+                        baseUrl = session.endpoint.baseUrl,
+                        microphoneGranted = microphoneGranted,
+                        onJoin = {
+                            if (!microphoneGranted) microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            join()
                         },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-            },
-            navigationIcon = {
-                IconButton(onClick = {
-                    if (joined) leave()
-                    else { lol.mony.harmony.voice.CallService.stop(context); scope.launch { engine.leave() }; onClose() }
-                }) { Icon(Icons.Default.Close, "Close") }
-            },
-            actions = {
-                // Spatial audio is a property of being in a call, so it is offered only there.
-                // Offering it in the lobby is a control for something that cannot be heard yet.
-                if (inCall) IconButton(onClick = { spatialOpen = true }) { Icon(Icons.Default.SurroundSound, "Spatial audio") }
-            },
-        )
-        val banner = failure
-        if (banner != null) ErrorBanner(banner) { failure = null }
-        val notice = permissionNotice
-        if (notice != null) ErrorBanner(notice) { permissionNotice = null }
+            }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            when {
-                joining -> LoadingBlock("Joining the call")
-                callState is CallState.Connecting -> LoadingBlock("Connecting")
-                callState is CallState.Ended -> CallEnded(
-                    reason = (callState as CallState.Ended).reason,
-                    onRejoin = { join() },
-                    onLeave = { onClose() },
-                )
-                inCall -> CallStage(
-                    connected = connected,
-                    roster = roster,
-                    people = people,
-                    myId = myId,
-                    positions = positions,
-                    spatial = spatial,
-                    baseUrl = session.endpoint.baseUrl,
-                    screenShares = screens,
-                    cameras = remoteVideo,
-                    engine = engine,
-                )
-                else -> JoinLobby(
-                    channel = channel,
-                    config = config,
-                    loaded = configLoaded,
-                    roster = roster,
-                    people = people,
-                    baseUrl = session.endpoint.baseUrl,
+            if (inCall) {
+                CallControls(
+                    controls = controls,
                     microphoneGranted = microphoneGranted,
-                    onJoin = {
-                        if (!microphoneGranted) microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        join()
+                    onMicrophone = {
+                        scope.launch {
+                            if (!microphoneGranted) {
+                                pendingCamera = false
+                                microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            } else engine.setMicrophone(!controls.microphoneOn).onFailure { failure = it.message }
+                        }
                     },
+                    onDeafen = {
+                        scope.launch { engine.setDeafened(!controls.deafened).onFailure { failure = it.message } }
+                    },
+                    onCamera = {
+                        scope.launch {
+                            if (!controls.cameraOn && !cameraGranted) cameraLauncher.launch(Manifest.permission.CAMERA)
+                            else engine.setCamera(!controls.cameraOn).onFailure { failure = it.message }
+                        }
+                    },
+                    onShareScreen = {
+                        if (controls.screenSharing) scope.launch { engine.setScreenSharing(false) }
+                        else {
+                            val manager = context.getSystemService(MediaProjectionManager::class.java)
+                            val intent = manager?.createScreenCaptureIntent()
+                            if (intent != null) projectionLauncher.launch(intent)
+                            else failure = "This device cannot share its screen."
+                        }
+                    },
+                    onSpeaker = { engine.setSpeaker(!controls.speakerOn) },
+                    onLeave = { leave() },
                 )
             }
         }
-
-        if (inCall) {
-            CallControls(
-                controls = controls,
-                microphoneGranted = microphoneGranted,
-                onMicrophone = {
-                    scope.launch {
-                        if (!microphoneGranted) {
-                            pendingCamera = false
-                            microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        } else engine.setMicrophone(!controls.microphoneOn).onFailure { failure = it.message }
-                    }
-                },
-                onDeafen = {
-                    scope.launch { engine.setDeafened(!controls.deafened).onFailure { failure = it.message } }
-                },
-                onCamera = {
-                    scope.launch {
-                        if (!controls.cameraOn && !cameraGranted) cameraLauncher.launch(Manifest.permission.CAMERA)
-                        else engine.setCamera(!controls.cameraOn).onFailure { failure = it.message }
-                    }
-                },
-                onShareScreen = {
-                    if (controls.screenSharing) scope.launch { engine.setScreenSharing(false) }
-                    else {
-                        val manager = context.getSystemService(MediaProjectionManager::class.java)
-                        val intent = manager?.createScreenCaptureIntent()
-                        if (intent != null) projectionLauncher.launch(intent)
-                        else failure = "This device cannot share its screen."
-                    }
-                },
-                onSpeaker = { engine.setSpeaker(!controls.speakerOn) },
-                onLeave = { leave() },
-            )
-        }
     }
-
     if (spatialOpen) {
         SpatialAudioSheet(spatial, onDismiss = { spatialOpen = false }, onChange = { engine.setSpatialSettings(it) })
     }

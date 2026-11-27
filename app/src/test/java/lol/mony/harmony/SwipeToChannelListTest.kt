@@ -142,20 +142,60 @@ class SwipeToChannelListTest {
     }
 
     /**
-     * A rightward drag that does not start at the edge is not a navigation.
+     * A rightward drag from the middle of the room is a navigation too.
      *
-     * Without this, a row would hand the list back whenever it was dragged the wrong way, which
-     * is the opposite of what the two gestures are for.
+     * It used to need the finger within 24dp of the start edge, and that is why the gesture was
+     * reported as not working: 24dp is inside the band Android's own back gesture owns on a
+     * gesture-navigation phone, so the system took almost every drag the app was waiting for,
+     * and the sliver left over was narrower than a thumb can land in. The direction is what
+     * separates this gesture from the reply, and direction is a property of the drag rather than
+     * of where it began -- so the whole room belongs to it.
      */
-    @Test fun aRightwardSwipeFromTheMiddleDoesNotCloseTheRoom() {
+    @Test fun aRightwardSwipeFromTheMiddleClosesTheRoom() {
         pane()
+        // Most of the pane's width, which is past the third that counts as a release. A shorter
+        // drag is a different test (`aShortDragFromTheEdgeSnapsBack`) and would only re-measure
+        // the threshold.
+        val width = compose.onNodeWithTag("room-swipe").fetchSemanticsNode().size.width.toFloat()
         compose.onNodeWithTag("room-swipe").performTouchInput {
             down(center)
+            moveBy(Offset(width * 0.6f, 0f))
+            up()
+        }
+        settle()
+        assertEquals("a rightward drag from anywhere in the room is the list", 1, closes)
+        assertEquals("and it must not also reply", 0, replies)
+    }
+
+    /**
+     * The composer keeps its own horizontal drags.
+     *
+     * A drag in a text field is how a person selects what they wrote. The room measures its
+     * composer and hands the gesture that band to leave alone, so "select this word" never
+     * becomes "leave the channel".
+     */
+    @Test fun aRightwardDragInTheComposerDoesNotCloseTheRoom() {
+        compose.setContent {
+            HarmonyTheme(VisualThemeSettings()) {
+                Surface(Modifier.fillMaxSize()) {
+                    SwipeToChannelList(onClose = { closes++ }, excludedBottom = { 120f }) {
+                        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                            Box(Modifier.fillMaxSize().testTag("row"))
+                        }
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+        closes = 0
+        compose.onNodeWithTag("room-swipe").performTouchInput {
+            // Inside the 120px band at the bottom, which is where the composer is.
+            down(Offset(centerX, height - 40f))
             moveBy(Offset(240f, 0f))
             up()
         }
         settle()
-        assertEquals(0, closes)
+        assertEquals("the composer's own drag must not leave the channel", 0, closes)
     }
 
     /**

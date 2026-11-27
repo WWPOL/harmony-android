@@ -29,9 +29,6 @@ import kotlinx.coroutines.launch
 import lol.mony.harmony.ui.theme.LocalMotion
 import kotlin.math.abs
 
-/** How far from the start edge a finger may land and still be making this gesture. */
-private val StartEdgeBand = 24.dp
-
 /** How much of the pane has to be dragged away before letting go finishes the move. */
 private const val RevealFraction = 0.3f
 
@@ -56,14 +53,11 @@ private const val SettleMillis = 180
  * start edge, this travels *towards* it, so a row that answers a message and a pane that returns
  * to the list can never be the same drag.
  *
- * Three rules keep the two apart, and each is load-bearing:
+ * Two rules keep the two apart, and each is load-bearing:
  *
- * - **The gesture starts at the start edge.** [StartEdgeBand] is a narrow strip, not the pane, so
- *   a drag from the middle of a message is not a navigation, and the reply stays reachable from
- *   anywhere on the row.
  * - **Only the end-wards direction is claimed.** A drag the other way -- or a mostly vertical
  *   one, which is the message list's scroll -- is left entirely alone, so whatever child owns it
- *   still receives every event.
+ *   still receives every event. The reply is the other way, so the two can never be one drag.
  * - **The drag is claimed in the [PointerEventPass.Initial] pass.** A pane that waited for the
  *   main pass would lose the gesture to the row under the finger: the row's own
  *   `detectHorizontalDragGestures` does not care which way the finger went, so it takes any
@@ -72,10 +66,18 @@ private const val SettleMillis = 180
  * The sign comes from [LocalLayoutDirection], as it does for the reply, so a mirrored layout
  * starts the gesture at its own start edge and moves it the other way.
  *
- * A phone in gesture navigation hands this strip to the system's back gesture first; that closes
- * the room too, so both routes end in the same place. This one is what makes the same move
- * reachable on a three-button device, from a drag that begins just inside the edge, and with the
- * pane following the finger rather than jumping.
+ * **It claims the whole pane, not a strip at its edge.** It used to need the finger to land
+ * within 24dp of the start edge, and that is why the gesture was reported as not working: 24dp
+ * is inside the band Android's own back gesture owns on a gesture-navigation phone, so the
+ * system took almost every drag the app was waiting for, and the sliver left over was narrower
+ * than a thumb can reliably land in. A three-button device had no such competitor and still made
+ * a person aim at a 24dp target to go back -- while the same drag anywhere else on the screen
+ * did nothing at all, because the message row had consumed it and clamped it to zero.
+ *
+ * The direction is what separates this from the reply, and direction is a property of the drag
+ * rather than of where it began, so the whole message area can belong to it. A drag out of the
+ * system's own edge still goes to the system, which closes the room the same way: both routes
+ * end in the same place, which is the point.
  *
  * [onClose] is called once the pane has finished sliding away, so the room closes with its own
  * content drawn rather than as a blank surface, and the list underneath is uncovered by the
@@ -86,6 +88,16 @@ private const val SettleMillis = 180
 internal fun SwipeToChannelList(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * How much of the pane's bottom is not the pane's to claim, in pixels.
+     *
+     * The composer is there, and a text field's own drag is how a person selects what they
+     * wrote. A pane that claimed every rightward drag in the room would turn "select this word"
+     * into "leave the channel", which is a worse bug than the one this gesture fixes. The
+     * caller measures the composer and passes its height; the message area above it is claimed
+     * whole, which is the part a person actually swipes across.
+     */
+    excludedBottom: () -> Float = { 0f },
     content: @Composable () -> Unit,
 ) {
     // How far the pane has moved towards the end edge, in pixels: 0 while it covers the list.
@@ -97,10 +109,12 @@ internal fun SwipeToChannelList(
     // Towards the end edge: positive (rightwards) in a left-to-right layout, negative in a
     // right-to-left one, where the start edge is on the right.
     val towardsEnd = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1f else 1f
-    val bandPx = with(density) { StartEdgeBand.toPx() }
     // `toPx()` is the dp-to-pixel factor, so these are pixels and pixels per second.
     val flingDistancePx = with(density) { FlingDistance.toPx() }
     val flingVelocityPx = with(density) { FlingVelocity.toPx() }
+    // The exclusion is read through a lambda, so a caller that measures its composer later does
+    // not have to restart the gesture detector to tell it the height.
+    val excluded by rememberUpdatedState(excludedBottom)
     // The gesture block outlives a recomposition, so it must not keep the callback it was first
     // composed with.
     val close by rememberUpdatedState(onClose)
@@ -115,9 +129,9 @@ internal fun SwipeToChannelList(
         modifier
             .fillMaxSize()
             .testTag("room-swipe")
-            // Outside the layer, so the strip this reads is the pane's own edge rather than the
-            // edge it has been dragged to.
-            .pointerInput(towardsEnd, bandPx, flingDistancePx, flingVelocityPx) {
+            // Outside the layer, so the size this reads is the pane's own rather than the one it
+            // has been dragged to.
+            .pointerInput(towardsEnd, flingDistancePx, flingVelocityPx) {
                 awaitEachGesture {
                     val down = awaitFirstDown(
                         requireUnconsumed = false,
@@ -126,11 +140,9 @@ internal fun SwipeToChannelList(
                     if (closed) return@awaitEachGesture
                     settling?.cancel()
                     val paneWidth = size.width.toFloat()
-                    // The start edge, whichever side of a mirrored layout that is.
-                    val atStartEdge =
-                        if (towardsEnd > 0f) down.position.x <= bandPx
-                        else down.position.x >= paneWidth - bandPx
-                    if (!atStartEdge) return@awaitEachGesture
+                    // The composer keeps its own horizontal drags.
+                    val floor = size.height - excluded()
+                    if (down.position.y > floor) return@awaitEachGesture
 
                     val slop = viewConfiguration.touchSlop
                     val tracker = VelocityTracker()

@@ -18,6 +18,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -111,9 +114,22 @@ fun ChatsDestination(
                 // thumb: it slides the room off the list of the server it belongs to. Only the
                 // one-pane layout has a list hidden behind the room to reveal, which is why the
                 // gesture lives here and not around both layouts.
-                SwipeToChannelList(onClose = closeRoom) {
+                // The composer is measured as the room draws it and handed to the gesture as
+                // the band it must not claim: selecting text in the field is a horizontal drag
+                // too, and losing a selection to "leave the channel" would be worse than the bug
+                // this fixes. Everything above the composer -- the message list, the app bar, the
+                // reply preview -- belongs to the swipe.
+                var composerHeight by remember { mutableFloatStateOf(0f) }
+                SwipeToChannelList(
+                    onClose = closeRoom,
+                    excludedBottom = { composerHeight },
+                ) {
                     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                        RoomPane(state, channelId, conversationId, appearance, onBack = closeRoom)
+                        RoomPane(
+                            state, channelId, conversationId, appearance,
+                            onBack = closeRoom,
+                            onComposerHeight = { composerHeight = it.toFloat() },
+                        )
                     }
                 }
             }
@@ -134,6 +150,8 @@ private fun RoomPane(
     conversationId: String?,
     appearance: VisualThemeSettings,
     onBack: () -> Unit,
+    /** The composer's drawn height, so the pane's swipe leaves the text field alone. */
+    onComposerHeight: (Int) -> Unit = {},
 ) {
     val id = channelId ?: conversationId ?: return
     RoomScreen(
@@ -142,6 +160,7 @@ private fun RoomPane(
         direct = channelId == null,
         appearance = appearance,
         onBack = onBack,
+        onComposerHeight = onComposerHeight,
     )
 }
 

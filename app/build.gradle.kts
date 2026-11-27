@@ -222,6 +222,11 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.coil.compose)
+    // Media3 is Android's own media stack: a video attachment gets a real player -- transport
+    // controls, seeking, a scrub bar -- instead of a card that says "Video: name.mp4" and cannot
+    // be watched. The UI module is the standard PlayerView; ExoPlayer is what plays the object.
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
     // LiveKit is the transport Harmony's own voice stack speaks; the web client uses its JS
     // SDK against the same rooms, so a call placed here is a call the web client can hear.
     implementation(libs.livekit.android)

@@ -69,7 +69,21 @@ import java.util.UUID
  *   so the two gestures cannot be confused. See [SwipeToReplyRow].
  */
 @Composable
-fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: VisualThemeSettings, onBack: () -> Unit) {
+fun RoomScreen(
+    state: AppState,
+    roomId: String,
+    direct: Boolean,
+    appearance: VisualThemeSettings,
+    onBack: () -> Unit,
+    /**
+     * Reports the composer's drawn height to whoever owns the pane's swipe gesture.
+     *
+     * The drag that returns to the channel list claims the whole room, because the direction it
+     * travels is what separates it from the reply. The composer is the one part that must not be
+     * claimed: a horizontal drag in a text field is how a person selects what they wrote.
+     */
+    onComposerHeight: (Int) -> Unit = {},
+) {
     val session = state.auth.state.collectAsState().value as? AuthState.SignedIn ?: return
     val myId = session.profile?.id ?: return
     val scope = rememberCoroutineScope()
@@ -484,11 +498,64 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
     LaunchedEffect(draftKey) {
         draft = state.sessionStore.draft(draftKey); draftReady = true
     }
+    // Where this room was left, restored when it opens.
+    //
+    // A channel is not a page: a person leaves it wherever they had got to, and reopening at
+    // the newest message made them find their place again -- the reported "it starts you
+    // scrolled up a month before the most recent messages". The anchor is a message id rather
+    // than an index, because messages arrive while a channel is closed.
+    //
+    // The list lands in one of three places, and each has one answer:
+    //
+    //  - The room is still in memory and has been read this visit: the list keeps its own
+    //    position, so nothing is scrolled at all. That is what makes stepping out of a channel
+    //    and back instant, and it is the common case.
+    //  - An anchor is remembered and the row it names is loaded: the list opens on that row, at
+    //    the top, which is exactly the place it was left.
+    //  - Nothing is remembered, or the row is not in the page that came back: the newest
+    //    message, which is where a channel nobody has read should open.
+    //
+    // The scroll waits for rows to exist. A room that is opened for the first time has none
+    // until its read answers, and an effect that gave up then would leave every new room at the
+    // top of its history -- which is the bug being fixed, in a different disguise.
+    var restoredAnchor by remember(cacheKey) { mutableStateOf<String?>(null) }
+    var anchorRead by remember(cacheKey) { mutableStateOf(false) }
+    var anchorPlaced by remember(cacheKey) { mutableStateOf(false) }
     LaunchedEffect(cacheKey) {
-        // The cached rows paint first; the refresh then merges into them. The scroll goes to
-        // the newest row only when the room is opened, never on a later refresh.
-        if (room.rows.isNotEmpty() && state.focusMessageId.value == null) list.scrollToItem(room.rows.lastIndex)
+        restoredAnchor = runCatching { state.sessionStore.lastReadMessage(draftKey) }.getOrNull()
+        anchorRead = true
         load()
+    }
+    LaunchedEffect(cacheKey, anchorRead, room.rows.size) {
+        if (!anchorRead || anchorPlaced) return@LaunchedEffect
+        // A notification's target owns the scroll until it has been found; see below.
+        if (state.focusMessageId.value != null || focusId != null) return@LaunchedEffect
+        if (room.rows.isEmpty()) return@LaunchedEffect
+        // The "Load older" button is item 0 while there is history behind this page, so a row's
+        // position in the list is its index among the rows plus that one item.
+        val shift = if (room.moreOlder) 1 else 0
+        val anchor = restoredAnchor
+        val index = if (anchor != null) room.rows.indexOfFirst { it.message.id == anchor } else -1
+        list.scrollToItem(if (index >= 0) index + shift else room.rows.lastIndex + shift)
+        anchorPlaced = true
+    }
+    // Remembers where the person had got to as they scroll, so the next visit starts there.
+    //
+    // It records the first *visible* row rather than the list's index, and it is debounced by
+    // the list's own settled state: a fling crosses dozens of rows and each one would be a
+    // DataStore write. A channel left at its end is remembered as no anchor at all, so the
+    // ordinary case -- read the newest, close it -- opens at the newest next time.
+    LaunchedEffect(cacheKey, list.isScrollInProgress) {
+        if (list.isScrollInProgress || !anchorPlaced) return@LaunchedEffect
+        val snapshot = state.rooms.snapshot(cacheKey) ?: return@LaunchedEffect
+        val rowsNow = snapshot.rows
+        if (rowsNow.isEmpty()) return@LaunchedEffect
+        // The same shift as above: item 0 is the "Load older" button while there is more.
+        val shift = if (snapshot.moreOlder) 1 else 0
+        val top = list.firstVisibleItemIndex
+        val anchor = rowsNow.getOrNull((top - shift).coerceIn(0, rowsNow.lastIndex))?.message?.id
+        val atEnd = top + list.layoutInfo.visibleItemsInfo.size >= list.layoutInfo.totalItemsCount
+        runCatching { state.sessionStore.saveLastReadMessage(draftKey, if (atEnd) null else anchor) }
     }
     // Pages back until the target message is on screen, then scrolls to it and marks it. A
     // message the account can no longer see is reported once, without its text.
@@ -706,18 +773,50 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                         signedUrl = { path -> media[path]?.url },
                         onOpenAttachment = { part -> viewing = part },
                         onOpenLink = openLink,
+                        // The original a reply names, when it is in the loaded history. A reply
+                        // to a message older than the page the channel opened on says "Reply"
+                        // alone rather than naming the wrong one. Its author is the one the
+                        // original's own row already resolved, so a bridged or webhook author
+                        // reads the same in both places.
+                        replyToMessage = row.message.replyTo
+                            ?.let { id -> rows.firstOrNull { it.message.id == id }?.message },
+                        replyToAuthorName = row.message.replyTo?.let { id ->
+                            rows.firstOrNull { it.message.id == id }?.message
+                                ?.author(people, bots)?.name
+                        },
+                        onJumpToReply = row.message.replyTo?.let { id ->
+                            {
+                                val target = rows.indexOfFirst { it.message.id == id }
+                                if (target >= 0) {
+                                    // The "Load older" button is item 0 while there is more
+                                    // history, so a row's list position is its index plus one.
+                                    val shift = if (room.moreOlder) 1 else 0
+                                    scope.launch { list.animateScrollToItem(target + shift) }
+                                    highlighted = id
+                                }
+                            }
+                        },
                     )
                 }
             }
         }
-        if (openReply != null) Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp).testTag("reply-banner"), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.AutoMirrored.Filled.Reply, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Replying to " + openReply.author(people, bots).name + ": " + openReply.plainText.take(60),
-                    Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                IconButton(onClick = { reply = null }) { Icon(Icons.Default.Close, "Cancel reply") }
-            }
+        // What the reply answers, as a card rather than a sentence: the author, the gist, the
+        // kind of attachment if there is one, and a tap that scrolls to the original. See
+        // [ReplyPreview] for why the old one-line banner was not enough.
+        if (openReply != null) {
+            val original = openReply
+            val originalIndex = rows.indexOfFirst { it.message.id == original.id }
+            ReplyPreview(
+                author = original.author(people, bots).name,
+                message = original,
+                onDismiss = { reply = null },
+                onJump = if (originalIndex >= 0) ({
+                    reply = null
+                    val shift = if (room.moreOlder) 1 else 0
+                    scope.launch { list.animateScrollToItem(originalIndex + shift) }
+                    highlighted = original.id
+                }) else null,
+            )
         }
         // The composer is a docked surface, not a text field with a button beside it: the field
         // and its send action share one rounded container, which is what makes it read as a
@@ -728,7 +827,9 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
             color = LocalHarmonyColors.current.surfaceRaised,
             shape = HarmonyShape.sheet,
             tonalElevation = 3.dp,
-            modifier = Modifier.fillMaxWidth().testTag("composer-surface"),
+            modifier = Modifier.fillMaxWidth()
+                .onSizeChanged { onComposerHeight(it.height) }
+                .testTag("composer-surface"),
         ) {
             Column(Modifier.fillMaxWidth()) {
                 // The files waiting to go with this message sit above the field they belong to,
@@ -1107,9 +1208,14 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
             }
         }
     }
-    // An attachment, opened: the whole picture, its name and its size, and what can be done
-    // with it. A private object's URL is signed for six hours, so the sheet asks again when it
-    // is opened rather than trusting a URL that may have expired since the page was read.
+    // An attachment, opened. A picture gets the whole window with zoom and pan -- the sheet it
+    // used to get drew a 360dp copy of something already drawn in the row, which is smaller than
+    // what the person tapped and cannot be looked at closer. A video gets the same window with
+    // the player in it. Anything else keeps a sheet, because "open this in a browser" is a
+    // sentence and a button, not a viewer.
+    //
+    // A private object's URL is signed for six hours, so the viewer asks again when it opens
+    // rather than trusting a URL that may have expired since the page was read.
     if (openViewing != null) {
         val part = openViewing
         val path = part.path?.takeIf(lol.mony.harmony.data.repo.MessageMedia::isPath)
@@ -1121,39 +1227,67 @@ fun RoomScreen(state: AppState, roomId: String, direct: Boolean, appearance: Vis
                 state.signMedia(session.endpoint, token, listOf(wanted))
             }
         }
-        ModalBottomSheet(onDismissRequest = { viewing = null }) {
-            Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                if (url != null && (part.fileType == "image" || part.mimeType?.startsWith("image/") == true)) {
-                    AsyncImage(
-                        model = url, contentDescription = part.altText ?: part.fileName ?: "Attachment",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.widthIn(max = 360.dp).heightIn(max = 480.dp)
-                            .clip(MaterialTheme.shapes.medium).testTag("attachment-sheet-image"),
+        val name = part.fileName ?: part.altText ?: "Attachment"
+        val size = part.fileSize?.let { humanSize(it) }
+        val supporting = listOfNotNull(size, part.altText?.takeIf { it.isNotBlank() && it != name })
+            .joinToString(" · ")
+        when {
+            url != null && part.isImagePart() -> FullscreenImageViewer(
+                url = url,
+                description = part.altText ?: part.fileName,
+                supporting = supporting,
+                onDismiss = { viewing = null },
+                onOpen = { viewing = null; openLink(url) },
+                openLabel = "Open in browser",
+            )
+            url != null && part.isVideoPart() -> androidx.compose.ui.window.Dialog(
+                onDismissRequest = { viewing = null },
+                properties = androidx.compose.ui.window.DialogProperties(
+                    usePlatformDefaultWidth = false, decorFitsSystemWindows = false,
+                ),
+            ) {
+                androidx.compose.foundation.layout.Box(
+                    Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .testTag("video-viewer"),
+                ) {
+                    VideoPlayer(
+                        url = url,
+                        label = name,
+                        compact = false,
+                        key = part.path ?: part.url ?: url,
+                        modifier = Modifier.fillMaxSize().align(Alignment.Center),
                     )
-                } else if (url != null) {
-                    Text("Open in your browser", style = MaterialTheme.typography.bodyMedium)
-                } else {
+                    IconButton(
+                        onClick = { viewing = null },
+                        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).testTag("video-viewer-close"),
+                    ) { Icon(Icons.Default.Close, "Close", tint = androidx.compose.ui.graphics.Color.White) }
+                }
+            }
+            else -> ModalBottomSheet(onDismissRequest = { viewing = null }) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        if (path != null) "This file is not available to your account."
+                        if (url != null) "This file opens in your browser."
+                        else if (path != null) "This file is not available to your account."
                         else "This attachment has no file.",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                Spacer(Modifier.height(12.dp))
-                Text(part.fileName ?: part.altText ?: "Attachment",
-                    style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("attachment-sheet-name"))
-                part.fileSize?.let { Text(humanSize(it), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                if (!part.altText.isNullOrBlank()) Text(part.altText!!, style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 8.dp))
-                if (url != null) {
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = { viewing = null; runCatching { uriHandler.openUri(url) } }, modifier = Modifier.testTag("attachment-open")) {
-                        Text("Open")
+                    Text(name, style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.testTag("attachment-sheet-name"))
+                    size?.let { Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    if (!part.altText.isNullOrBlank()) Text(part.altText!!, style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 8.dp))
+                    if (url != null) {
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = { viewing = null; openLink(url) },
+                            modifier = Modifier.testTag("attachment-open")) { Text("Open") }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { viewing = null }) { Text("Close") }
                 }
-                Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { viewing = null }) { Text("Close") }
             }
         }
     }
@@ -1328,10 +1462,33 @@ internal fun MessageRow(
     signedUrl: ((String) -> String?)? = null,
     onOpenAttachment: ((ContentPart) -> Unit)? = null,
     onOpenLink: ((String) -> Unit)? = null,
+    /**
+     * The message this row answers, when it is loaded, so the reference can name it.
+     *
+     * Null is the honest state for a reply whose original is older than the loaded history: the
+     * reference then draws the word "Reply" alone, which is what it drew for every reply before.
+     */
+    replyToMessage: Message? = null,
+    /**
+     * What that original's author is called.
+     *
+     * Passed in rather than resolved here, because the caller already resolved it for the
+     * original's own row: resolving it again would need the people and bots maps, and a profile
+     * the caller has not loaded would read as a deleted account.
+     */
+    replyToAuthorName: String? = null,
+    /** What tapping the reference does: scroll to the original. Null when it is not loaded. */
+    onJumpToReply: (() -> Unit)? = null,
 ) {
     val message = row.message
     val sizes = LocalSizes.current
     val name = if (message.isSystem) "System" else author.name
+    // What the reply reference above the name says: the original's author and gist, when the
+    // original is in the loaded history. A reference with nothing behind it still says "Reply".
+    val replyAuthor = if (replyToMessage != null) replyToAuthorName else null
+    val replySnippet = replyToMessage?.let { original ->
+        replySnippet(original, attachmentKind(original))
+    }
     val time = runCatching { DateTimeFormatter.ofPattern(if (appearance.use24HourTime) "HH:mm" else "h:mm a")
         .withZone(ZoneId.systemDefault()).format(Instant.parse(message.createdAt)) }.getOrDefault("")
 
@@ -1369,15 +1526,14 @@ internal fun MessageRow(
             Column(Modifier.weight(1f)) {
                 // The reply reference goes first, above the name: a message that answers
                 // something says so before it says who wrote it, so it reads as the context
-                // the message answers rather than as its opening line.
-                if (message.replyTo != null) Row(verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.testTag("reply-reference")) {
-                    Icon(Icons.AutoMirrored.Filled.Reply, null, Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Reply", style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                // the message answers rather than as its opening line. It names the author and
+                // the gist of what was answered -- a bare "Reply" made a person scroll back to
+                // find out what it was -- and taps through to the original when it is loaded.
+                if (message.replyTo != null) ReplyReference(
+                    author = replyAuthor,
+                    snippet = replySnippet,
+                    onJump = onJumpToReply,
+                )
                 if (showHeader) Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(name, fontWeight = FontWeight.Medium, fontSize = 16.sp, maxLines = 1,

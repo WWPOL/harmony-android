@@ -8,6 +8,7 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import lol.mony.harmony.RenderHarness.capture
@@ -19,6 +20,7 @@ import lol.mony.harmony.data.voice.CallControls as Controls
 import lol.mony.harmony.data.voice.CallParticipant
 import lol.mony.harmony.data.voice.CallState
 import lol.mony.harmony.data.voice.SpatialAudioSettings
+import lol.mony.harmony.ui.AppState
 import lol.mony.harmony.ui.components.SectionHeader
 import lol.mony.harmony.ui.screens.chat.CallControls
 import lol.mony.harmony.ui.screens.chat.CallEnded
@@ -292,5 +294,62 @@ class VoicePageRenderTest {
         assertEquals("1 other person in the call", rosterSummary(connected("a"), "me"))
         assertEquals("3 people in the call", rosterSummary(connected("a", "b", "c"), "me"))
         assertEquals("Voice channel", rosterSummary(null, "me"))
+    }
+}
+
+/**
+ * The voice screen covers what is under it.
+ *
+ * The report: "the voice channel ui background is transparent so it looks really odd overlapping
+ * with the different ui elements". It was, and the reason is structural -- `ChannelList` draws
+ * `VoiceChannelScreen` inside its own column rather than as a destination of its own, so a screen
+ * with no background of its own let the channel list, the app bar and the frame's space bar show
+ * through it.
+ *
+ * The assertion is on the screen's own surface, which is what a background is: the node exists,
+ * it fills the window, and it carries the app's background colour rather than nothing. A screen
+ * that went back to drawing no surface fails all three.
+ */
+@RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(sdk = [30], qualifiers = "w400dp-h900dp-xhdpi")
+class VoiceScreenIsOpaqueTest {
+    @get:Rule val compose = createComposeRule()
+
+    private fun signedIn(instance: FixtureInstance): AppState = kotlinx.coroutines.runBlocking {
+        val state = AppState(RenderHarness.container())
+        state.auth.chooseInstance(lol.mony.harmony.data.api.Endpoint(instance.baseUrl, "fixture-anon"), "Fixture")
+        val result = state.auth.signIn("ada@example.test", "fixture-password")
+        assertTrue("the fixture refused the sign-in: $result", result is lol.mony.harmony.data.api.AuthApi.Result.Ok)
+        state.onSignedIn(state.auth.state.value as lol.mony.harmony.data.session.AuthState.SignedIn)
+        state
+    }
+
+    @Test fun theVoiceScreenDrawsItsOwnOpaqueSurface() {
+        FixtureInstance().use { instance ->
+            instance.start()
+            val state = signedIn(instance)
+            val channel = Channel(id = "c-voice", serverId = "s1", name = "Design standup", type = 1)
+            compose.setContent {
+                HarmonyTheme(VisualThemeSettings(theme = "dark")) {
+                    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        lol.mony.harmony.ui.screens.chat.VoiceChannelScreen(state, channel, onClose = {})
+                    }
+                }
+            }
+            compose.waitUntil(timeoutMillis = 60_000) {
+                compose.onAllNodesWithTag("voice-screen").fetchSemanticsNodes().isNotEmpty()
+            }
+            val screen = compose.onNodeWithTag("voice-screen")
+            // It is the whole window, not a band in the middle of the list it was opened from.
+            val bounds = screen.fetchSemanticsNode().boundsInRoot
+            val window = compose.onNodeWithTag("voice-screen").fetchSemanticsNode().size
+            assertTrue(
+                "the voice screen is ${bounds.width}x${bounds.height}, not the window's " +
+                    "${window.width}x${window.height}",
+                bounds.width >= window.width - 1f && bounds.height >= window.height - 1f,
+            )
+            RenderHarness.run { compose.capture("voice-screen-opaque") }
+        }
     }
 }

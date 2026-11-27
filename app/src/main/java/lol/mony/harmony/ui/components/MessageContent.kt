@@ -518,6 +518,26 @@ private fun FilePart(
         }
         return
     }
+    // A video is played, not named. It used to fall through to the card below -- "Video:
+    // standup.mp4" with a play glyph on it -- which is a label for a thing the app could not do.
+    // The player is Android's own, inline in the row, and it waits for a tap to play.
+    if (url != null && part.isVideoPart()) {
+        Column(Modifier.padding(vertical = 4.dp)) {
+            VideoPlayer(
+                url = url,
+                label = alt ?: part.fileName ?: "Video attachment",
+                key = part.path ?: part.url ?: url,
+                modifier = Modifier.testTag("attachment-video"),
+            )
+            val caption = alt ?: part.fileName
+            if (caption != null) Text(
+                caption,
+                style = MaterialTheme.typography.bodySmall.copy(color = muted),
+                modifier = Modifier.widthIn(max = 320.dp).padding(top = 2.dp),
+            )
+        }
+        return
+    }
     val label = part.fileName ?: alt ?: (part.fileType ?: "file")
     val kind = when {
         part.fileType == "video" || part.mimeType?.startsWith("video/") == true -> "Video"

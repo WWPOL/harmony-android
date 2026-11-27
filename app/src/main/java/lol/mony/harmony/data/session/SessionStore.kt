@@ -186,6 +186,30 @@ class SessionStore(private val context: Context, private val sealer: SessionSeal
     }
 
     /**
+     * The message this account had at the top of [room] when it last left it.
+     *
+     * A channel is not a page: a person reading one leaves it wherever they had got to, and an
+     * app that reopens at the newest message makes them find their place again. That is the
+     * reported bug -- "it starts you scrolled up a month before the most recent messages, even
+     * if you've already scrolled all the way down" -- and the anchor is the fix. The id is of a
+     * *row*, not an index, because messages arrive while a channel is closed: the index that
+     * was the top is a different message by the time the channel reopens, while the id still
+     * names the same one.
+     *
+     * It is a device preference, keyed by the account and instance like the drafts, so two
+     * accounts on one phone do not share a reading position and a message id from another
+     * instance means nothing here.
+     */
+    suspend fun lastReadMessage(room: String): String? =
+        context.sessionData.data.first()[accountKey("read-at.$room")]?.takeIf { it.isNotBlank() }
+
+    /** Records where the person had got to, or forgets it when the channel was left at its end. */
+    suspend fun saveLastReadMessage(room: String, messageId: String?) {
+        val key = accountKey("read-at.$room")
+        context.sessionData.edit { if (messageId == null) it.remove(key) else it[key] = messageId }
+    }
+
+    /**
      * The emoji this account picked last, most recent first.
      *
      * It is a device preference, not a server one: the instance keeps *favourites*

@@ -91,6 +91,22 @@ fun HarmonyShell(
     ime: WindowInsets = WindowInsets.ime,
     /** True while a rare destination is on screen, so "More" shows that it is the current place. */
     moreCurrent: Boolean = false,
+    /**
+     * True while a room is open on a compact window, which hides the bar.
+     *
+     * The bar's job is choosing a space, and it is the wrong control for the screen a person
+     * reads a channel on: the servers are a list to pick from, and a room is not. Keeping it
+     * there cost the message list ~64dp of the height a phone has least of, for a control that
+     * navigates *away* from what is being read, and it put a server's name under a thumb that
+     * was scrolling messages. A room is left the way every messaging app leaves one -- the back
+     * arrow, the system's back gesture, or a drag out of the start edge -- and the bar comes back
+     * with the list it belongs to.
+     *
+     * A wide window keeps its rail: it is beside the content rather than under it, so it costs
+     * no height, and it is where switching server while reading is one tap (see
+     * [NavigationLayout]).
+     */
+    hideBar: Boolean = false,
     /** The instance's base URL, so a server's icon resolves the way the rest of the app does. */
     baseUrl: String? = null,
     content: @Composable (NavigationLayout) -> Unit,
@@ -121,21 +137,30 @@ fun HarmonyShell(
                             // forget it and two of them cannot pad it twice. With the keyboard
                             // up, the bottom edge is the keyboard's and the content is inset by
                             // it here, so no destination has to know the keyboard exists.
+                            //
+                            // With the bar hidden the content owns the bottom edge as well, and
+                            // pads itself for the navigation bar or the gesture pill that the bar
+                            // would otherwise have covered. That is the height the room gains.
                             .windowInsetsPadding(
-                                if (keyboard) {
-                                    contentInsets.only(
+                                when {
+                                    keyboard -> contentInsets.only(
                                         WindowInsetsSides.Top + WindowInsetsSides.Horizontal +
                                             WindowInsetsSides.Bottom,
                                     )
-                                } else {
-                                    bars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                                    hideBar -> bars.only(
+                                        WindowInsetsSides.Top + WindowInsetsSides.Horizontal +
+                                            WindowInsetsSides.Bottom,
+                                    )
+                                    else -> bars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
                                 },
                             ),
                     ) { content(layout) }
                     // The bar stands down while the keyboard is up. It used to stay and pad
                     // itself by the keyboard, which drew a blank strip the height of the keyboard
                     // behind it and took that height from the room.
-                    if (!keyboard) {
+                    //
+                    // It also stands down while a room is open: see [hideBar].
+                    if (!keyboard && !hideBar) {
                         SpaceRail(
                             spaces = spaces,
                             layout = layout,
