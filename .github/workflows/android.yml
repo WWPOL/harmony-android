@@ -1,14 +1,19 @@
 name: Android build and checks
 
-# The app. Every push builds it, whatever the branch, and publishes what it built: the
-# per-run APK as an Actions artifact, and the newest build of each branch on a rolling
-# release -- a release for the default branch, a prerelease for any other. Every published
-# copy carries a signed build-provenance attestation naming the commit it was built from,
-# which `gh attestation verify` checks. A version tag additionally puts the APK on that
-# tag's release (release.yml).
+# The app. Every push builds it, whatever the branch, and every push to the default branch
+# publishes it: one release per commit, named for the version and commit it was built from
+# (`0.1.0-abc1234`, tagged `v0.1.0-abc1234`), carrying that commit's APK and its checksum
+# and nothing else. The body of the release is the changelog of the commits since the
+# previous release, so the Releases page is the project's history rather than the same page
+# of instructions repeated for every build.
 #
-# The release is the only published copy. Nothing here pushes a container package: an APK
-# is not an image, and a package is not a download a phone can use.
+# A push to any other branch builds and keeps its APK as an Actions artifact, and publishes
+# no release: a branch build is not an offer to anybody, and a release per commit per branch
+# would fill the page with builds of work that is not finished.
+#
+# Every published copy carries a signed build-provenance attestation naming the commit it
+# was built from, which `gh attestation verify` checks. A version tag (`vX.Y.Z`) publishes a
+# release named for the version (release.yml).
 #
 # Trust: build and publish are separate jobs. The build job runs on pull requests too
 # and holds no write permission. The publish job has contents: write and runs only on a
@@ -18,10 +23,10 @@ name: Android build and checks
 # the publish job for the same reason: signing a provenance statement is a write, and a
 # pull request must not reach it.
 on:
-  # Every push, on every branch, with no path filter: the branch build is what a person
-  # downloads to try the app, so a commit that changes nothing here must still produce the
-  # APK of that commit rather than leave the previous one standing. Pull requests are
-  # filtered: they build to check the app, and a change to a document has nothing to check.
+  # Every push, on every branch, with no path filter: the build is what a person downloads
+  # to try the app, so a commit that changes nothing here must still produce the APK of
+  # that commit rather than leave the previous one standing. Pull requests are filtered:
+  # they build to check the app, and a change to a document has nothing to check.
   push:
     branches: ['**']
   pull_request:
@@ -37,11 +42,10 @@ on:
       - '.github/workflows/android.yml'
   workflow_dispatch:
 
-# One run per ref: a newer push supersedes the older run's build, which is what a rolling
-# release means. The publish job is not cancelled mid-flight by a newer push, though: it
-# moves a stable asset name, and a publish cut off between uploading the new bytes and
-# removing the old ones would leave both behind. The job is a few HTTP calls, so letting it
-# finish costs nothing and keeps the release consistent.
+# One run per ref: a newer push supersedes the older run's build. The publish job is not
+# cancelled mid-flight by a newer push, though: it creates a release and uploads files to
+# it, and a publish cut off between the two would leave a draft nobody finishes. The job is
+# a few HTTP calls, so letting it finish costs nothing.
 concurrency:
   group: android-${{ github.ref }}
   cancel-in-progress: true
@@ -51,10 +55,10 @@ permissions:
   contents: read
 
 env:
-  # The branch whose build is published as the repository's release. Every other branch's
-  # build is a prerelease, which the repository's Releases page and /releases/latest do not
-  # offer.
-  DEFAULT_BRANCH: main
+  # The branch whose commits are published as releases. Every other branch builds and
+  # uploads an artifact, and publishes nothing. The publish job's own `if:` names it too,
+  # because a job-level condition cannot read `env:`; `npm test` asserts the two agree.
+  RELEASE_BRANCH: main
 
 jobs:
   # The tooling that names, checks and publishes APKs, run against a stand-in for the
@@ -71,8 +75,9 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      # The release tooling against a stand-in for the GitHub API, the workflows' own
-      # invariants, doctor.sh, and every relative link in the documentation.
+      # The release tooling against a stand-in for the GitHub API, the changelog against a
+      # scratch repository, the workflows' own invariants, doctor.sh, and every relative
+      # link in the documentation.
       - run: npm test
 
   build:
@@ -304,14 +309,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Publishes the newest build of each branch, as a release of the default branch and as
-  # a prerelease of any other. The default branch's is what the repository offers as its
-  # release: the Releases box on the repository page and /releases/latest both reach a
-  # release and skip a prerelease.
-  #
-  # A release is the whole of what this publishes. There is no package: an APK is not a
-  # container image, and a package would only be a second place to look for the same file,
-  # reachable with `oras` or `docker` rather than by tapping a link on a phone.
+  # Publishes one release per commit of the default branch: the APK, its checksum, and the
+  # changelog of the commits since the previous release. Nothing else is published per push
+  # -- no stable alias and no second copy of the same build -- so the one file on a release
+  # is the one to download.
   #
   # What it publishes is attested: a signed build-provenance statement says which commit
   # and which workflow produced these bytes, and it is stored against the repository where
@@ -321,11 +322,13 @@ jobs:
   publish:
     name: Publish the release and its provenance
     needs: build
-    # A push to a branch of this repository, and nothing else: a pull request from a fork
-    # runs the build job only, with no token that can write.
-    if: github.event_name == 'push' && github.repository == 'WWPOL/harmony-android'
+    # A push to the release branch of this repository, and nothing else: a pull request from
+    # a fork runs the build job only, with no token that can write, and another branch's push
+    # publishes no release at all. The branch is written out here because a job-level `if:`
+    # cannot read `env:`; it is `RELEASE_BRANCH` above, and `npm test` asserts they agree.
+    if: github.event_name == 'push' && github.repository == 'WWPOL/harmony-android' && github.ref_name == 'main'
     # Its own group, so a push that arrives while this runs does not cancel it; the newer
-    # run's publish then replaces the stable names with its own, which is the point.
+    # run publishes its own commit's release, which is the point.
     concurrency:
       group: android-publish-${{ github.ref }}
       cancel-in-progress: false
@@ -339,8 +342,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # The whole history: the release's notes are the commits since the previous release,
+      # which is read from the tags. A shallow clone has neither.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           sparse-checkout: scripts
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -359,7 +365,6 @@ jobs:
         id: publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           VERSION: ${{ needs.build.outputs.version }}
           VERSION_NAME: ${{ needs.build.outputs.version-name }}
@@ -379,67 +384,13 @@ jobs:
           fi
           # What the attestation in this job is made about, and what the summary links to.
           echo "apk=$apk" >> "$GITHUB_OUTPUT"
-          # The tag of the release this build goes on, from the one function that computes
-          # it, so the download link in the release's own body names the release it is on.
-          tag=$(node -e "import('./scripts/release.mjs').then(m => console.log(m.rollingTag(process.env.BRANCH)))")
-          # The default branch's build is published as a release, which is what the
-          # repository's Releases page and /releases/latest offer. Another branch's is a
-          # prerelease: a branch build is not an offer to anybody.
-          #
-          # --version is the release line, and the body names the build by its commit: a
-          # rolling release's title names the branch, not a version, because it carries a
-          # different build every day. The body is written for the person deciding whether
-          # to install: what the app is, how to install it, which build this is, and how to
-          # check the file. What the rolling release *is* -- one per branch, ten builds
-          # kept -- is in docs/builds.md, not repeated at a downloader.
-          node scripts/release.mjs rolling --apk "$apk" \
-            --branch "$BRANCH" --commit "$COMMIT" \
-            --default-branch "$DEFAULT_BRANCH" --version "$VERSION" \
-            --body "$(printf '%s\n' \
-              "Brapmony is a native Android client for [Harmony](https://mony.lol): messages," \
-              "servers, social, files, notifications and voice calls." \
-              "" \
-              "**[Download Brapmony-latest.apk](https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/Brapmony-latest.apk)**" \
-              "" \
-              "## Install" \
-              "" \
-              "1. Open it on the phone or tablet and tap the downloaded file." \
-              "2. Allow the install when Android asks. The APK is test-signed, so Play Protect" \
-              "   may warn." \
-              "3. On first launch, enter your instance's address and sign in." \
-              "" \
-              "Over a cable: \`adb install -r Brapmony-latest.apk\`." \
-              "" \
-              "Android 8.0 (API 26) or newer. A signature mismatch means an older build signed" \
-              "with a different key: uninstall it once." \
-              "" \
-              "## This build" \
-              "" \
-              "| | |" \
-              "| --- | --- |" \
-              "| Build | \`$VERSION_NAME\` (versionCode $VERSION_CODE) |" \
-              "| Release line | $VERSION |" \
-              "| Commit | [\`$COMMIT\`](https://github.com/$GITHUB_REPOSITORY/commit/$COMMIT) |" \
-              "| Checksum | \`$SHA256\` |" \
-              "" \
-              "The other APK is this build under its commit's name, and never changes. This" \
-              "release is a window on \`$BRANCH\`, keeping the ten newest builds; a named" \
-              "release is cut from a version tag (\`vX.Y.Z\`)." \
-              "" \
-              "## Check the download" \
-              "" \
-              "With the GitHub CLI:" \
-              "" \
-              '```sh' \
-              "gh attestation verify Brapmony-latest.apk --repo $GITHUB_REPOSITORY" \
-              '```' \
-              "" \
-              "Or \`sha256sum -c Brapmony-latest.apk.sha256\`." \
-              "" \
-              "No end-to-end encryption, no push notifications, and several media and" \
-              "administration flows are missing: not yet a drop-in replacement for the official" \
-              "client. [The gap audit](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/parity-audit.md)" \
-              "lists what is not there.")"
+          # The release's notes are the commits since the previous release, composed by the
+          # publisher from the checkout's own history: no title, no description of the app
+          # and no install steps, because none of that is different from one release to the
+          # next. The release is created as a draft and made visible once both files are on
+          # it, so a failure here leaves nothing on the Releases page to download.
+          node scripts/release.mjs publish --apk "$apk" \
+            --version "$VERSION" --commit "$COMMIT" --attempt "${GITHUB_RUN_ATTEMPT:-1}"
       # Provenance. The attestation is what binds these bytes to this commit: GitHub signs
       # a statement that this digest was produced by this workflow, in this repository, at
       # this commit, and keeps it where a downloader can check it. The subject is the APK
@@ -483,20 +434,22 @@ jobs:
           }
           verify "$APK" "$(basename "$APK")"
           echo "- Verified the provenance of \`$(basename "$APK")\`: signed for commit \`$COMMIT\` by \`$WORKFLOW\`." >> "$GITHUB_STEP_SUMMARY"
-      # The link people are given is the tag-specific one -- it names the release, which
-      # a browser can follow whether or not the release is the repository's newest. This
-      # step fetches it back over the same path a browser would and checks that what
-      # arrives is the APK that was just built: package, versionCode, certificate
-      # fingerprint and checksum.
+      # The link people are given is the tag-specific one -- it names the release, which a
+      # browser can follow whether or not the release is the repository's newest. This step
+      # fetches it back over the same path a browser would and checks that what arrives is
+      # the APK that was just built: package, versionCode, certificate fingerprint and
+      # checksum.
       - name: Check the published download
         env:
-          BRANCH: ${{ github.ref_name }}
           EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
           EXPECTED_VERSION_NAME: ${{ needs.build.outputs.version-name }}
           EXPECTED_VERSION_CODE: ${{ needs.build.outputs.version-code }}
+          TAG: ${{ steps.publish.outputs.tag }}
+          # The name the publisher uploaded, which is the file's own name unless a re-run of
+          # this commit gave the rebuilt bytes a distinct one.
+          NAME: ${{ steps.publish.outputs.name }}
         run: |
-          tag=$(node -e "import('./scripts/release.mjs').then(m => console.log(m.rollingTag(process.env.BRANCH)))")
-          url="https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony-latest.apk"
+          url="https://github.com/${{ github.repository }}/releases/download/$TAG/$NAME"
           echo "checking $url"
           # GitHub answers a download URL with a redirect to a signed blob; -L follows it.
           for attempt in 1 2 3 4 5; do
@@ -534,23 +487,16 @@ jobs:
           echo "- Fetched the download back and checked it: package io.github.wwpol.brapmony, versionCode $EXPECTED_VERSION_CODE, sha256 $actual, certificate SHA-256 $fingerprint." >> "$GITHUB_STEP_SUMMARY"
       - name: Report the download links
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: ${{ github.ref_name }}
           VERSION_NAME: ${{ needs.build.outputs.version-name }}
-          VERSION_CODE: ${{ needs.build.outputs.version-code }}
           COMMIT: ${{ github.sha }}
+          TAG: ${{ steps.publish.outputs.tag }}
+          NAME: ${{ steps.publish.outputs.name }}
         run: |
-          tag=$(node -e "import('./scripts/release.mjs').then(m => console.log(m.rollingTag(process.env.BRANCH)))")
           {
-            echo "### Brapmony \`$VERSION_NAME\`"
+            echo "### $NAME"
             echo ""
-            echo "Newest build of \`$BRANCH\`; versionCode $VERSION_CODE, commit \`$COMMIT\`."
-            echo ""
-            echo "- [Brapmony-latest.apk](https://github.com/${{ github.repository }}/releases/download/$tag/Brapmony-latest.apk)"
-            echo "- [The release](https://github.com/${{ github.repository }}/releases/tag/$tag)"
-            echo "- [This run's artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-            echo "- [The commit](https://github.com/${{ github.repository }}/commit/$COMMIT)"
-            echo "- [The attestation](https://github.com/${{ github.repository }}/attestations)"
-            echo ""
-            echo "Test-signed, not store-signed."
+            echo "- [Download $NAME](${{ github.server_url }}/${{ github.repository }}/releases/download/$TAG/$NAME)"
+            echo "- [The release](${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG)"
+            echo "- [This run's artifact](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "- [The attestation](${{ github.server_url }}/${{ github.repository }}/attestations)"
           } >> "$GITHUB_STEP_SUMMARY"

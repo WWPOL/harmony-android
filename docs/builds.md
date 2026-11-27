@@ -58,7 +58,6 @@ repository's test key.
 | Push to a branch | `Brapmony-0.1.0-606ab10-debug.apk` |
 | Version tag, release-signed | `Brapmony-0.1.0.apk` |
 | Version tag, test-signed | `Brapmony-0.1.0-debug.apk` |
-| The stable name to bookmark | `Brapmony-latest.apk` (and `.sha256`) |
 | Actions artifact | The APK's own name, `-attempt-<n>` on a re-run |
 
 The name is passed to `scripts/name-artifact.sh` as the version name the build produced
@@ -68,74 +67,103 @@ against the version it reports before it names the file, and the publish job che
 downloaded copy again.
 
 The branch is not in the file name: it is in the tag of the release the file is published to
-(`android-rolling-<branch>`), which is where a downloader looks for it, and a branch name can
-carry characters and a length a file name should not.
+(`v0.1.0-606ab10`), which is where a downloader looks for it, and a branch name can carry
+characters and a length a file name should not.
 
 An earlier version of this workflow published `Brapmony_Android_V1.9.6_debug-<branch>-<sha7>.apk`
-and `Brapmony_Android_latest.apk`. Those names are retired on the first publish that runs
-here: the assets are deleted if they carry this workflow's ownership label, so a download does
-not stay under a name nothing updates. A file somebody attached by hand is never touched.
+and `Brapmony_Android_latest.apk`, and a stable `Brapmony-latest.apk` beside every build. Those
+names are gone with the rolling releases they were on, which the first publish after this
+change deletes: a download does not stay under a name nothing updates. A file somebody
+attached by hand is never touched.
 
 ## What each push publishes
 
 [`android.yml`](https://github.com/WWPOL/harmony-android/blob/main/.github/workflows/android.yml)
 runs on **every push to any branch**, whatever the push changed, and on pull requests that
-touch the app. A push is not filtered by path: a branch build is what somebody downloads to
-try the app, and a commit that changed nothing still has to produce the APK of that commit
-rather than leave an older one standing.
+touch the app. A push is not filtered by path: a build is what somebody downloads to try the
+app, and a commit that changed nothing still has to produce the APK of that commit rather than
+leave an older one standing.
+
+A push to `main` publishes **one release for that commit**, and a push to any other branch
+publishes no release at all — its APK is an Actions artifact and a line in the run's summary.
 
 | Where | What | Lifetime |
 | --- | --- | --- |
-| Actions artifact `Brapmony-<version>-<sha7>-debug` | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 30 days, never overwritten |
-| Release `android-rolling-main` (the default branch) | This run's APK under its own name, plus `Brapmony-latest.apk` and that file's `.sha256` | The release stays; builds older than the newest ten of that branch are pruned |
-| Prerelease `android-rolling-<other branch>` | The same, for a branch that is not the default | The same |
+| Release `v0.1.0-<sha7>`, e.g. `v0.1.0-606ab10` | That commit's APK (`Brapmony-0.1.0-606ab10-debug.apk`) and its `.sha256` — and nothing else | The release stays; its APK is deleted once 30 newer releases exist |
+| Actions artifact, named after the APK | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 30 days, never overwritten |
 | Attestation, for the APK | A signed build-provenance statement naming this repository, this workflow and this commit | As long as the repository keeps it |
-| The run's summary | Links to all of it | With the run |
+| The run's summary | Links to the download, the release, the artifact and the attestation | With the run |
 
-Each run's APK is named after the version it reports (`Brapmony-0.1.0-606ab10-debug.apk`),
-so a link to a particular build keeps working after later pushes. `Brapmony-latest.apk` is the
-stable name to bookmark: it is replaced on every push to that branch, from the same bytes as
-that run's own APK.
+The release is a **changelog of the commits since the previous release**, and its title is the
+build (`0.1.0-606ab10`). What the app is, which Android versions it runs on and how to install
+an APK are the same on every release and are in the README, so a release page does not repeat
+them: the only thing that differs from one release to the next is what changed, and that is
+what the page says.
 
-**The default branch's build is a release.** It is what the repository's Releases box and
-`/releases/latest` offer. Its release is named for the branch — `Brapmony for Android — newest
-build of main` — and its body carries that build's version, versionCode, commit and checksum,
-refreshed only after the upload succeeds.
+### Why a release per commit
 
-### Why one release per branch, and not one per commit
+A release page per commit makes the Releases page the project's history: every entry says what
+changed, and the newest entry is the build to install. There is no second file under a stable
+name to work out, and no window of older builds beside it — the release for a commit holds that
+commit's APK and its checksum, so the file on a page is the file to download.
 
-A rolling release is a **window on a branch**, refreshed by every push. It holds the newest ten
-builds of `main`, each under its own name, plus the stable `Brapmony-latest.apk`.
+The alternative that was here before was a **rolling release**: one per branch, refreshed by
+every push, keeping the newest ten builds and a `Brapmony-latest.apk` beside them. It had three
+problems, and each is a reason this is not it:
 
-A release per commit would make the Releases page a commit log: dozens of entries a day, each
-one a copy of the previous one plus a commit, and no entry meaning more than the one after it.
-GitHub's Releases page is the front door of the repository, and what it should say is "here is
-the app" — which is what one rolling release says — rather than "here are the last four hundred
-commits". A build that is worth keeping is a **version release**: push a `vX.Y.Z` tag, and that
-commit's APK is attached to a release named for the version, with nothing on top of it. That is
-the archive; the rolling release is the window.
+- **It listed old files.** Ten builds and a stable alias meant eleven entries on one page, and
+  nothing on the page said which of them was current. A downloader had to know that `latest`
+  was the one to take.
+- **Its title named a branch, not a build.** `Brapmony for Android — newest build of main` was
+  the same title for every build of `main`, and the version it held was in the body, one line
+  among instructions.
+- **Its body was the same on every release.** The app's description and the install steps do
+  not change between builds, so the page was mostly text that was not about the build it was
+  offering, and the one line that was — the commit — was the least prominent thing on it.
 
-The title is not a version, either. It was `Brapmony 1.9.6` for every build of every branch,
-because `VERSION` was one number nothing bumped, so the title was a version that described no
-particular build and every build at once. A version belongs to a build (in the body, beside its
-commit) or to a tag release (in its title), not to a release whose contents change daily.
+A release per commit costs one entry per push. That is what a changelog is.
 
-Every other branch's build is a **prerelease**, which `releases/latest` skips: a branch build
-is not an offer to anybody. A rolling release that carries none of this workflow's own assets
-is refused rather than rewritten, whatever its tag.
+### Which commits a release's notes cover
 
-The download link the run prints is the tag-specific one,
-`https://github.com/<owner>/<repo>/releases/download/android-rolling-<branch>/Brapmony-latest.apk`.
-It is tag-specific rather than `/releases/latest/download/...` so that a link to a branch that
-is not the default still resolves, and so that the link keeps meaning the branch it names. The
-publish job then fetches its own link back over the same path a browser uses and fails unless
-what arrives has this app's package, the versionCode that was just built, the checksum the
-build reported, and a signing certificate. A link that is not independently downloadable is a
-broken link, and the run says so instead of publishing a summary that looks fine.
+The body is the commits between the previous release and this one, newest first, one
+`- <subject> (<commit>)` line each, with a link to the whole comparison and the APK's
+SHA-256. It is composed from the checkout's own history (`git log`), by the same code for a
+commit's release and a version tag's, so the two read alike.
+
+- **A merge commit is not a line.** Its subject names the pull request; the commits it brought
+  in are in the range already.
+- **The previous release is the nearest release tag *behind* the commit**, not one on it. A
+  re-run of a commit that already has a release therefore says the same thing the first run
+  said, rather than nothing.
+- **A release lists at most 40 commits** and says how many it left out, so a release page is
+  something to read rather than to scroll.
+- **The first release has no previous release**, so its notes are the history up to it.
+
+A version tag's release uses the same notes: the commits since the previous release of any
+kind, up to the tagged commit.
+
+### A release is a draft until its files are on it
+
+The release is created as a draft, the APK and its checksum are uploaded, and only then is it
+made visible. A build that fails therefore leaves no page on the Releases page offering a
+download that is not there, and no `/releases/latest` pointing at one; a later attempt of the
+same commit finishes the draft the earlier attempt started.
+
+### Why 30 releases keep their APK
+
+A release per commit would grow without bound: one APK per push, for ever. Beyond the newest
+30 releases the APK and its `.sha256` are deleted, and **the release stays with its notes** —
+the changelog is the record of what the commit was, and the APK is reproducible from the commit
+with `./gradlew :app:assembleDebug`. `node scripts/release.mjs cleanup` (and the
+[cleanup workflow](#cleaning-up-what-nothing-reads-any-more)) does it, and a publish does it
+after its own release is complete.
+
+A version tag's release is not in that window at all. It is the archive — one file per version,
+cut deliberately — and nothing here deletes its assets.
 
 Publishing needs no secret of its own: the APK is test-signed, and the workflow's
-`GITHUB_TOKEN` writes the release. Whether two runs' APKs install over each
-other depends on a stable test key, which is optional; see [Signing](#signing) and
+`GITHUB_TOKEN` writes the release. Whether two runs' APKs install over each other depends on a
+stable test key, which is optional; see [Signing](#signing) and
 [Which build installs over which](#which-build-installs-over-which).
 
 ## There is no package
@@ -185,13 +213,13 @@ is why nothing failed: what was broken was the page, not the file. So:
   SHA-256 of what it stored; that is compared with the file in hand, and the byte count is
   the fallback where an API reports no digest. A re-run that finds different bytes under its
   name publishes them under their own name rather than reporting success.
-- **The labels already written are cleared.** The first publish after this change sends an
-  empty label for every asset that carries the old one and reads the list back: a label that
-  did not clear is reported as a warning naming the asset, so a page whose names are still
-  hidden is never described as fixed.
+- **The labelled assets are removed with their release.** They are on the rolling releases of
+  the scheme this replaced, which the first publish after this change deletes whole, so the
+  names they hid do not come back under a new page.
 
-The release's tag also moves with each publish, so the commit the page names is the commit
-the assets were built from rather than the one the release was first created at.
+A release's tag names the commit its files were built from, so the commit the page shows is
+the build's own. It is created with the release and never moved afterwards: a tag that named a
+different build every day was a tag nobody could use to mean a build.
 
 ## Provenance: what was built, from which commit
 
@@ -217,7 +245,7 @@ GitHub's workflow produced its code.
 A person who downloaded an APK checks it with the GitHub CLI:
 
 ```sh
-gh attestation verify Brapmony-latest.apk --repo WWPOL/harmony-android
+gh attestation verify Brapmony-0.1.0-606ab10-debug.apk --repo WWPOL/harmony-android
 ```
 
 That answers two questions at once: the file is the one GitHub signed for this repository,
@@ -225,7 +253,7 @@ and the workflow that built it was `android.yml` (or `release.yml`) at a commit.
 further, name the workflow and the commit:
 
 ```sh
-gh attestation verify Brapmony-latest.apk \
+gh attestation verify Brapmony-0.1.0-606ab10-debug.apk \
   --repo WWPOL/harmony-android \
   --signer-workflow WWPOL/harmony-android/.github/workflows/android.yml \
   --source-digest "$(git rev-parse HEAD)"
@@ -260,13 +288,14 @@ claim, and the API's `digest` and the attestation are GitHub's.
 
 - **Immutable releases.** GitHub can make a release and its assets immutable, and then signs
   a release attestation of its own (`gh release verify`, `gh release verify-asset`). It is a
-  repository setting, and it is **not** compatible with what a rolling release is: an
-  immutable release cannot have assets added or renamed, which is exactly how
-  `Brapmony-latest.apk` is moved onto each new build and how the ten-build window is pruned.
-  Enabling it would fail every publish. A version tag's release could be immutable, but the
-  setting is per repository, not per release, so it is off. What it would add -- a signed
-  statement that these assets belong to that tag -- the provenance attestation already says,
-  and says it about the file a phone installs.
+  repository setting, and a publish would not survive it as things are: a release is created
+  as a draft, the files are uploaded, and it is then made visible, and pruning deletes the
+  APK of an old release. An immutable release cannot be edited or have its assets removed,
+  so both would fail. Making a release immutable *after* its files are on it, and keeping
+  every APK for ever instead of pruning it, would be the shape that works; it is a separate
+  change with its own cost in storage, and what it would add -- a signed statement that these
+  assets belong to that release -- the provenance attestation already says, and says it about
+  the file a phone installs.
 - **Actions artifacts as a download route.** The artifact is kept because it is the record of
   what a run built, with the `.sha256` and the metadata file beside it, and because the
   publish job reads it back instead of rebuilding. It is not a route to offer people: it
@@ -295,10 +324,11 @@ a number the tree does not carry.
 Both are accompanied by a `.sha256`. The job creates the tag's release if it does not exist
 and finds it if it does, so re-running a tag attaches to the same release instead of creating
 a second one, and it replaces only the two names it owns. It never touches another release.
-The release's body names the commit the tag resolved to, with a link to it, and how to
-verify the asset. The APK is attested in the job that publishes it, and the attestation is
-verified before the run finishes (see
-[Provenance](#provenance-what-was-built-from-which-commit)). Nothing is pushed to a
+The release's body is the same changelog a commit's release carries — the commits since the
+previous release, up to the tagged commit — and it is created as a draft, filled, and made
+visible, so a tag whose build fails offers nobody a download that is not there. The APK is
+attested in the job that publishes it, and the attestation is verified before the run finishes
+(see [Provenance](#provenance-what-was-built-from-which-commit)). Nothing is pushed to a
 container registry for a version tag either.
 
 ## Signing
@@ -358,8 +388,8 @@ and no release APK pretends to be signed with one.
 signed with that one stable key rather than a key generated per checkout. Its certificate is
 `CN=Harmony CI, O=Harmony, C=US`, SHA-256
 `2E:F4:6C:81:35:76:BB:AF:CE:34:91:9F:0E:EE:75:A9:F4:2D:1B:9E:94:53:A9:B8:45:43:13:CE:A3:4C:4F:75`,
-read out of the APK that run published — downloaded again from the rolling release and
-inspected with `apksigner`, not copied from a log. That is the stability baseline.
+read out of the APK that run published — downloaded again from its release and inspected with
+`apksigner`, not copied from a log. That is the stability baseline.
 
 The pin is proved to be in place by deduction from the run, not by reading its log (the log
 endpoint needs a token this session did not have). Its `Configure the test signing key` step
@@ -387,14 +417,14 @@ would quietly change what one means. Each row is a test in `scripts/release.test
 
 | Situation | What happens |
 | --- | --- |
-| The release for the computed rolling tag carries none of this workflow's own assets | Refused; nothing is written |
-| A tag that is not `vX.Y.Z` is asked to make a version release | Refused, so a rolling tag can never become one |
+| The release at a commit's tag carries files and none of this workflow's own | Refused; nothing is written |
+| A tag that is not `vX.Y.Z` is asked to make a version release | Refused, so a commit tag can never become one |
 | An asset was not uploaded by this workflow | Never replaced or pruned; refused |
 | A re-run of the same commit, same bytes | Nothing changes, not even an asset id |
 | A re-run of the same commit, different bytes | The new bytes get their own name; the old name keeps the old bytes |
-| The run's own upload fails | Nothing else is touched; the stable name still points at the last good build |
-| The stable name's upload fails | The previous stable build is still there and still downloadable |
-| An older build is pruned | Only builds this workflow uploaded, keeping the newest ten |
+| The run's APK or its checksum fails to upload | The release stays a draft, so no page offers a download that is not there |
+| An older release's APK is pruned | Only files this workflow uploaded, and only past the newest 30; the release and its notes stay |
+| A release's tag is a version tag | Never touched: the archive is not in the window |
 | A request gets no answer, or a `5xx` | Sent again, five attempts in all with a growing wait; the run's log warns on each |
 | An upload landed but its answer was lost | The retry finds its own asset, and GitHub's digest says it holds these bytes: no second upload |
 | Every attempt fails | The publish stops with GitHub's own error, as it did before |
@@ -414,19 +444,11 @@ else's, and still fail. A release or tag create answered `422` is read back by t
 accepted when it points where this attempt was putting it. A delete that finds nothing treats
 that as done.
 
-Ownership is recorded in each asset's label (`brapmony-android sha256:<hash>`), so a file
-somebody attached by hand is not mistaken for this workflow's. The swap of the stable name
-goes through a staging asset and a rename, and the previous file is deleted only after the new
-one is in place.
-
-### Why ten builds
-
-A rolling release is a window on a branch, not an archive: it keeps the newest ten builds of
-its branch and deletes older ones it uploaded itself. Without a bound, every push to a
-long-lived branch would add an asset for ever and the release page would grow without limit.
-Ten is roughly a day of pushes on an active branch, and the links people use — `latest`, and
-the newest few commits — are inside it. A link to a build older than that stops resolving; the
-version-tag release is where a build is kept, and nothing here touches it.
+Ownership is read from the asset's uploader and its name, not from a label: a file somebody
+attached by hand carries their account, and one another workflow uploaded carries a name this
+one does not generate. Neither is ever replaced or pruned. A publish creates its release as a
+draft and makes it visible only once both files are on it, so a failure at any point leaves the
+Releases page as it was.
 
 ## Which build installs over which
 
@@ -512,28 +534,32 @@ names the APK `Brapmony-0.2.0.apk` (`-debug` when test-signed), attaches it and 
 to the release for the tag, and attests it. Re-running the tag finds the same release and
 replaces only the names it owns.
 
-No tag has been pushed yet, so `0.1.0` is the release line with no release under it: what
-exists today is the rolling release of `main`.
+A version release's notes are the same changelog as a commit's: the commits since the previous
+release, up to the tagged commit. It is created as a draft, the APK and its `.sha256` are
+attached, and it is then made visible, so a tag whose build fails leaves no page offering a
+download that is not there.
 
-## Cleaning up what nothing publishes to any more
+No tag has been pushed yet, so `0.1.0` is the release line with no version release under it:
+what exists today is one release per commit of `main`.
 
-A rolling tag is created by the first publish of a branch and moved by every one after it.
-When a branch is deleted or renamed, nothing moves its tag again: the tag stays in the
-repository's tag list, and its release stays on the Releases page, pointing at a build no
-branch will ever refresh. A workflow cannot notice — it only ever runs for the branch it is
-publishing — so the sweep is separate and explicit:
+## Cleaning up what nothing reads any more
+
+Two things accumulate without a bound: the APK on each release, once it is old enough that
+nobody is going to install that exact build, and the Actions artifacts. The sweep is explicit
+rather than something a push does:
 
 ```sh
-node scripts/release.mjs cleanup --default-branch main              # lists
-node scripts/release.mjs cleanup --default-branch main --apply      # deletes
+node scripts/release.mjs cleanup                                    # lists
+node scripts/release.mjs cleanup --apply                            # deletes
 ```
 
 or **Actions → Clean up releases and builds → Run workflow**, where `apply` is a checkbox that
-is off by default. It removes the rolling releases and tags of branches that no longer exist,
-a rolling tag whose release was deleted by hand (a tag is a page on the repository too, and it
-can only be found from the tag list), and Actions artifacts beyond the newest ten. It never
-touches a version release, a version tag, the rolling release of a branch that exists, or the
-default branch's release; each of those is a test in `scripts/release.test.mjs`.
+is off by default and `keep-releases` / `keep-artifacts` are how much stays.
+
+It deletes the APK and `.sha256` of every release beyond the newest 30 — the release and its
+notes stay — the rolling releases and tags of the scheme this replaced, and Actions artifacts
+beyond the newest ten. It never touches a version release or its assets, a release inside the
+window, or a tag that names one; each of those is a test in `scripts/release.test.mjs`.
 
 The list, without the deletion, is also what to read when the Releases page has something on it
 that should not be there.
@@ -545,28 +571,27 @@ Three Node scripts exist for checking the workflows without a runner:
 | Script | What it does |
 | --- | --- |
 | `scripts/release.test.mjs` | Runs the publishing and cleanup commands against an in-process stand-in for the GitHub releases API |
+| `scripts/changelog.test.mjs` | Builds a scratch git repository and checks the notes a release would carry |
 | `scripts/workflow.test.mjs` | Parses all three workflows and asserts the properties that make publishing and deleting safe |
 | `scripts/workflow-steps.mjs` | Runs one job's `run:` steps with `bash -eo pipefail`, as GitHub does, on this machine |
 
-The first two run in CI with the unit tests:
+The first three run in CI with the unit tests:
 
 ```sh
 npm ci
 node --test scripts/*.test.mjs
 ```
 
-The publisher tests cover what a published download depends on: one release per branch, the
-previous builds kept, only the stable names replaced, the retired names retired and nothing
-else deleted, a re-run that changes nothing, a rebuild that gets its own name, a foreign asset
-that is never overwritten, a release that carries none of this workflow's assets refused, a
-failed publish that leaves the last good build downloadable and the page describing it,
-retention bounded to this workflow's own builds, a version release left entirely alone, a
-default branch's release moved out of the prereleases, another branch's left a prerelease, a
-tag release created once and found again on a re-run, a stored asset whose digest is not the
-file that was uploaded given its own name rather than reported as kept, an asset that carries
-a label (which would hide its name on the page) cleared and a label that will not clear
-reported, a rolling tag moved onto each build and a version tag refused, and an API that
-reports no digest not turned into a failure.
+The publisher tests cover what a published download depends on: one release per commit, holding
+that commit's APK and checksum and nothing else, a second commit's release beside it, a re-run
+that changes nothing, a rebuild that gets its own name, a foreign asset that is never
+overwritten, a release that carries none of this workflow's assets refused, a release that is a
+draft until both its files are on it, retention that drops an old APK and keeps its notes, a
+version release and its assets left entirely alone, the rolling releases and tags of the old
+scheme removed and a version tag kept, a tag release created once and found again on a re-run,
+a stored asset whose digest is not the file that was uploaded given its own name rather than
+reported as kept, no upload carrying a label (which would hide its name on the page), and an
+API that reports no digest not turned into a failure.
 
 The workflow tests assert that every action is pinned to a commit SHA, that
 `pull_request_target` is not used, that `contents: write`, `id-token: write` and
@@ -578,8 +603,9 @@ refuses a tag whose commit's `VERSION` is another number and attaches by release
 build number's base is the same in Gradle and in both workflows, that the cleanup workflow is
 dispatch-only and lists before it deletes, that the APK namer is called with a
 profile it accepts and really renames the file to the name the scheme says, that a re-run's
-artifact does not land on the first attempt's name, that no upload carries a label and the old
-ones are cleared, that the publish moves the rolling tag onto the commit it built, that no
+artifact does not land on the first attempt's name, that no upload carries a label, that a release is created as a draft and made visible only
+once its files are on it, that the release's tag is the version and the commit and is never
+moved, that a release body is the changelog and carries no install instructions, that no
 step pipes `aapt2` or `apksigner` into `head` (which fails the step with SIGPIPE under
 `pipefail`), that each publishing job attests the APK (by path) and reads the attestation back
 with `gh attestation verify` pinned to the repository, the signer workflow and the commit,
@@ -641,10 +667,9 @@ fingerprint.
 
 **One real run has now completed.** [Run 44533075269](https://github.com/WWPOL/harmony-android/actions/runs/44533075269)
 (a push of `task/verify-apk-ci-publish-flow-3e8cphaa` at `fbd613f`) succeeded on a GitHub
-runner: the build job produced and uploaded its artifact, and the publish job created the
-rolling release, uploaded this run's APK, moved the stable APK name and its `.sha256` onto
-those bytes, fetched the download back and checked it, and printed the links. So the runner's
-environment — the `sdkmanager` package names, the `aapt2` and `apksigner` paths,
+runner: the build job produced and uploaded its artifact, and the publish job created a
+release, uploaded this run's APK, fetched the download back and checked it, and printed the
+links. So the runner's environment — the `sdkmanager` package names, the `aapt2` and `apksigner` paths,
 `upload-artifact` and `download-artifact`, and the token's permission to create a release — is
 demonstrated, not assumed. That run predates the name scheme described here, so it proves the
 mechanism, not the current names.
@@ -662,34 +687,25 @@ the newest push to `main` (`618008b`), failed at `Name the APK` with
 the publish. That is what this change fixes: the build was green up to the naming step and
 nothing was published.
 
-**What the repository actually offered.** `main`'s rolling release existed after the merge of
-that run, but it was a **prerelease**, so `api.github.com/repos/WWPOL/harmony-android/releases/latest`
-answered 404 and the repository page showed no Releases at all; only the tag-specific download
-URL resolved. That was fixed: the default branch's build is a release, so the Releases box and
-`/releases/latest` reach it.
+**The page was unreadable before that.** The rolling release existed and its download URL
+worked, but the page listed `brapmony-android sha256:…` five times and not one file name,
+because every asset carried a label and GitHub shows the label instead of the name. Nothing
+this workflow uploads carries a label now, and those labelled assets are on the rolling
+releases the first publish after this change removes.
+[`docs/evidence/release/`](evidence/release/) has the screenshot of the page as it was.
 
-**What it offered after that was unreadable.** The release existed, the download URL worked,
-and the page listed `brapmony-android sha256:…` five times and not one file name, because
-every asset carried a label and GitHub shows the label instead of the name. A person looking
-for `Brapmony-latest.apk` on that page found nothing to tap. That is what this change fixes;
-[Every asset shows its own name](#every-asset-shows-its-own-name) says how. The screenshot of
-the page as it was is in
-[`docs/evidence/release/`](evidence/release/), beside the asset list the fixed publisher
-produces.
-
-**What has been checked here, and what has not.** The naming, the published/prerelease
-decision and the retirement of the old names are checked by `npm test` against an in-process
-stand-in for the releases API, and the first push after this change is reproduced exactly:
-the test seeds the stand-in with the release `main` actually had — `Brapmony_Android_latest.apk`,
-its `.sha256`, and `Brapmony_Android_V1.9.6_debug-main-606ab10.apk`, read from the GitHub API
-— publishes one build, and asserts that it becomes a release named `Brapmony for Android —
-newest build of main`, with the new names, the old stable names retired, and the old build
-left for pruning.
+**What has been checked here, and what has not.** The naming, the draft-then-publish order,
+the changelog, the removal of the old rolling releases and the retention window are checked by
+`npm test` against an in-process stand-in for the releases API, and the changelog is checked
+against a real git history in a scratch repository. The first push after this change is
+reproduced exactly: the test seeds the stand-in with the releases `main` actually has — the
+rolling release with its labelled assets, and the version release — publishes one commit, and
+asserts that the commit has a release of its own holding one APK and its checksum, that the
+rolling releases and tags are gone, and that the version release is untouched.
 
 The `Publish` step is also run as the workflow runs it, with `scripts/workflow-steps.mjs`
-against `scripts/fake-github-api.mjs`, and the release it produces is read back: every asset
-name present, no label on any of them, and the tag pointing at the commit that was published.
-The APK used for the step runs is a real one, from
+against `scripts/fake-github-api.mjs`, and the release it produces is read back: its tag, its
+notes, and the one APK and checksum on it. The APK used for the step runs is a real one, from
 `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`, which was
 `BUILD SUCCESSFUL`.
 

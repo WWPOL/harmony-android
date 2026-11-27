@@ -1,18 +1,28 @@
-BEFORE — what the page shows:
-   "brapmony-android sha256:baf1c5ee9cd9ff9890c84a6853cb1f233b8ab0dcfd32c5feb497a912573b9dce"
-   "brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d"
-   "brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d"
-   "brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d"
-   "brapmony-android sha256:baff2c7d57cdf9e0656b77f99dbf48a63c04da7b697b328e21536e31a100a47b"
+BEFORE — what the page showed on 2026-11-23: two rolling releases, and five assets on
+the main one, every one labelled so its name is hidden. Read from api.github.com.
 
-retired: (none)
-cleared: Brapmony-1.9.6-85332c5-debug.apk, Brapmony-1.9.6-e5b7aec-debug.apk, Brapmony_Android_V1.9.6_debug-main-606ab10.apk
-tag:     moved to abc1234
+  release android-rolling-main  (release)
+     brapmony-android sha256:baf1c5ee9cd9ff9890c84a6853cb1f233b8ab0dcfd32c5feb497a912573b9dce
+     brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d
+     brapmony-android sha256:baff2c7d57cdf9e0656b77f99dbf48a63c04da7b697b328e21536e31a100a47b
+     brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d
+     brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d
+  release android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa  (prerelease)
+     Brapmony-latest.apk
 
-AFTER — what the page shows:
-   "Brapmony-1.9.6-85332c5-debug.apk"
-   "Brapmony-1.9.6-e5b7aec-debug.apk"
-   "Brapmony_Android_V1.9.6_debug-main-606ab10.apk"
-   "Brapmony-1.9.6-abc1234-debug.apk"
-   "Brapmony-latest.apk"
-   "Brapmony-latest.apk.sha256"
+AFTER — what one publish of one commit leaves, read back from the same API:
+
+  release v0.1.0-f9d8bbf  name='0.1.0-f9d8bbf'  draft=False
+     Brapmony-0.1.0-f9d8bbf-debug.apk
+     Brapmony-0.1.0-f9d8bbf-debug.apk.sha256
+
+  body:
+     ## Changes since `v0.1.0`
+     
+     - fix(notifications): stop a duplicate inbox row ([`f9d8bbf`](https://github.com/WWPOL/harmony-android/commit/f9d8bbfc16a9e78de67d3a31d32a2d52aad1148c))
+     - feat(drive): show a restricted link's owner ([`59e52a5`](https://github.com/WWPOL/harmony-android/commit/59e52a5912f33bd17ad621ba1aad6ab927291473))
+     - docs(builds): say what a test-signed APK installs over ([`3f12d96`](https://github.com/WWPOL/harmony-android/commit/3f12d969763b4a7722ce2ea68e0567725b7bed8d))
+     
+     sha256: `8ce7e5d8e036d885523e801b295e9135bebf04c0268284edd0a57f91f612d4ab` · [Full comparison](https://github.com/WWPOL/harmony-android/compare/v0.1.0...f9d8bbfc16a9e78de67d3a31d32a2d52aad1148c)
+
+  tags: (none)

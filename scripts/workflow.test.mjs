@@ -193,26 +193,58 @@ test('the APK is never published under a name that hides its signing', () => {
   assert.match(check.run, /the release keystore is configured, but the APK carries the test key/);
 });
 
-// What the repository offers as its release: the default branch's build. A prerelease is
-// skipped by /releases/latest and by the Releases box on the repository page, so before
-// this the repository offered no release at all and only the tag-specific download URL
-// worked. Every other branch stays a prerelease: a branch build is not an offer.
-test('the default branch is a release, and another branch is a prerelease', () => {
+// What the repository offers as its releases: one per commit of the default branch, named
+// for the build. Nothing is published as a prerelease, because nothing is published that is
+// not a finished commit of the branch releases come from.
+test('every commit of the default branch is published as a release, and nothing else is', () => {
   // Comments name endpoints; only code paths count.
   const source = read('scripts/release.mjs')
     .split('\n')
     .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
     .join('\n');
-  assert.match(source, /prerelease: !published/, 'the state follows the branch');
-  assert.match(source, /function isPublishedRelease/, 'and is decided in one place');
+  assert.ok(!/prerelease: !|isPublishedRelease/.test(source), 'a publish no longer decides a release from a prerelease');
   assert.ok(!/releases\/latest/.test(source), 'nothing reads or writes /releases/latest');
   assert.ok(!/\/releases\/tags\//.test(source), 'no release is looked up by tag URL');
-  // The workflow says which branch that is, in one place, and passes it to the publisher.
+  assert.match(source, /draft: true/, 'a release is created as a draft');
+  assert.match(source, /if \(current\.draft !== false\) patch\.draft = false/, 'and made visible once its files are on it');
+  // The workflow says which branch that is, in one place, and only a push to it publishes.
   const android = parse(ANDROID);
-  assert.equal(String(android.env.DEFAULT_BRANCH), 'main');
-  const publish = android.jobs.publish.steps.find((s) => s.run && s.run.includes('release.mjs rolling'));
-  assert.match(publish.run, /--default-branch "\$DEFAULT_BRANCH"/, 'the publisher is told which branch is the release');
-  assert.match(publish.run, /--version "\$VERSION"/, 'and names the release after the version');
+  const branch = String(android.env.RELEASE_BRANCH);
+  assert.equal(branch, 'main');
+  // A job-level `if:` cannot read `env:`, so the branch is written twice. The two have to
+  // be one branch, or a push to the branch that publishes would publish nothing.
+  const condition = String(android.jobs.publish.if);
+  const named = /github\.ref_name == '([^']+)'/.exec(condition);
+  assert.ok(named, 'only one branch publishes');
+  assert.equal(named[1], branch, 'the publish job publishes the branch RELEASE_BRANCH names');
+  const publish = android.jobs.publish.steps.find((s) => s.run && s.run.includes('release.mjs publish'));
+  assert.match(publish.run, /--version "\$VERSION"/, 'the release line is the build\'s');
+  assert.match(publish.run, /--commit "\$COMMIT"/, 'and the commit is the build it was built from');
+});
+
+// The release notes are the commits since the previous release, and nothing else: no
+// description of the app and no install steps, which are the same on every release.
+test('a release body is a changelog, not a page of instructions', () => {
+  const android = parse(ANDROID);
+  const publish = android.jobs.publish.steps.find((s) => s.run && s.run.includes('release.mjs publish'));
+  assert.ok(!/--body/.test(publish.run), 'the workflow does not write the body: the publisher composes it');
+  assert.ok(!/## Install|adb install|Download the APK|native Android client/i.test(publish.run),
+    'the workflow carries no instructions for the release page');
+  // The publisher composes it from the history, and it is the changelog alone.
+  const source = read('scripts/release.mjs');
+  assert.match(source, /export function notesFor/, 'the notes are composed in one place');
+  assert.match(source, /## Changes since/, 'the body is the commits since the previous release');
+  const body = source.slice(source.indexOf('export function releaseBody'), source.indexOf('export function notesFor'));
+  for (const noise of ['Install', 'adb ', 'Android 8.0', 'Download']) {
+    assert.ok(!body.includes(noise), `the release body repeats ${noise}`);
+  }
+  // release.yml does not write one either.
+  const release = parse(RELEASE);
+  const tag = release.jobs.release.steps.find((s) => s.id === 'release');
+  assert.ok(!/--body/.test(tag.run), 'the tag release does not carry hand-written instructions either');
+  assert.match(tag.run, /--apk /, 'the notes name the file it publishes');
+  assert.match(tag.run, /--commit /, 'and the commit they are about');
+  assert.ok(!/--name /.test(tag.run), 'the title is the version, not the app name and the version');
 });
 
 test('the app\'s version is the VERSION line plus the commit, never a hand-bumped number', () => {
@@ -365,23 +397,28 @@ test('signing is compared by certificate fingerprint, not by subject', () => {
   assert.ok(!/grep -q 'CN=Android Debug'/.test(releaseShell), 'the tag job does not decide by subject');
 });
 
-test('the rolling download link is tag-specific and is fetched back', () => {
+test('the published download link names the release and is fetched back', () => {
   const android = parse(ANDROID);
   const publish = android.jobs.publish.steps;
   const check = publish.find((s) => s.name === 'Check the published download');
   assert.ok(check, 'the published URL is verified, not just printed');
-  // A prerelease is excluded from /releases/latest, so only the tag names the file.
-  assert.match(check.run, /releases\/download\/\$tag\//);
+  // The tag is the release's own, so the link names the build it downloads.
+  assert.match(check.run, /releases\/download\/\$TAG\//);
   assert.ok(!/releases\/latest\/download/.test(check.run), 'never the latest-release path');
-  assert.match(check.run, /releases\/download\/\$tag\/Brapmony-latest\.apk/, 'the stable name is the new one');
+  assert.match(check.run, /\$TAG\/\$NAME/, 'the file is the one this run uploaded, by its own name');
+  assert.match(String(check.env.NAME), /steps\.publish\.outputs\.name/, 'which the publish step reports');
   assert.match(check.run, /curl -fsSL/, 'the file is downloaded');
   assert.match(check.run, /aapt2" dump badging|aapt2 dump badging/, 'and its package and versionCode read');
   assert.match(check.run, /apksigner" verify|apksigner verify/, 'and its certificate');
   assert.match(check.run, /sha256sum/, 'and its checksum');
-  // The summary link is the same tag-specific URL.
+  // The summary links to the same file, and to the release it is on.
   const report = publish.find((s) => s.name === 'Report the download links');
-  assert.match(report.run, /releases\/download\/\$tag\/Brapmony-latest\.apk/);
+  assert.match(report.run, /releases\/download\/\$TAG\/\$NAME/);
+  assert.match(report.run, /releases\/tag\/\$TAG/);
   assert.ok(!/releases\/latest\/download/.test(report.run));
+  // The tag comes from the publish, which is where it is computed.
+  assert.equal(String(check.env.TAG), '${{ steps.publish.outputs.tag }}');
+  assert.match(String(report.env.TAG), /steps\.publish\.outputs\.tag/);
 });
 
 test('the upgrade test compares package, fingerprint and versionCode', () => {
@@ -679,8 +716,10 @@ test('nothing publishes the APK as a container package', () => {
   // The section that says how to install, whatever heading level it uses.
   const section = sectionOf(readme, 'Install');
   assert.ok(section, 'the README has an Install section');
-  assert.match(section, /releases\/download\/android-rolling-main\/Brapmony-latest\.apk/,
-    'the README links the APK itself, which is what a phone taps');
+  // The newest release is where the APK is: a release per commit is named for its build, so
+  // the README links the releases page rather than a file name that changes every push.
+  assert.match(section, /releases\/latest/, 'the README links the newest release, which is the APK');
+  assert.match(section, /github\.com\/WWPOL\/harmony-android\/releases/, 'and the releases page beside it');
   // No command a person has to run to get the file: the link is the download, and the
   // numbered steps come after it.
   const beforeSteps = section.slice(0, section.indexOf('1. Open that link'));
@@ -757,19 +796,17 @@ test('the stored asset is checked against GitHub\'s own digest', () => {
   assert.match(source, /sha256:\$\{String\(sha256\)\.toLowerCase\(\)\}/, 'it compares sha256:hex');
   assert.match(source, /refusing to publish it/, 'and refuses a mismatch');
   // Every upload goes through it.
-  const upload = source.slice(source.indexOf('async function uploadFile'), source.indexOf('export async function publishBuild'));
+  const upload = source.slice(source.indexOf('async function uploadFile'), source.indexOf('export async function publishAsset'));
   assert.match(upload, /checkAssetDigest\(asset/, 'an upload is checked');
   // "Already these bytes" is GitHub's digest too, not a label: a re-run that finds the name
   // compares what GitHub stores with the file in hand, and a rebuild goes under its own name
   // instead of being reported as kept.
   assert.match(source, /export function storedBytes/, 'sameness is decided in one place');
-  const sameness = source.slice(source.indexOf('export function storedBytes'), source.indexOf('export function ownsAsset'));
+  const sameness = source.slice(source.indexOf('export function storedBytes'), source.indexOf('export class PublishError'));
   assert.match(sameness, /asset\?\.digest/, 'by the digest GitHub reports');
   assert.match(sameness, /asset\?\.size === size/, 'and by the byte count where no digest is reported');
-  const build = source.slice(source.indexOf('export async function publishBuild'), source.indexOf('export async function replaceStable'));
+  const build = source.slice(source.indexOf('export async function publishAsset'), source.indexOf('export async function ensureCommitRelease'));
   assert.match(build, /storedBytes\(a, sha256, size\)/, 'a re-run compares what is stored with the file');
-  const stable = source.slice(source.indexOf('export async function replaceStable'), source.indexOf('export async function clearLegacyLabels'));
-  assert.match(stable, /storedBytes\(current\[0\]/, 'and so does the stable name');
   // A digest that is not reported leaves nothing to compare, and is not an error.
   assert.match(source, /if \(!reported\) return \{ checked: false, digest: null \}/);
 });
@@ -788,38 +825,39 @@ test('the downloaded artifact is checked against the digest it was uploaded with
   assert.match(publish.run, /"\$actual" != "\$SHA256"/, 'and compared with what the build reported');
 });
 
-// A rolling tag names the newest build of its branch, and the release page shows the
-// commit that tag points at. A tag left where the release was created showed the first
-// build's commit beside the newest build's assets, so the publish moves it and the
-// workflow passes the commit that was actually built.
-test('the publish moves the rolling tag onto the commit it built', () => {
+// A release's tag names its commit, so the page shows the commit its files were built
+// from. There is no moving tag any more: the tag is created with the release and is a fixed
+// point, and a version tag is refused by the code that makes a commit's.
+test('a release is addressed by its own tag, and a version tag is never one of them', () => {
   const publish = parse(ANDROID).jobs.publish.steps.find((s) => s.id === 'publish');
   assert.match(String(publish.env.COMMIT), /github\.sha/, 'the step is given the commit it built');
   const source = read('scripts/release.mjs');
-  assert.match(source, /export async function moveRollingTag/, 'one function moves the tag');
-  assert.match(source, /refusing to move \$\{tag\}: not a rolling tag/, 'and refuses anything but a rolling tag');
-  // The tag moves with the build, and its name is the release's own tag, not a second one.
+  assert.match(source, /export function commitTag/, 'one function computes the tag');
+  assert.match(source, /target_commitish: commit/, 'and the release is created on that commit');
+  assert.ok(!/moveRollingTag/.test(source), 'no tag is moved after the fact');
+  assert.ok(!/PATCH', `\/git\/refs/.test(source), 'and no tag is rewritten');
+  // The two schemes cannot be confused: a version tag has no suffix, a commit tag has one.
+  assert.match(source, /export const VERSION_TAG_RE = \/\^v\\d\+\\\.\\d\+\\\.\\d\+\$\//);
+  assert.match(source, /export const COMMIT_TAG_RE = \/\^v\\d\+\\\.\\d\+\\\.\\d\+-\[0-9a-f\]\{7,40\}\$\//);
   assert.match(publish.run, /--commit "\$COMMIT"/, 'the commit goes with the publish');
 });
 
 // GitHub shows an asset's label **in place of its file name**. Every asset this workflow
 // uploaded carried a label naming its checksum, so the release page listed
-// `brapmony-android sha256:…` five times and not one file name -- there was no
-// `Brapmony-latest.apk` on the page to tap, although the download URL worked.
+// `brapmony-android sha256:…` five times and not one file name -- there was no file to tap,
+// although the download URL worked.
 test('nothing the publisher uploads carries a label, which would hide the file name', () => {
   const source = read('scripts/release.mjs');
   // The upload function has no way to send a label: its query is the name alone, and no
   // caller passes one.
-  const upload = source.slice(source.indexOf('async function uploadFile'), source.indexOf('export async function publishBuild'));
+  const upload = source.slice(source.indexOf('async function uploadFile'), source.indexOf('export async function publishAsset'));
   assert.match(upload, /new URLSearchParams\(\{ name \}\)/, 'an upload names the file and nothing else');
   assert.ok(!/label/.test(upload), 'the upload path does not mention a label at all');
   for (const m of source.matchAll(/uploadFile\(gh, \{([^}]*)\}/g)) {
     assert.ok(!/label/.test(m[1]), `a call to uploadFile passes a label: ${m[1].trim()}`);
   }
-  // The ones an earlier version labelled are cleared, so their names show again.
-  assert.match(source, /export async function clearLegacyLabels/, 'the old labels are cleared');
-  assert.match(source, /JSON\.stringify\(\{ label: '' \}\)/, 'cleared by sending an empty label');
-  // And what the release page will show is read back rather than assumed.
-  assert.match(source, /did not clear, so those assets still show a hash where their name should be/,
-    'a label that will not clear is reported');
+  // A release is one commit's, so the labelled assets of the scheme this replaced go with
+  // the rolling releases they are on rather than being cleared one at a time.
+  assert.match(source, /export async function retireRollingScheme/, 'the old rolling releases are removed');
+  assert.match(source, /LEGACY_ROLLING_PREFIX/, 'and only a rolling tag or release is ever touched');
 });

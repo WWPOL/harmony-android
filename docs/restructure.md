@@ -156,7 +156,8 @@ more than a rename:
   them `U` -- is unchanged, because the gaps are unchanged.
 - **`docs/builds.md`** described two Android apps shipping from one release and named assets by
   the other one's scheme. It now describes one app: a rolling release of the default branch, a
-  prerelease of any other, and the APK on each version tag.
+  prerelease of any other, and the APK on each version tag. (The rolling release has since been
+  replaced by a release per commit; see [Builds](builds.md).)
 
 ## The workflows
 
@@ -166,7 +167,9 @@ Two, where there were six.
 it, runs the unit tests and lint, names the APK, checks the package, version and signing
 certificate against the file itself, uploads it as an immutable per-run artifact, and publishes
 the newest build of each branch -- as the repository's release for the default branch, as a
-prerelease for any other. The trust split is unchanged and is what the tests assert: the build
+prerelease for any other. (That was the shape at the time; a later change publishes one release
+per commit of the default branch and nothing for other branches. See
+[Builds](builds.md).) The trust split is unchanged and is what the tests assert: the build
 job holds no write permission, and the publishing job has `contents: write` and runs only on a
 push to this repository. It published a container package as well until that was removed: an
 APK is not an image, and a package is not a download a phone can use.

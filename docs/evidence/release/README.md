@@ -1,4 +1,4 @@
-# Release evidence: the page that hid the APK, and the names that replace it
+# Release evidence: one release per commit, and the page that was there before
 
 ## What was wrong, in the repository's own output
 
@@ -24,33 +24,38 @@ brapmony-android sha256:aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42
 and not one file name. There is no `Brapmony-latest.apk` on the page to tap, which is what
 "the apk doesn't seem to be showing up" looks like.
 
-## What the fixed publisher produces
+## What the publisher produces now
 
-`asset-names-before-and-after.txt` is a run of `scripts/release.mjs` against the stand-in for
-the releases API (`scripts/fake-github-api.mjs`), seeded with that release **asset for asset
-and label for label, read from `api.github.com`**. The top is what the page shows today; the
-bottom is what one publish produces. It is a transcript, not a drawing:
-
-- no asset carries a label any more, so every entry shows its own name;
-- the assets that already carried one have it cleared, and their names appear again;
-- `Brapmony-latest.apk` is on the page, under its own name.
-
+A release per commit of `main`, named for the build and carrying one APK and its checksum.
 `publish-step-run.txt` is the workflow's own `Publish` step, run by `scripts/workflow-steps.mjs`
-with the real 69 MB APK, exactly as the job runs it. Reading the release back afterwards gives
+against the stand-in for the releases API (`scripts/fake-github-api.mjs`), seeded with the state
+`main` was in on 2026-11-23, and the release it left behind read back from the API. It is a
+transcript, not a drawing:
 
-```
-Brapmony-1.9.6-e5b7aec-debug.apk     label=""  uploader=github-actions[bot]
-Brapmony-latest.apk                  label=""  uploader=github-actions[bot]
-Brapmony-latest.apk.sha256           label=""  uploader=github-actions[bot]
-tag android-rolling-main -> e5b7aec558f4ee52d8cb6a9850750d64751484d2
-```
+- the tag is `v0.1.0-f9d8bbf` — the release line and the commit — and the title is
+  `0.1.0-f9d8bbf`, so the page names the build rather than a branch;
+- the body is the commits since the previous release, one line each, with the APK's SHA-256
+  and a link to the whole comparison. No description of the app and no install steps: they are
+  the same on every release and are in the README;
+- two assets, and both are this build's: `Brapmony-0.1.0-f9d8bbf-debug.apk` and its
+  `.sha256`. No stable alias and no older build beside it, so the file on the page is the file
+  to download;
+- no asset carries a label, so every entry shows its own name;
+- the release was created as a draft and made visible only once both files were on it.
 
-— every name visible, and the tag naming the commit that was built rather than the commit the
-release was first created at.
+The rolling releases and tags of the scheme this replaced — one per branch, ten builds and a
+`Brapmony-latest.apk` on each — are deleted by the first publish after this change, and by
+`cleanup`. `asset-names-before-and-after.txt` is that removal in one transcript: the page as
+the seed had it, then the same page read back after a single publish, with the tags gone.
+
+`live-release-page-before.png` and `live-release-assets-before.png` are screenshots of
+**github.com**, not drawings: `WWPOL/harmony-android/releases/tag/android-rolling-main`, taken
+at 420 px wide, the width a phone gives it, on 2026-11-23. They are the page that was there
+before any of this, kept because it is the thing that was wrong.
 
 ## What is not shown here
 
-A screenshot of the fixed page on github.com. It needs the first push to `main` after this
-change merges; nothing in this tree can produce it. What can be checked here is checked, and
-the run itself reads the asset list back after clearing the old labels, so a page whose names
-are still hidden is reported in the log instead of being described as fixed.
+A screenshot of a release as github.com renders it. It needs the first push to `main` after
+this change merges; nothing in this tree can produce it. What can be checked here is checked:
+the step run above is the workflow's own step, and the release it produced is read back from
+the API rather than described.

@@ -21,9 +21,9 @@ A clear description of the bug, and what you expected instead.
 
 - **App version**: (the account screen shows it; `adb shell dumpsys package
   io.github.wwpol.brapmony | grep versionName` prints it for a debug build)
-- **Where the build came from**: the release of `main` (`Brapmony-latest.apk`), a
-  version-tag release, another branch's prerelease, or a local
-  `./gradlew :app:assembleDebug`
+- **Where the build came from**: a release of `main` (give the file name it was downloaded
+  as, e.g. `Brapmony-0.1.0-606ab10-debug.apk`), a version-tag release, a CI artifact of a
+  branch, or a local `./gradlew :app:assembleDebug`
 - **Android version and device**: e.g. Android 14, Pixel 7; or the emulator image
 - **Instance**: the Harmony instance's address, if the bug depends on it
 

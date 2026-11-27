@@ -6,8 +6,8 @@ A native Android client for [Harmony](https://mony.lol): Kotlin and Jetpack Comp
 straight to your instance. Messages, servers, social, files, notifications and voice calls, all
 drawn by the app.
 
-**[Download the APK](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony-latest.apk)**
-· [Releases](https://github.com/WWPOL/harmony-android/releases)
+**[Download the APK](https://github.com/WWPOL/harmony-android/releases/latest)**
+· [All releases](https://github.com/WWPOL/harmony-android/releases)
 · [What is not finished yet](docs/parity-audit.md)
 
 <p align="center">
@@ -19,7 +19,10 @@ drawn by the app.
 
 ## Install
 
-**[Brapmony-latest.apk](https://github.com/WWPOL/harmony-android/releases/download/android-rolling-main/Brapmony-latest.apk)**
+**[The newest release](https://github.com/WWPOL/harmony-android/releases/latest)** has one APK,
+named for the commit it was built from (`Brapmony-0.1.0-606ab10-debug.apk`), and its notes say
+what changed. Every earlier release is on the [releases page](https://github.com/WWPOL/harmony-android/releases)
+with its own APK, so a build stays downloadable after later ones are published.
 
 1. Open it on the phone or tablet and tap the downloaded file.
 2. Allow the install when Android asks. The APK is test-signed, so Play Protect may warn.
@@ -28,14 +31,13 @@ drawn by the app.
 Over a cable:
 
 ```sh
-adb install -r Brapmony-latest.apk
+adb install -r Brapmony-0.1.0-606ab10-debug.apk
 ```
 
 Android 8.0 (API 26) or newer. A signature mismatch means an older build signed with a
 different key: uninstall it once.
 
-Each build also keeps its own file name, so it stays downloadable after later pushes. Names,
-keys and checksums: [docs/builds.md](docs/builds.md).
+Names, keys and checksums: [docs/builds.md](docs/builds.md).
 
 ## What it does
 

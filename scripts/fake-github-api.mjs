@@ -1,19 +1,26 @@
 #!/usr/bin/env node
 // A stand-in for the slice of the GitHub releases API this workflow uses, for running the
-// publish step locally: `node scripts/fake-github-api.mjs [port]`.
+// publish step locally: `node scripts/fake-github-api.mjs [port] [--seed <file>]`.
 //
 // It holds its state in memory and prints what it received, so a step can be run against it
 // exactly as it runs on a runner. Nothing here is used by the workflow.
+//
+// --seed starts it from a JSON file of `{ releases: [...], refs: { tag: sha } }`, which is how
+// a run can be made against the state a real repository was in -- the rolling release this
+// workflow replaced, say -- rather than against nothing.
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 const port = Number(process.argv[2] || 8099);
+const seedAt = process.argv.indexOf('--seed');
+const seed = seedAt > 0 ? JSON.parse(readFileSync(process.argv[seedAt + 1], 'utf8')) : null;
 const repo = process.env.GITHUB_REPOSITORY || 'WWPOL/brapmony';
-const releases = [];
-// Tag refs, by tag name: what a rolling tag points at. Empty here, because this stand-in
-// starts with no release; the first publish creates the tag it names.
-const refs = new Map();
-let nextId = 100;
+const releases = seed?.releases ?? [];
+// Tag refs, by tag name: what a release's tag points at. Empty unless seeded, because this
+// stand-in starts with no release; the first publish creates the tag it names.
+const refs = new Map(Object.entries(seed?.refs ?? {}));
+let nextId = 1000;
 
 const server = http.createServer(async (req, res) => {
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -47,17 +54,37 @@ const server = http.createServer(async (req, res) => {
       body: payload.body,
       draft: !!payload.draft,
       prerelease: !!payload.prerelease,
+      target_commitish: payload.target_commitish,
       assets: [],
       upload_url: `${base}/repos/${repo}/releases/${id}/assets{?name,label}`,
     };
     releases.push(release);
-    console.log(`created release ${id} ${release.tag_name} prerelease=${release.prerelease}`);
+    console.log(`created release ${id} ${release.tag_name} draft=${release.draft} name=${JSON.stringify(release.name)}`);
     return send(201, release);
   }
   let m = /^\/repos\/(.+)\/releases\/(\d+)$/.exec(url.pathname);
   if (m && req.method === 'GET') {
     const release = releases.find((r) => r.id === Number(m[2]));
     return release ? send(200, release) : send(404, { message: 'Not Found' });
+  }
+  if (m && req.method === 'PATCH') {
+    // What makes a draft a release: the publisher creates one as a draft, puts the files on
+    // it, and only then clears `draft` and writes the notes.
+    const release = releases.find((r) => r.id === Number(m[2]));
+    if (!release) return send(404, { message: 'Not Found' });
+    Object.assign(release, JSON.parse(body.toString()));
+    console.log(`patched release ${release.id} ${release.tag_name} draft=${release.draft}`);
+    return send(200, release);
+  }
+  // Deleting a release, which is how the rolling releases of the scheme this replaced go.
+  // Its assets go with it, as they do on GitHub.
+  if (m && req.method === 'DELETE') {
+    const id = Number(m[2]);
+    const at = releases.findIndex((r) => r.id === id);
+    if (at < 0) return send(404, { message: 'Not Found' });
+    const [gone] = releases.splice(at, 1);
+    console.log(`deleted release ${gone.id} ${gone.tag_name} with ${gone.assets.length} asset(s)`);
+    return send(204);
   }
   m = /^\/repos\/(.+)\/releases\/(\d+)\/assets$/.exec(url.pathname);
   if (m && req.method === 'GET') {
@@ -134,6 +161,14 @@ const server = http.createServer(async (req, res) => {
     console.log(`moved tag ${name} to ${payload.sha}`);
     return send(200, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
   }
+  m = /^\/repos\/(.+)\/git\/refs\/tags\/(.+)$/.exec(url.pathname);
+  if (m && req.method === 'DELETE') {
+    const name = decodeURIComponent(m[2]);
+    if (!refs.has(name)) return send(404, { message: 'Not Found' });
+    refs.delete(name);
+    console.log(`deleted tag ${name}`);
+    return send(204);
+  }
   if (/\/git\/refs$/.test(url.pathname) && req.method === 'POST') {
     const payload = JSON.parse(body.toString());
     const name = String(payload.ref || '').replace(/^refs\/tags\//, '');
@@ -142,6 +177,10 @@ const server = http.createServer(async (req, res) => {
     refs.set(name, payload.sha);
     console.log(`created tag ${name} at ${payload.sha}`);
     return send(201, { ref: `refs/tags/${name}`, object: { type: 'commit', sha: payload.sha } });
+  }
+  // The tag list `cleanup` reads to find a tag whose release is gone.
+  if (req.method === 'GET' && url.pathname === `/repos/${repo}/tags`) {
+    return page([...refs.keys()].map((name) => ({ name, commit: { sha: refs.get(name) } })));
   }
   // The branch list and the artifact list `cleanup` reads. This stand-in starts with no
   // branches and no artifacts, so a cleanup run against it lists nothing and deletes

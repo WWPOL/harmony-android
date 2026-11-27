@@ -1,52 +1,47 @@
 #!/usr/bin/env node
 // Publishes the Android client's APK from CI. Four callers:
 //
-//   node scripts/release.mjs rolling --apk <file> --branch <ref> --commit <sha> \
-//       --default-branch <ref> [--version <x.y.z>] [--keep <n>] [--body <markdown>] \
-//       [--dry-run]
-//     Publishes a rolling build of one branch: `Brapmony for Android — newest build of
-//     <branch>` tagged
-//     `android-rolling-<slug>`. Each run adds its APK under its own name and refreshes
-//     the stable `Brapmony-latest.apk` (and its `.sha256`) to the same bytes. The build
-//     of the repository's default branch is published as a **release**, so it is what the
-//     repository's Releases page and /releases/latest offer; any other branch's is a
-//     prerelease, which /releases/latest skips. The release is named for the branch, not
-//     for a version: it is a window on a stream of builds, and the version of the build
-//     that is on it is in its body beside the commit.
+//   node scripts/release.mjs publish --apk <file> --version <x.y.z> --commit <sha>
+//       [--body <markdown>] [--keep <n>] [--attempt <n>] [--dry-run]
+//     Publishes one release for one commit of the default branch, tagged
+//     `v<x.y.z>-<sha7>` and named for that build (`0.1.0-abc1234`). The release carries the
+//     APK and its `.sha256`, and nothing else: no second copy under a stable name, and no
+//     other build of the same release. Its body is the changelog of the commits since the
+//     previous release, so the Releases page reads as the project's history rather than as
+//     a page of instructions that is the same on every release.
 //
-//   node scripts/release.mjs tag --tag <vX.Y.Z> [--name <title>] [--body <markdown>]
-//     Creates the version release for a tag, or finds the one that exists, and prints
-//     its id to GITHUB_OUTPUT. Used by release.yml, which then attaches the APK to it.
+//     The release is created as a draft and published only once both files are on it, so a
+//     failed publish leaves nothing on the Releases page that is not downloadable.
+//
+//   node scripts/release.mjs tag --tag <vX.Y.Z> [--apk <file>] [--name <title>]
+//       [--body <markdown>] [--dry-run]
+//     Creates the version release for a tag, or finds the one that exists, and prints its
+//     id to GITHUB_OUTPUT. Used by release.yml, which then attaches the APK to it. Its body
+//     is the same changelog, from the previous release to the tagged commit.
 //
 //   node scripts/release.mjs upload --release-id <id> <file>...
 //     Attaches files to an existing release, replacing assets of the same name and
 //     nothing else.
 //
-//   node scripts/release.mjs cleanup --default-branch <ref> [--keep-artifacts <n>] [--apply]
-//     Lists, and with --apply deletes, what a rolling workflow left behind that nothing
-//     will publish to again: the rolling releases and tags of branches that no longer
-//     exist, and Actions artifacts beyond the newest --keep-artifacts. It never touches a
-//     version release, a version tag, or the rolling release of a branch that exists.
-//     Run by cleanup.yml on a manual dispatch, because deleting a release and a tag is
-//     not something a push should do by accident.
+//   node scripts/release.mjs cleanup [--keep-releases <n>] [--keep-artifacts <n>] [--apply]
+//     Lists, and with --apply does, what a publish leaves behind that nothing will read
+//     again: the APK of a release older than the newest --keep-releases (the release and
+//     its changelog stay), Actions artifacts beyond the newest --keep-artifacts, and the
+//     rolling releases and tags of the scheme this replaced. It never touches a release
+//     that is inside the window, and never a tag that names one.
+//     Run by cleanup.yml on a manual dispatch, because deleting a published file is not
+//     something a push should do by accident.
 //
 // What this refuses to do, because a published download link is somebody's:
 //
-//   * touch a release whose tag is not a rolling tag it computed itself;
-//   * publish into a release at that tag that carries none of its own assets (somebody
-//     else's release, or an empty one), rather than rewriting what it says;
+//   * touch a release whose tag is not one it computed itself (`vX.Y.Z` or
+//     `vX.Y.Z-<sha7>`);
+//   * publish into a release at that tag that carries only somebody else's files;
 //   * overwrite an asset this workflow did not upload (ownership is read from the asset's
-//     uploader, and only this workflow's own files are ever replaced or pruned);
+//     uploader and its name, and only this workflow's own files are ever replaced);
 //   * replace a build asset whose bytes differ, which would silently change what an
 //     existing name means (the new bytes go under a distinct name instead);
-//   * delete the stable `latest` name before the replacement has been uploaded;
-//   * prune when the newest build did not upload;
-//   * delete a version release, a version tag, or the rolling release of a live branch.
-//
-// Retention: a rolling release keeps the newest DEFAULT_KEEP builds of its branch and
-// deletes older ones it uploaded itself. The release is a rolling window, not an
-// archive: a link to a build older than that window stops resolving. The versioned
-// release of a tag is the archive, and nothing here touches it.
+//   * delete a version release, a version tag, or a release inside the kept window.
 //
 // Environment: GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_API_URL, GITHUB_OUTPUT.
 //
@@ -59,30 +54,36 @@
 // attempt landed but whose answer was lost is recognised by GitHub's own digest of the stored
 // asset, a create whose first attempt landed is read back by tag, and a delete that finds
 // nothing treats that as done.
-import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
-// The stable name to bookmark: replaced on every publish, so it always names the newest
-// build of the branch. The build's own name is versioned and never changes.
-export const LATEST_ASSET = 'Brapmony-latest.apk';
-export const LATEST_SHA256_ASSET = 'Brapmony-latest.apk.sha256';
-// Names an earlier version of this workflow published under. They are retired on the
-// first publish that runs here, so a download does not sit under a name the
-// documentation no longer mentions, holding bytes nothing updates. Only assets this
-// workflow owns are ever removed.
-export const RETIRED_ASSETS = ['Brapmony_Android_latest.apk', 'Brapmony_Android_latest.apk.sha256'];
-// The prefix every rolling release tag carries. A version release's tag is `vX.Y.Z`,
-// so a lookup can never match one.
-export const ROLLING_TAG_PREFIX = 'android-rolling-';
-// How many of a branch's own builds a rolling release keeps.
-export const DEFAULT_KEEP = 10;
+// The tags this workflow publishes. A version tag is `vX.Y.Z` and is a deliberate act: a
+// commit is bumped to a release line and tagged. A commit tag is `vX.Y.Z-<sha7>` and is
+// made by every push to the default branch. They cannot be confused: a version tag has no
+// suffix, and a commit tag always has one.
+export const VERSION_TAG_RE = /^v\d+\.\d+\.\d+$/;
+export const COMMIT_TAG_RE = /^v\d+\.\d+\.\d+-[0-9a-f]{7,40}$/;
+export const RELEASE_TAG_RE = /^v\d+\.\d+\.\d+(?:-[0-9a-f]{7,40})?$/;
+
+// The prefix of the releases the scheme this replaced published, one per branch, refreshed
+// by every push. Nothing publishes to one any more, so a publish removes them and their
+// tags: they are the old files that made a downloader guess which one to take.
+export const LEGACY_ROLLING_PREFIX = 'android-rolling-';
+
+// How many releases keep their APK. A release per commit is a changelog, and the changelog
+// is worth keeping; the file it carries is not, once it is a month old. Beyond this many,
+// the release stays and its assets are deleted, so the page still says what the commit was.
+export const DEFAULT_RELEASE_KEEP = 30;
 // How many Actions artifacts the cleanup keeps: enough to read back what the last few runs
 // built, not the whole history.
 export const DEFAULT_ARTIFACT_KEEP = 10;
+// How many commits a release's changelog lists before it says how many it left out.
+export const DEFAULT_CHANGELOG_LIMIT = 40;
 
 // The account GitHub attributes a workflow's uploads to. An asset uploaded by a workflow
 // carries this login, and one somebody attached to the release by hand carries theirs, so
@@ -92,10 +93,11 @@ export const DEFAULT_ARTIFACT_KEEP = 10;
 export const BOT_LOGIN = 'github-actions[bot]';
 // Releases published before this changed wrote an ownership label into every asset. GitHub
 // shows an asset's label **in place of its file name**, so those releases list
-// `brapmony-android sha256:…` where the download names should be: nothing writes a label
-// now, and the assets that already carry one are still read as this workflow's so they can
-// be replaced and pruned rather than left behind.
+// `brapmony-android sha256:…` where the download names should be. Nothing writes a label
+// now, and an asset that already carries one is still read as this workflow's so it can be
+// pruned with the release it is on.
 export const LEGACY_OWNER = 'brapmony-android';
+
 // The asset names this workflow publishes: `Brapmony-<version>...` today, and
 // `Brapmony_Android_<version>...` from before the name scheme was flattened. Naming is how
 // these are told apart on a release whose assets predate the ownership label, and it is what
@@ -106,6 +108,9 @@ export function ownName(name) {
 export function isOwned(asset) {
   if (typeof asset?.label === 'string' && asset.label.startsWith(`${LEGACY_OWNER} `)) return true;
   return asset?.uploader?.login === BOT_LOGIN && ownName(asset?.name);
+}
+export function ownsAsset(asset) {
+  return isOwned(asset) || ownName(asset.name);
 }
 
 // Whether the bytes GitHub already holds are the file in hand. GitHub computes a SHA-256
@@ -118,52 +123,30 @@ export function storedBytes(asset, sha256, size) {
   return Number.isFinite(size) && asset?.size === size;
 }
 
-// The asset names this workflow publishes: `Brapmony-<version>...` today, and
-// `Brapmony_Android_<version>...` from before the name scheme was flattened. Naming is
-// how these are told apart on a release whose assets predate the ownership label.
-export function ownsAsset(asset) {
-  return isOwned(asset) || ownName(asset.name);
-}
-
 export class PublishError extends Error {}
 
-// A git ref is not a valid tag on its own: `feature/x` would make the tag look like a
-// path, and a branch named `v1.0.0` would collide with a version release. The prefix
-// is what keeps the two apart. The tag is the
-// branch with every run of characters outside [A-Za-z0-9._-] replaced by `-`.
-export function rollingTag(branch) {
-  const name = String(branch || '').trim();
-  if (!name) throw new PublishError('--branch is required');
-  const slug = name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  if (!slug) throw new PublishError(`branch ${name} has no characters a tag can carry`);
-  return `${ROLLING_TAG_PREFIX}${slug.slice(0, 80)}`;
+// The tag a commit's release carries. The release line is in it, so a tag says which line
+// the build belongs to, and the commit is in it, so two builds of one line cannot collide.
+// It is a tag in the `v` namespace, which is what makes it sort and read beside the version
+// tags; a version tag has no suffix, so a lookup of one can never find the other.
+export function commitTag(version, commit) {
+  const line = String(version || '').trim();
+  if (!/^\d+\.\d+\.\d+$/.test(line)) throw new PublishError(`--version must be x.y.z, not ${version}`);
+  const sha = String(commit || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new PublishError(`--commit must be a commit id, not ${commit}`);
+  return `v${line}-${sha.slice(0, 7)}`;
 }
 
-export function rollingName(branch) {
-  const name = String(branch || '').trim();
-  return `Brapmony for Android \u2014 newest build of ${name}`;
-}
-
-// The name a rolling release carries. It names the branch and not a version: a rolling
-// release is a window on a branch, refreshed by every push, so a version in its title would
-// be one stale number standing for a stream of different builds -- which is what
-// `Brapmony 1.9.6` was, for every commit, because the version line never changed. The
-// version of the build that is actually on it is in its body, beside the commit. A version
-// release is the one named by a version, and its tag is `vX.Y.Z`.
-export function releaseTitle(branch) {
-  return rollingName(branch);
-}
-
-// Whether a rolling release is a published release or a prerelease. The default branch's
-// build is what the repository offers as its release: it is what /releases/latest and the
-// Releases box on the repository page point at, and a prerelease is skipped by both, so a
-// prerelease there means no release is offered at all. Every other branch stays a
-// prerelease -- a branch build is not an offer to anybody.
-export function isPublishedRelease(branch, defaultBranch) {
-  const b = String(branch || '').trim();
-  const d = String(defaultBranch || '').trim();
-  if (!b || !d) throw new PublishError('--default-branch is required to decide whether a build is a release');
-  return b === d;
+// The name of a commit's release: the version the APK reports, which is the release line
+// and the commit. The app's own name is not repeated in it: the release is on the app's
+// repository, so "Brapmony for Android" in front of every title says nothing the page does
+// not already say.
+export function releaseTitle(version, commit) {
+  const line = String(version || '').trim();
+  const sha = String(commit || '').trim().toLowerCase();
+  if (!/^\d+\.\d+\.\d+$/.test(line)) throw new PublishError(`--version must be x.y.z, not ${version}`);
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new PublishError(`--commit must be a commit id, not ${commit}`);
+  return `${line}-${sha.slice(0, 7)}`;
 }
 
 export function sha256File(file) {
@@ -372,130 +355,114 @@ export function client({
 }
 
 // Drafts are not addressable by tag and the list is paged, so the list is read through
-// paginate. A release is matched by exact tag only, and only ever a rolling tag.
+// paginate. A release is matched by exact tag only, and only ever a tag this workflow
+// publishes: `vX.Y.Z` or `vX.Y.Z-<sha7>`.
 async function findByTag(gh, tag) {
-  if (!tag.startsWith(ROLLING_TAG_PREFIX)) {
-    throw new PublishError(`refusing to look up ${tag}: not a rolling tag`);
+  if (!RELEASE_TAG_RE.test(String(tag || ''))) {
+    throw new PublishError(`refusing to look up ${tag}: not a release tag`);
   }
   return (await gh.paginate('/releases')).find((r) => r.tag_name === tag) || null;
 }
 
-// What a rolling release of [branch] should say and be: a published release for the
-// default branch, a prerelease for any other. [version] is accepted and unused by the
-// title: the version of the build on it belongs in the body, where it is the build's,
-// rather than in the title, where it would be one number for many builds.
-export function rollingState({ branch, defaultBranch, version, body }) {
-  const published = isPublishedRelease(branch, defaultBranch);
-  return {
-    name: releaseTitle(branch, version),
-    body: body ?? '',
-    draft: false,
-    prerelease: !published,
-  };
-}
-
-// Finds the rolling release for [branch], or creates it. An existing release at that tag
-// is only ever this workflow's: one that carries no build of ours is somebody else's, and
-// is refused rather than rewritten. Changing the name, body and published state is a
-// separate call (updateRollingRelease) made after this run's build has uploaded, so a
-// failed publish cannot leave the repository's release saying something it is not.
-export async function ensureRollingRelease(gh, { branch, commit, defaultBranch, version, body }) {
-  const tag = rollingTag(branch);
-  const wanted = rollingState({ branch, defaultBranch, version, body });
-  const existing = await findByTag(gh, tag);
-  if (existing) {
-    const assets = await listAssets(gh, existing.id);
-    if (!assets.some(ownsAsset)) {
-      throw new PublishError(
-        `release ${tag} carries no build of this workflow's; refusing to publish into it`,
-      );
-    }
-    return { id: existing.id, tag, created: false, wanted, current: existing };
-  }
-  // A create whose first attempt landed answers 422 when it is sent again, because the tag
-  // is now taken. The release is read back by tag then: if this workflow's release is there,
-  // the earlier attempt landed and the answer was lost, which is the outcome asked for. What
-  // is read back is the release's current state, so the page is whatever is really there.
-  let created;
-  let landedOnRetry = false;
-  try {
-    created = await gh.json('POST', '/releases', {
-      contentType: 'application/json',
-      body: JSON.stringify({
-        tag_name: tag,
-        ...wanted,
-        ...(commit ? { target_commitish: commit } : {}),
-      }),
-    });
-  } catch (error) {
-    if (error.status !== 422) throw error;
-    const landed = await findByTag(gh, tag);
-    if (!landed) throw error;
-    created = landed;
-    landedOnRetry = true;
-  }
-  return { id: created.id, tag, created: true, wanted, current: landedOnRetry ? created : null };
-}
-
-// Brings an existing rolling release in line with this build: the title and body describe
-// the newest build, and a release of the default branch is published while another
-// branch's is a prerelease. Only what differs is written, so a re-run of the same commit
-// changes nothing.
-export async function updateRollingRelease(gh, { id, tag, wanted, current }) {
-  if (!current) return { updated: [], prerelease: wanted.prerelease };
-  const patch = {};
-  if (current.prerelease !== wanted.prerelease) patch.prerelease = wanted.prerelease;
-  if (current.name !== wanted.name) patch.name = wanted.name;
-  if (wanted.body && current.body !== wanted.body) patch.body = wanted.body;
-  const updated = Object.keys(patch);
-  if (!updated.length) return { updated, prerelease: wanted.prerelease };
-  await gh.json('PATCH', `/releases/${id}`, {
-    contentType: 'application/json',
-    body: JSON.stringify(patch),
-  });
-  return { updated, prerelease: wanted.prerelease };
-}
-
-// A version release is addressed by its exact tag, and only ever a `vX.Y.Z` one: the
-// rolling tags are a different namespace, and this must never find one of those. An
-// existing release is returned as it is -- published or draft -- so a re-run of a tag
-// attaches to the same release instead of creating a second one.
-export async function ensureTagRelease(gh, { tag, name, body }) {
-  const version = String(tag || '').replace(/^v/, '');
-  if (!/^\d+\.\d+\.\d+$/.test(version)) {
-    throw new PublishError(`--tag must be vX.Y.Z, not ${tag}`);
-  }
-  const existing = (await gh.paginate('/releases')).find((r) => r.tag_name === tag) || null;
-  if (existing) {
-    if (existing.tag_name.startsWith(ROLLING_TAG_PREFIX)) {
-      throw new PublishError(`${tag} is a rolling tag; refusing to treat it as a version release`);
-    }
-    return { id: existing.id, tag, created: false, draft: Boolean(existing.draft) };
-  }
-  // As above: a create sent again after a lost answer answers 422, and the release the
-  // first attempt made is read back by tag rather than reported as a failure.
-  try {
-    const created = await gh.json('POST', '/releases', {
-      contentType: 'application/json',
-      body: JSON.stringify({
-        tag_name: tag,
-        name: name || `Brapmony ${version}`,
-        body: body ?? '',
-        draft: false,
-        prerelease: false,
-      }),
-    });
-    return { id: created.id, tag, created: true, draft: Boolean(created.draft) };
-  } catch (error) {
-    if (error.status !== 422) throw error;
-    const landed = (await gh.paginate('/releases')).find((r) => r.tag_name === tag) || null;
-    if (!landed) throw error;
-    return { id: landed.id, tag, created: true, draft: Boolean(landed.draft) };
-  }
-}
-
 async function listAssets(gh, releaseId) {
   return gh.paginate(`/releases/${releaseId}/assets`);
+}
+
+// A small helper over git, for the changelog. The publisher reads the commit history of the
+// checkout it runs in -- that is where the release notes come from -- and reports a git that
+// cannot answer as a publish failure rather than publishing a release with no notes.
+export function gitOutput(args, { cwd = process.cwd() } = {}) {
+  const run = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (run.error) throw new PublishError(`git ${args.join(' ')}: ${run.error.message}`);
+  return run.status === 0 ? run.stdout : null;
+}
+
+// The tag of the release before [commit], which is where a changelog starts. It is found
+// with `git describe` on the commit's parent, so it is the nearest release tag behind this
+// commit on the history, and never the tag this publish is about to create: a re-run of a
+// commit that already has a release therefore reports the same changes the first run did,
+// rather than nothing. A commit with no release behind it returns null, and the changelog is
+// the commit itself.
+//
+// A tag that does not match one of the two schemes is skipped rather than named: a release's
+// body links to the tag it describes, so a stray tag would be a link to nothing.
+export function previousReleaseTag({ commit = 'HEAD', cwd } = {}) {
+  const parent = gitOutput(['rev-parse', '--verify', '--quiet', `${commit}^`], { cwd });
+  if (!parent || !parent.trim()) return null;
+  const described = gitOutput(['describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*', parent.trim()], { cwd });
+  if (!described || !described.trim()) return null;
+  const tag = described.trim();
+  return RELEASE_TAG_RE.test(tag) ? tag : null;
+}
+
+function parseEntries(text) {
+  return String(text)
+    .split('\n')
+    .filter((line) => line.includes('\t'))
+    .map((line) => {
+      const [sha, ...subject] = line.split('\t');
+      return { sha: sha.trim(), subject: subject.join('\t').trim() };
+    });
+}
+
+// The commits since the previous release, newest first. Merge commits are left out: a merge
+// commit's subject names the pull request, and the commits it brought in are in the range
+// already. [limit] bounds what a release page has to render; the count of what was left out
+// is reported beside the entries rather than silently dropped.
+//
+// A commit with no release behind it is the first one, and its changelog is the history up to
+// it -- still bounded, and still counted. The alternative, listing only the commit itself,
+// would make the first release's page say less about the project than the hundredth's.
+export function changelogEntries({ commit = 'HEAD', from, limit = DEFAULT_CHANGELOG_LIMIT, cwd } = {}) {
+  const base = from === undefined ? previousReleaseTag({ commit, cwd }) : from;
+  const range = base ? `${base}..${commit}` : commit;
+  const out = gitOutput(['log', '--no-merges', '--format=%H%x09%s', `--max-count=${limit}`, range], { cwd });
+  if (out === null) {
+    throw new PublishError(base ? `cannot read the commits in ${base}..${commit}` : `cannot read the commit ${commit}`);
+  }
+  const entries = parseEntries(out);
+  const counted = gitOutput(['rev-list', '--no-merges', '--count', range], { cwd });
+  const total = Number((counted || '').trim()) || entries.length;
+  return { previous: base, entries, more: Math.max(0, total - entries.length) };
+}
+
+// What a release says. It is the changelog and nothing else: the app is described in the
+// repository's README, and how to install an APK is the same on every release, so repeating
+// either here would be the same paragraphs on every page and would push the one thing that
+// is different about this build -- what changed -- off the screen.
+export function releaseBody({ commit, sha256, previous, entries = [], more = 0, repository } = {}) {
+  const repo = String(repository || '').trim() || null;
+  const short = (sha) => String(sha).slice(0, 7);
+  const link = (sha) => (repo ? `[\`${short(sha)}\`](https://github.com/${repo}/commit/${sha})` : `\`${short(sha)}\``);
+  const lines = [];
+  lines.push(previous ? `## Changes since \`${previous}\`` : '## Changes');
+  lines.push('');
+  if (!entries.length) lines.push('- No commit subject recorded for this build.');
+  for (const entry of entries) lines.push(`- ${entry.subject} (${link(entry.sha)})`);
+  if (more > 0) lines.push(`- … and ${more} more commit${more === 1 ? '' : 's'}`);
+  lines.push('');
+  const footer = [`sha256: \`${sha256}\``];
+  if (repo && previous && commit) {
+    footer.push(`[Full comparison](https://github.com/${repo}/compare/${previous}...${commit})`);
+  }
+  lines.push(footer.join(' · '));
+  return `${lines.join('\n')}\n`;
+}
+
+// The body of the release for [commit]: the changelog since the previous one, with the
+// checksum of the file that release will carry.
+export function notesFor({ commit = 'HEAD', sha256, repository, limit, cwd } = {}) {
+  const { previous, entries, more } = changelogEntries({ commit, limit, cwd });
+  return releaseBody({ commit, sha256, previous, entries, more, repository });
+}
+
+// The same, for a text asset written rather than copied: the `.sha256` that travels with
+// the APK, in the form `sha256sum -c` reads.
+export function checksumFile(sha256, name) {
+  const dir = mkdtempSync(join(tmpdir(), 'brapmony-'));
+  const file = join(dir, `${name}.sha256`);
+  writeFileSync(file, `${sha256}  ${name}\n`);
+  return file;
 }
 
 // GitHub's upload endpoint replaces nothing: a second upload of a name that is already
@@ -503,9 +470,9 @@ async function listAssets(gh, releaseId) {
 //
 // No label is sent. GitHub shows an asset's label **in place of its file name** on the
 // release page, so a label here made the release list `brapmony-android sha256:…` where
-// `Brapmony-latest.apk` should be, and a person looking for the APK found no file names at
-// all. The label was only ever this workflow's note to itself about which bytes an asset
-// held; GitHub's own `digest` says that, and says it without hiding the name.
+// `Brapmony-0.1.0-abc1234-debug.apk` should be, and a person looking for the APK found no
+// file names at all. The label was only ever this workflow's note to itself about which
+// bytes an asset held; GitHub's own `digest` says that, and says it without hiding the name.
 //
 // What GitHub stored is then compared with what was sent (checkAssetDigest): the digest in
 // the response is computed by GitHub over the bytes it holds, so a mismatch means the file
@@ -541,11 +508,11 @@ async function uploadFile(gh, { releaseId, file, name }) {
   return asset;
 }
 
-// Adds this run's build under its own name. A re-run of the same commit with the same
-// bytes is a no-op: the asset a link already points at keeps meaning the same thing. A
-// re-run with different bytes uploads under a distinct name rather than changing what the
-// existing name resolves to.
-export async function publishBuild(gh, { releaseId, file, name, attempt = 1 }) {
+// Adds a file under its own name. A re-run of the same commit with the same bytes is a
+// no-op: the asset a link already points at keeps meaning the same thing. A re-run with
+// different bytes uploads under a distinct name rather than changing what the existing name
+// resolves to, and the `.sha256` beside an APK moves with it.
+export async function publishAsset(gh, { releaseId, file, name, attempt = 1 }) {
   const sha256 = sha256File(file);
   const size = statSync(file).size;
   const existing = (await listAssets(gh, releaseId)).filter((a) => a.name === name);
@@ -559,9 +526,12 @@ export async function publishBuild(gh, { releaseId, file, name, attempt = 1 }) {
       throw new PublishError(`asset ${name} was not uploaded by this workflow; refusing to replace it`);
     }
     // Same commit, different bytes: a rebuild. It gets its own name, so the earlier
-    // build's link keeps resolving to the earlier bytes.
-    const suffix = `.r${attempt}`;
-    const renamed = name.replace(/\.apk$/, `${suffix}.apk`);
+    // build's link keeps resolving to the earlier bytes. The `.r<n>` goes before the
+    // extension, so an APK and the checksum beside it stay named for each other.
+    const renamed = name.replace(/\.apk(\.sha256)?$/, `.r${attempt}.apk$1`);
+    if (renamed === name) {
+      throw new PublishError(`asset ${name} is already on release ${releaseId} with different bytes`);
+    }
     const asset = await uploadFile(gh, { releaseId, file, name: renamed });
     return { asset, uploaded: true, sha256, name: renamed };
   }
@@ -569,290 +539,180 @@ export async function publishBuild(gh, { releaseId, file, name, attempt = 1 }) {
   return { asset, uploaded: true, sha256, name };
 }
 
-// Moves the stable name onto [file] without ever leaving the name absent: the new bytes
-// are uploaded under a staging name first, then the names are swapped by rename, and only
-// then is the previous file deleted. If anything fails before the swap, the previous
-// `latest` is still there and still downloadable.
-export async function replaceStable(gh, { releaseId, file, name }) {
-  const assets = await listAssets(gh, releaseId);
-  const current = assets.filter((a) => a.name === name);
-  // Already these bytes: leave the asset alone, so a re-run changes nothing and the
-  // id a download link resolves through stays the same. What is compared is GitHub's own
-  // digest of the stored asset against the local file, so it holds for the checksum file
-  // as well as for the APK.
-  if (current.length === 1 && storedBytes(current[0], sha256File(file), statSync(file).size)) {
-    return { asset: current[0], replaced: 0 };
-  }
-  for (const a of current) {
-    if (!isOwned(a)) {
-      throw new PublishError(`asset ${name} was not uploaded by this workflow; refusing to replace it`);
+// Finds the release for a commit's tag, or creates it as a draft. A release at that tag is
+// only ever this workflow's: one that carries files and none of ours is somebody else's, and
+// is refused rather than written into. An empty one is this workflow's own failed attempt --
+// a create whose upload never happened -- and is finished by this run.
+//
+// The draft is what makes a failed publish harmless: until both files are on it, the release
+// is invisible on the Releases page and to /releases/latest, so nobody is offered a page
+// whose download does not exist yet.
+export async function ensureCommitRelease(gh, { version, commit, name, body }) {
+  const tag = commitTag(version, commit);
+  const existing = await findByTag(gh, tag);
+  if (existing) {
+    const assets = await listAssets(gh, existing.id);
+    if (assets.length && !assets.some(ownsAsset)) {
+      throw new PublishError(`release ${tag} carries no build of this workflow's; refusing to publish into it`);
     }
+    return { id: existing.id, tag, created: false, release: existing };
   }
-  const staging = `${name}.staging-${process.pid}`;
-  const previous = `${name}.previous-${process.pid}`;
-  const uploaded = await uploadFile(gh, { releaseId, file, name: staging });
+  // A create whose first attempt landed answers 422 when it is sent again, because the tag
+  // is now taken. The release is read back by tag then: if this workflow's release is there,
+  // the earlier attempt landed and the answer was lost, which is the outcome asked for.
+  let created;
   try {
-    const moved = [];
-    for (const a of current) {
-      moved.push(a.id);
-      await gh.json('PATCH', `/releases/assets/${a.id}`, {
-        contentType: 'application/json',
-        body: JSON.stringify({ name: `${previous}-${a.id}` }),
-      });
-    }
-    await gh.json('PATCH', `/releases/assets/${uploaded.id}`, {
+    created = await gh.json('POST', '/releases', {
       contentType: 'application/json',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({
+        tag_name: tag,
+        target_commitish: commit,
+        name,
+        body,
+        draft: true,
+        prerelease: false,
+      }),
     });
-    // Only now, with the new bytes in place, is the old one removed.
-    for (const id of moved) await deleteIfPresent(gh, `/releases/assets/${id}`);
-    return { asset: { ...uploaded, name }, replaced: moved.length };
   } catch (error) {
-    // Put the previous file back under the stable name if the swap did not finish.
-    for (const a of current) {
-      try {
-        await gh.json('PATCH', `/releases/assets/${a.id}`, {
-          contentType: 'application/json',
-          body: JSON.stringify({ name }),
-        });
-        break;
-      } catch {
-        /* try the next one; the rest of the error is what matters */
-      }
-    }
-    try {
-      await deleteIfPresent(gh, `/releases/assets/${uploaded.id}`);
-    } catch {
-      /* the staging asset is harmless and pruned next run */
-    }
-    throw error;
+    if (error.status !== 422) throw error;
+    const landed = await findByTag(gh, tag);
+    if (!landed) throw error;
+    created = landed;
   }
+  return { id: created.id, tag, created: true, release: created };
 }
 
-// Clears the ownership label off assets an earlier version of this workflow published.
-// GitHub shows a label in place of the file name, so those assets are listed as
-// `brapmony-android sha256:…` and a person looking for `Brapmony-latest.apk` finds no such
-// name on the page. The label is no longer needed -- ownership is read from the uploader --
-// so it is removed, and the read-back says whether it went: an API that ignores an empty
-// label leaves the name hidden, and the run says so instead of reporting a page that is
-// still unreadable.
-export async function clearLegacyLabels(gh, { releaseId, log = () => {} }) {
-  const cleared = [];
-  const stubborn = [];
-  for (const asset of await listAssets(gh, releaseId)) {
-    if (typeof asset.label !== 'string' || !asset.label.startsWith(`${LEGACY_OWNER} `)) continue;
-    if (!isOwned(asset)) continue;
-    await gh.json('PATCH', `/releases/assets/${asset.id}`, {
+// Makes the release visible, once what it names is on it. Only what differs is written, so
+// a re-run of a published release changes nothing. The body is written again because the
+// release may have been created by an earlier attempt of this same commit, whose notes were
+// composed before the build it is publishing existed.
+export async function publishRelease(gh, { id, name, body }) {
+  const current = await gh.json('GET', `/releases/${id}`);
+  const patch = {};
+  if (current.draft !== false) patch.draft = false;
+  if (name && current.name !== name) patch.name = name;
+  if (body && current.body !== body) patch.body = body;
+  const updated = Object.keys(patch);
+  if (!updated.length) return { updated };
+  await gh.json('PATCH', `/releases/${id}`, {
+    contentType: 'application/json',
+    body: JSON.stringify(patch),
+  });
+  return { updated };
+}
+
+// A version release is addressed by its exact tag, and only ever a `vX.Y.Z` one: the commit
+// tags are a different namespace, and this must never find one of those. An existing
+// release is returned as it is -- published or draft -- so a re-run of a tag attaches to the
+// same release instead of creating a second one.
+//
+// It is created as a draft, like a commit's release, and made visible by the upload that
+// puts the APK on it: a tag whose build fails therefore leaves no page offering a download
+// that is not there.
+export async function ensureTagRelease(gh, { tag, name, body }) {
+  const text = String(tag || '');
+  if (!VERSION_TAG_RE.test(text)) {
+    throw new PublishError(`--tag must be vX.Y.Z, not ${tag}`);
+  }
+  const version = text.replace(/^v/, '');
+  const existing = await findByTag(gh, text);
+  if (existing) {
+    return { id: existing.id, tag: text, created: false, draft: Boolean(existing.draft) };
+  }
+  // As above: a create sent again after a lost answer answers 422, and the release the
+  // first attempt made is read back by tag rather than reported as a failure.
+  try {
+    const created = await gh.json('POST', '/releases', {
       contentType: 'application/json',
-      body: JSON.stringify({ label: '' }),
+      body: JSON.stringify({
+        tag_name: text,
+        name: name || version,
+        body: body ?? '',
+        draft: true,
+        prerelease: false,
+      }),
     });
-    cleared.push(asset.name);
+    return { id: created.id, tag: text, created: true, draft: Boolean(created.draft) };
+  } catch (error) {
+    if (error.status !== 422) throw error;
+    const landed = await findByTag(gh, text);
+    if (!landed) throw error;
+    return { id: landed.id, tag: text, created: true, draft: Boolean(landed.draft) };
   }
-  if (!cleared.length) return { cleared, stubborn };
-  // Read back what the page will show, rather than trusting the request to have worked.
-  for (const asset of await listAssets(gh, releaseId)) {
-    if (cleared.includes(asset.name) && asset.label) stubborn.push(asset.name);
-  }
-  if (stubborn.length) {
-    log(`::warning::the label on ${stubborn.join(', ')} did not clear, so those assets still show a hash where their name should be. They are pruned like any other build.`);
-  }
-  return { cleared, stubborn };
 }
 
-// Deletes assets this workflow published under a name it no longer uses, so a download
-// does not stay under a name nothing updates. Only this workflow's own assets are ever
-// removed: a file somebody attached by hand is left exactly where it is.
-export async function retireAssets(gh, { releaseId, names = RETIRED_ASSETS }) {
-  const retired = [];
-  for (const asset of await listAssets(gh, releaseId)) {
-    if (!names.includes(asset.name)) continue;
-    if (!isOwned(asset)) continue;
-    await deleteIfPresent(gh, `/releases/assets/${asset.id}`);
-    retired.push(asset.name);
-  }
-  return retired;
+// Brings an existing release's notes up to date, so a re-run of a tag -- or a release found
+// by a later attempt -- says what the commits since the previous release were rather than
+// what they were when it was first created.
+export async function updateReleaseNotes(gh, { id, body }) {
+  if (!body) return { updated: false };
+  const current = await gh.json('GET', `/releases/${id}`);
+  if (current.body === body) return { updated: false };
+  await gh.json('PATCH', `/releases/${id}`, {
+    contentType: 'application/json',
+    body: JSON.stringify({ body }),
+  });
+  return { updated: true };
 }
 
-// Deletes the oldest of a rolling release's own builds, keeping [keep] newest. Only
-// assets this workflow uploaded under a versioned name are candidates: a file somebody
-// attached by hand, the stable names, and the checksum are all left alone, and so is
-// every other release.
-export async function pruneRollingAssets(gh, { releaseId, keep = DEFAULT_KEEP, protect = [] }) {
-  if (!(keep > 0)) throw new PublishError(`--keep must be positive: ${keep}`);
-  const safe = new Set([LATEST_ASSET, LATEST_SHA256_ASSET, ...RETIRED_ASSETS, ...protect]);
-  const assets = await listAssets(gh, releaseId);
-  const builds = assets.filter(
-    (a) => isOwned(a) && /\.apk$/.test(a.name) && !safe.has(a.name) && !a.name.includes('.staging-'),
-  );
-  if (builds.length <= keep) return [];
-  // Newest first by id: GitHub assigns a higher id to each later upload, and an asset
-  // carries no timestamp of its own.
-  const oldest = builds.sort((a, b) => b.id - a.id).slice(keep);
+// The commit releases this workflow publishes, newest first. A version release is not one of
+// them: it is the archive, cut deliberately, and its files stay. A draft is not one either --
+// it is a publish that did not finish, and the release a later attempt completes.
+//
+// A release carries its assets in the list answer (GitHub caps that at 30, and a release here
+// holds two), so pruning needs no request per release.
+function ourCommitReleases(releases) {
+  return releases
+    .filter((r) => !r.draft && COMMIT_TAG_RE.test(String(r.tag_name || '')))
+    .sort((a, b) => b.id - a.id);
+}
+
+// Deletes the APK of every release beyond the newest [keep]. The release itself stays, with
+// its body: the changelog is the record, and the file it carries is one build of one commit,
+// which is reproducible from the commit and is not worth keeping for ever. Only assets this
+// workflow uploaded are deleted; a file somebody attached by hand is left where it is.
+export async function pruneOldReleaseAssets(gh, { keep = DEFAULT_RELEASE_KEEP, protect = [] } = {}) {
+  if (!(keep >= 1)) throw new PublishError(`--keep must be at least 1: ${keep}`);
+  const kept = new Set(protect);
   const pruned = [];
-  for (const a of oldest) {
-    await deleteIfPresent(gh, `/releases/assets/${a.id}`);
-    pruned.push(a.name);
+  for (const release of ourCommitReleases(await gh.paginate('/releases')).slice(keep)) {
+    if (kept.has(release.id)) continue;
+    for (const asset of release.assets || []) {
+      if (!isOwned(asset)) continue;
+      await deleteIfPresent(gh, `/releases/assets/${asset.id}`);
+      pruned.push(asset.name);
+    }
   }
   return pruned;
 }
 
-// A rolling tag names the newest build of a branch, so it moves with every publish. The
-// release page shows the commit its tag points at, and a tag left where the release was
-// first created would show the first build's commit beside assets from the newest one --
-// which is exactly what a person checks to know what they are downloading.
+// The rolling releases and tags of the scheme this replaced: one release per branch,
+// refreshed by every push, keeping ten builds and a `Brapmony-latest.apk` beside them. It is
+// what made a release page list files nothing updated and titles that named a branch rather
+// than a build, so nothing publishes to one any more and the first publish after this change
+// removes them.
 //
-// Only a rolling tag is ever moved: a version tag is a fixed point, and this refuses to
-// touch one. The move is forced, because the old value is the one being replaced.
-export async function moveRollingTag(gh, { tag, commit }) {
-  if (!tag.startsWith(ROLLING_TAG_PREFIX)) {
-    throw new PublishError(`refusing to move ${tag}: not a rolling tag`);
-  }
-  if (!commit) throw new PublishError('a commit is required to move a rolling tag');
-  let current = null;
-  try {
-    current = await gh.json('GET', `/git/ref/tags/${tag}`);
-  } catch (error) {
-    // A release created from a branch rather than a tag has no tag ref yet; this makes one.
-    if (error.status !== 404) throw error;
-  }
-  if (current && current.object && current.object.sha === commit) return { moved: false, sha: commit };
-  if (current) {
-    await gh.json('PATCH', `/git/refs/tags/${tag}`, {
-      contentType: 'application/json',
-      body: JSON.stringify({ sha: commit, force: true }),
-    });
-    return { moved: true, sha: commit };
-  }
-  // A create sent again after a lost answer answers 422, because the ref now exists. Reading
-  // it back says whether it points where this attempt was putting it, which is the state the
-  // publish wanted; a ref at another commit is not this attempt's and still fails.
-  try {
-    await gh.json('POST', '/git/refs', {
-      contentType: 'application/json',
-      body: JSON.stringify({ ref: `refs/tags/${tag}`, sha: commit }),
-    });
-  } catch (error) {
-    if (error.status !== 422) throw error;
-    const landed = await gh.json('GET', `/git/ref/tags/${tag}`).catch(() => null);
-    if (!landed || landed.object?.sha !== commit) throw error;
-  }
-  return { moved: true, created: true, sha: commit };
-}
-
-function required(values, keys) {
-  for (const k of keys) if (!values[k]) throw new PublishError(`--${k} is required`);
-}
-
-// A delete is the one write that a retry cannot duplicate, so a 404 is the state it was
-// after rather than a failure: the thing is not there. A 404 is not retried by the client
-// (it is an answer, not a transient failure), but a delete sent again after a lost answer
-// finds its first attempt had already removed the thing, and that is the same outcome.
-export async function deleteIfPresent(gh, path) {
-  try {
-    await gh.json('DELETE', path);
-    return true;
-  } catch (error) {
-    if (error.status === 404) return false;
-    throw error;
-  }
-}
-
-// Every release and tag a rolling workflow left behind that no branch will publish to
-// again, and every Actions artifact older than the ones worth keeping.
-//
-// This exists because the alternatives are worse. A rolling tag is created by the first
-// publish of a branch and moved by every one after it; when the branch is deleted or
-// renamed, nothing moves the tag again, so it sits in the repository's tag list pointing
-// at a commit that no release on it describes any more. The same happens to the release.
-// Nothing in the workflow can know a branch is gone -- it only ever runs for the branch it
-// is publishing -- so this is a separate, explicit sweep rather than something a push
-// does: deleting a release and a tag is not a thing a build should do by accident.
-//
-// What it will never do, because a published download is somebody's:
-//
-//   * touch a release or a tag that is not a rolling one (`android-rolling-<branch>`),
-//     so a version release and its `vX.Y.Z` tag are never candidates;
-//   * touch the rolling release of a branch that still exists, or of [defaultBranch];
-//   * delete a tag whose commit the release's assets do not name (see below);
-//   * delete anything at all without --apply.
-//
-// The one judgement it has to make is whether a rolling release is stale. It asks the
-// repository which branches exist: a rolling tag for a branch that is not there is stale.
-// That is exact, and it needs no timestamp: `gh` reports a deleted branch as absent, and a
-// release whose tag names no branch is one nothing will ever update again.
-// Whether a rolling tag names a branch that still exists. A slug is lossy -- `feature/x`
-// and `feature-x` both become `feature-x` -- so the tag is compared with the slugs of the
-// branches that exist rather than parsed back into a branch name, which would guess wrong
-// for one of those two.
-export function tagNamesLiveBranch(tag, branches) {
-  if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) return false;
-  const slug = String(tag).slice(ROLLING_TAG_PREFIX.length);
-  return [...branches].some((branch) => {
-    try {
-      return rollingTag(branch).slice(ROLLING_TAG_PREFIX.length) === slug;
-    } catch {
-      return false;
-    }
-  });
-}
-
-export async function staleRollingReleases(gh, { defaultBranch, branches }) {
-  if (!defaultBranch) throw new PublishError('--default-branch is required');
-  const live = [defaultBranch, ...branches];
-  const releases = await gh.paginate('/releases');
-  const stale = [];
-  for (const release of releases) {
+// Deleting a release leaves its git tag, so the tag list is swept too: a rolling tag is a
+// page on the repository in its own right, and it is the one that made the tag list read as
+// a list of branches. Only a tag with the rolling prefix is ever deleted: a version tag and
+// a commit tag are what the releases above are addressed by.
+export async function retireRollingScheme(gh, { log = () => {} } = {}) {
+  const retired = [];
+  for (const release of await gh.paginate('/releases')) {
     const tag = String(release.tag_name || '');
-    // A version release's tag is `vX.Y.Z` and never carries the rolling prefix.
-    if (!tag.startsWith(ROLLING_TAG_PREFIX)) continue;
-    if (tagNamesLiveBranch(tag, live)) continue;
-    stale.push({ id: release.id, tag, name: release.name, draft: Boolean(release.draft), assets: (release.assets || []).length });
+    if (!tag.startsWith(LEGACY_ROLLING_PREFIX)) continue;
+    await deleteIfPresent(gh, `/releases/${release.id}`);
+    log(`Deleted the old rolling release ${tag}`);
+    retired.push(tag);
   }
-  return stale;
-}
-
-// Rolling tags with no release at all. A release deleted by hand leaves its tag behind,
-// and a tag is a page on the repository as much as a release is: it still points at a
-// commit, and it still reads as a build of a branch that no longer exists. They are found
-// from the tag list rather than from the release list, because there is no release to
-// find them from.
-export async function orphanRollingTags(gh, { defaultBranch, branches }) {
-  if (!defaultBranch) throw new PublishError('--default-branch is required');
-  const live = [defaultBranch, ...branches];
-  const tags = await gh.paginate('/tags');
-  const released = new Set((await gh.paginate('/releases')).map((r) => r.tag_name));
-  return tags
-    .map((t) => t.name)
-    .filter((tag) => String(tag).startsWith(ROLLING_TAG_PREFIX))
-    .filter((tag) => !released.has(tag) && !tagNamesLiveBranch(tag, live));
-}
-
-// Deletes a rolling tag that has no release. The same refusal as the release path: only a
-// rolling tag, never a version tag.
-export async function deleteTag(gh, { tag, log = () => {} }) {
-  if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) {
-    throw new PublishError(`refusing to delete ${tag}: not a rolling tag`);
+  for (const tag of await gh.paginate('/tags')) {
+    const name = String(tag.name || '');
+    if (!name.startsWith(LEGACY_ROLLING_PREFIX)) continue;
+    await deleteIfPresent(gh, `/git/refs/tags/${name}`);
+    log(`Deleted the old rolling tag ${name}`);
+    retired.push(name);
   }
-  await deleteIfPresent(gh, `/git/refs/tags/${tag}`);
-  log(`Deleted tag ${tag}`);
-  return { tag };
-}
-
-// Deletes a stale rolling release and the tag that named it. Only the assets this workflow
-// uploaded go with it -- GitHub deletes a release's assets with the release -- and the tag
-// is deleted only after the release is gone, so a failure in between leaves a release
-// whose tag still exists rather than a tag pointing at nothing.
-export async function deleteStaleRelease(gh, { id, tag, log = () => {} }) {
-  if (!String(tag).startsWith(ROLLING_TAG_PREFIX)) {
-    throw new PublishError(`refusing to delete ${tag}: not a rolling tag`);
-  }
-  await deleteIfPresent(gh, `/releases/${id}`);
-  log(`Deleted release ${tag} (${id})`);
-  // A tag with no release is still a tag on the repository, so it is removed too. A 404
-  // means it was never created or is already gone, which is the state wanted.
-  await deleteIfPresent(gh, `/git/refs/tags/${tag}`);
-  log(`Deleted tag ${tag}`);
-  return { id, tag };
+  return retired;
 }
 
 // Actions artifacts older than the newest [keep] of them. An artifact is the record of one
@@ -876,6 +736,26 @@ export async function deleteArtifact(gh, { id, name, log = () => {} }) {
   return { id, name };
 }
 
+function required(values, keys) {
+  for (const k of keys) if (!values[k]) throw new PublishError(`--${k} is required`);
+}
+
+// A delete is the one write that a retry cannot duplicate, so a 404 is the state it was
+// after rather than a failure: the thing is not there. A 404 is not retried by the client
+// (it is an answer, not a transient failure), but a delete sent again after a lost answer
+// finds its first attempt had already removed the thing, and that is the same outcome.
+export async function deleteIfPresent(gh, path) {
+  try {
+    await gh.json('DELETE', path);
+    return true;
+  } catch (error) {
+    if (error.status === 404) return false;
+    throw error;
+  }
+}
+
+// The client is built from the environment by default; a test passes its own, which is how
+// the publishing rules above are checked against a stand-in for the API without a token.
 export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
   const [command, ...rest] = argv;
   const { values, positionals } = parseArgs({
@@ -883,10 +763,8 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
     allowPositionals: command === 'upload',
     options: {
       apk: { type: 'string' },
-      branch: { type: 'string' },
-      commit: { type: 'string' },
-      'default-branch': { type: 'string' },
       version: { type: 'string' },
+      commit: { type: 'string' },
       body: { type: 'string' },
       keep: { type: 'string' },
       attempt: { type: 'string' },
@@ -894,87 +772,94 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       tag: { type: 'string' },
       name: { type: 'string' },
       'keep-artifacts': { type: 'string' },
+      'keep-releases': { type: 'string' },
       apply: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
     },
   });
 
-  if (command === 'rolling') {
-    required(values, ['apk', 'branch', 'default-branch']);
-    const tag = rollingTag(values.branch);
-    const published = isPublishedRelease(values.branch, values['default-branch']);
-    const kind = published ? 'release' : 'prerelease';
+  if (command === 'publish') {
+    required(values, ['apk', 'version', 'commit']);
+    const version = values.version;
+    const commit = values.commit;
+    const tag = commitTag(version, commit);
+    const name = releaseTitle(version, commit);
+    if (!existsSync(values.apk)) throw new PublishError(`no such file: ${values.apk}`);
     if (values['dry-run']) {
-      log(`Would publish ${basename(values.apk)} to ${kind} ${tag}`);
-      return { tag, dryRun: true, prerelease: !published };
+      log(`Would publish ${basename(values.apk)} as ${name} (${tag})`);
+      return { tag, dryRun: true };
     }
+    const sha256 = sha256File(values.apk);
+    // The notes are the commits since the previous release, read from this checkout. A
+    // checkout that cannot answer fails the publish rather than publishing a release with no
+    // notes: what changed is the one thing that is different about this release.
+    const body = values.body ?? notesFor({ commit, sha256, repository: process.env.GITHUB_REPOSITORY });
+    const keep = Number(values.keep ?? DEFAULT_RELEASE_KEEP);
+    if (!(keep >= 1)) throw new PublishError(`--keep must be at least 1: ${keep}`);
     const gh = ghOverride ?? client({ log });
-    const { id, created, wanted, current } = await ensureRollingRelease(gh, {
-      branch: values.branch,
-      commit: values.commit,
-      defaultBranch: values['default-branch'],
-      version: values.version,
-      body: values.body ?? '',
-    });
-    log(`${created ? 'Created' : 'Found'} rolling ${published ? 'release' : 'prerelease'} ${tag} (${id})`);
+    const { id, created } = await ensureCommitRelease(gh, { version, commit, name, body });
+    log(`${created ? 'Created' : 'Found'} release ${tag} (${id})`);
     const attempt = Number(values.attempt ?? 1) || 1;
-    const build = await publishBuild(gh, { releaseId: id, file: values.apk, name: basename(values.apk), attempt });
-    log(`${build.uploaded ? 'Uploaded' : 'Kept'} ${build.name} on ${tag} (sha256 ${build.sha256})`);
-    // Only now that this build is on the release is what the release says brought up to
-    // date: a publish that fails before this point leaves the page describing the build
-    // that is actually there.
-    const { updated } = await updateRollingRelease(gh, { id, tag, wanted, current });
-    if (updated.length) log(`Updated ${tag}: ${updated.join(', ')}`);
-    // The stable name is only touched once the run's own asset is safely there, so a
-    // failed build upload cannot disturb the build people are already downloading.
-    const sha256 = build.sha256;
-    await replaceStable(gh, { releaseId: id, file: values.apk, name: LATEST_ASSET });
-    log(`Updated ${LATEST_ASSET} on ${tag}`);
-    const checksum = stableText(`${sha256}  ${LATEST_ASSET}\n`, LATEST_SHA256_ASSET);
-    await replaceStable(gh, { releaseId: id, file: checksum, name: LATEST_SHA256_ASSET });
-    log(`Updated ${LATEST_SHA256_ASSET} on ${tag}`);
-    // The tag is moved onto this build once everything it names is in place, so the page
-    // shows the commit these assets came from rather than the one the release was created
-    // at. A publish that failed before this point leaves the previous commit's tag alone.
-    let moved = null;
-    if (values.commit) {
-      const tagMove = await moveRollingTag(gh, { tag, commit: values.commit });
-      moved = tagMove.moved ? values.commit : null;
-      log(`${tagMove.moved ? 'Moved' : 'Kept'} tag ${tag} at ${values.commit}`);
-    }
-    const retired = await retireAssets(gh, { releaseId: id });
-    if (retired.length) log(`Retired ${retired.join(', ')} from ${tag}`);
-    const { cleared } = await clearLegacyLabels(gh, { releaseId: id, log });
-    if (cleared.length) log(`Cleared the old label from ${cleared.join(', ')}, so their names show again`);
-    const pruned = await pruneRollingAssets(gh, {
-      releaseId: id,
-      keep: Number(values.keep ?? DEFAULT_KEEP),
-      protect: [build.name],
-    });
-    if (pruned.length) log(`Pruned ${pruned.length} older build(s) from ${tag}: ${pruned.join(', ')}`);
+    const build = await publishAsset(gh, { releaseId: id, file: values.apk, name: basename(values.apk), attempt });
+    log(`${build.uploaded ? 'Uploaded' : 'Kept'} ${build.name} (sha256 ${build.sha256})`);
+    // The checksum names the asset that is really on the release, which is the file's own
+    // name unless a rebuild gave it another one.
+    const checksum = checksumFile(build.sha256, build.name);
+    const sum = await publishAsset(gh, { releaseId: id, file: checksum, name: basename(checksum) });
+    log(`${sum.uploaded ? 'Uploaded' : 'Kept'} ${sum.name}`);
+    // Only now that the files are on it is the release made visible: a publish that fails
+    // before this point leaves a draft, not a page whose download does not exist.
+    const { updated } = await publishRelease(gh, { id, name, body });
+    if (updated.length) log(`Published ${tag}: ${updated.join(', ')}`);
+    // Nothing older is touched until this release is complete, so a failure above leaves
+    // the previous releases exactly as they were.
+    const pruned = await pruneOldReleaseAssets(gh, { keep });
+    if (pruned.length) log(`Deleted ${pruned.length} old release asset(s): ${pruned.join(', ')}`);
+    const retired = await retireRollingScheme(gh, { log });
     if (process.env.GITHUB_OUTPUT) {
-      appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\nrelease-id=${id}\nsha256=${sha256}\n`);
+      appendFileSync(
+        process.env.GITHUB_OUTPUT,
+        `tag=${tag}\nrelease-id=${id}\nsha256=${build.sha256}\nname=${build.name}\n`,
+      );
     }
-    return { id, tag, uploaded: build.uploaded ? build.name : null, sha256, pruned, retired, cleared, moved, prerelease: !published };
+    return { id, tag, uploaded: build.uploaded ? build.name : null, sha256: build.sha256, pruned, retired };
   }
 
   if (command === 'tag') {
     required(values, ['tag']);
+    const tag = values.tag;
+    const version = String(tag).replace(/^v/, '');
+    const commit = values.commit ?? String(gitOutput(['rev-parse', 'HEAD']) || '').trim();
     if (values['dry-run']) {
-      log(`Would create or find the release for ${values.tag}`);
-      return { tag: values.tag, dryRun: true };
+      log(`Would create or find the release for ${tag}`);
+      return { tag, dryRun: true };
+    }
+    const sha256 = values.apk ? sha256File(values.apk) : undefined;
+    const body = values.body ?? notesFor({ commit, sha256, repository: process.env.GITHUB_REPOSITORY });
+    const gh = ghOverride ?? client({ log });
+    const { id, created } = await ensureTagRelease(gh, { tag, name: values.name || version, body });
+    // A release found from an earlier attempt gets this run's notes: they name the commits
+    // since the previous release, which is not what a body written by hand says.
+    if (!created) await updateReleaseNotes(gh, { id, body });
+    log(`${created ? 'Created' : 'Found'} release ${tag} (${id})`);
+    if (process.env.GITHUB_OUTPUT) {
+      appendFileSync(process.env.GITHUB_OUTPUT, `id=${id}\ntag=${tag}\n`);
+    }
+    return { id, tag, created };
+  }
+
+  // Makes a release a tag's job created as a draft visible, once its files are on it. The
+  // upload is a separate command because the APK is named and checked between the two.
+  if (command === 'publish-release') {
+    required(values, ['release-id']);
+    if (values['dry-run']) {
+      log(`Would publish release ${values['release-id']}`);
+      return { id: values['release-id'], dryRun: true };
     }
     const gh = ghOverride ?? client({ log });
-    const { id, created } = await ensureTagRelease(gh, {
-      tag: values.tag,
-      name: values.name,
-      body: values.body,
-    });
-    log(`${created ? 'Created' : 'Found'} release ${values.tag} (${id})`);
-    if (process.env.GITHUB_OUTPUT) {
-      appendFileSync(process.env.GITHUB_OUTPUT, `id=${id}\ntag=${values.tag}\n`);
-    }
-    return { id, tag: values.tag, created };
+    const { updated } = await publishRelease(gh, { id: values['release-id'], body: values.body });
+    log(`Published release ${values['release-id']}${updated.length ? `: ${updated.join(', ')}` : ''}`);
+    return { id: values['release-id'], updated };
   }
 
   if (command === 'upload') {
@@ -1002,48 +887,33 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
   }
 
   if (command === 'cleanup') {
-    required(values, ['default-branch']);
     const gh = ghOverride ?? client({ log });
     const apply = values['apply'] === true;
-    const branches = (await gh.paginate('/branches')).map((b) => b.name);
-    const defaultBranch = values['default-branch'];
-    const stale = await staleRollingReleases(gh, { defaultBranch, branches });
-    const orphans = await orphanRollingTags(gh, { defaultBranch, branches });
+    const keepReleases = Number(values['keep-releases'] ?? DEFAULT_RELEASE_KEEP);
     const keepArtifacts = Number(values['keep-artifacts'] ?? DEFAULT_ARTIFACT_KEEP);
+    const releases = ourCommitReleases(await gh.paginate('/releases'));
+    const old = releases.slice(keepReleases).map((r) => ({ id: r.id, tag: r.tag_name, assets: (r.assets || []).length }));
+    const rolling = (await gh.paginate('/releases'))
+      .map((r) => String(r.tag_name || ''))
+      .filter((tag) => tag.startsWith(LEGACY_ROLLING_PREFIX));
     const artifacts = await oldArtifacts(gh, { keep: keepArtifacts });
     const freed = artifacts.reduce((sum, a) => sum + (a.size || 0), 0);
-    log(`Branches: ${branches.length ? branches.join(', ') : '(none)'}`);
-    log(`Stale rolling releases: ${stale.length ? stale.map((r) => r.tag).join(', ') : '(none)'}`);
-    log(`Rolling tags with no release: ${orphans.length ? orphans.join(', ') : '(none)'}`);
+    log(`Releases inside the newest ${keepReleases}: ${Math.min(releases.length, keepReleases)} of ${releases.length}`);
+    log(`Releases beyond it, whose APK would go: ${old.length ? old.map((r) => r.tag).join(', ') : '(none)'}`);
+    log(`Old rolling releases to remove: ${rolling.length ? rolling.join(', ') : '(none)'}`);
     log(`Artifacts beyond the newest ${keepArtifacts}: ${artifacts.length ? `${artifacts.map((a) => a.name).join(', ')} (${(freed / 1e6).toFixed(1)} MB)` : '(none)'}`);
     if (!apply) {
       log('Nothing deleted: pass --apply to delete what is listed above.');
-      return { stale, orphans, artifacts, applied: false };
+      return { releases: old, rolling, artifacts, applied: false };
     }
-    for (const release of stale) await deleteStaleRelease(gh, { ...release, log });
-    for (const tag of orphans) await deleteTag(gh, { tag, log });
+    const pruned = await pruneOldReleaseAssets(gh, { keep: keepReleases });
+    if (pruned.length) log(`Deleted ${pruned.length} release asset(s): ${pruned.join(', ')}`);
+    const retired = await retireRollingScheme(gh, { log });
     for (const artifact of artifacts) await deleteArtifact(gh, { ...artifact, log });
-    return { stale, orphans, artifacts, applied: true };
+    return { releases: old, rolling, retired, pruned, artifacts, applied: true };
   }
 
-  throw new PublishError('usage: release.mjs <rolling|tag|upload|cleanup> [options]');
-}
-
-// A copy of [file] under one fixed name, so the upload names the asset rather than taking
-// the file's basename. Written in the runner's temporary directory, never in the tree.
-export function stableCopy(file, name = LATEST_ASSET) {
-  const dir = mkdtempSync(join(tmpdir(), 'brapmony-'));
-  const copy = join(dir, name);
-  copyFileSync(file, copy);
-  return copy;
-}
-
-// The same, for a text asset written rather than copied.
-export function stableText(text, name) {
-  const dir = mkdtempSync(join(tmpdir(), 'brapmony-'));
-  const file = join(dir, name);
-  writeFileSync(file, text);
-  return file;
+  throw new PublishError('usage: release.mjs <publish|tag|upload|publish-release|cleanup> [options]');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

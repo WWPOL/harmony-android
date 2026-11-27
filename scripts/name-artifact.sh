@@ -20,8 +20,9 @@
 # debug variant's version name already ends in `-debug`, so it is not appended twice.
 #
 # The branch is not in the name. It is in the tag of the release the file is published
-# to (`android-rolling-<branch>`), which is where a downloader looks for it, and a
-# branch name can carry characters and length a file name should not.
+# to (`v<version>-<sha7>` for a commit, `v<version>` for a tag), which is where a
+# downloader looks for it, and a branch name can carry characters and length a file name
+# should not.
 #
 # <profile>  `release` for a release-signed build, `debug` for a test-signed one.
 # APP_VERSION_NAME  the version name to use. Without it, the root VERSION file, with the

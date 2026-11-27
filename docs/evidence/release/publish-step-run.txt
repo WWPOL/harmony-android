@@ -1,12 +1,54 @@
+# The Publish step run against the stand-in API, as scripts/workflow-steps.mjs runs it
+
+The stand-in was seeded with the state `main` was in on 2026-11-23: the rolling release
+with its five labelled assets, the task branch's rolling prerelease, and their tags.
+
+## The step output
+
+```
 run   Publish
-Created rolling release android-rolling-main (100)
-Uploaded Brapmony-1.9.6-e5b7aec-debug.apk on android-rolling-main (sha256 aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d)
-Updated Brapmony-latest.apk on android-rolling-main
-Updated Brapmony-latest.apk.sha256 on android-rolling-main
-Moved tag android-rolling-main at e5b7aec558f4ee52d8cb6a9850750d64751484d2
+Created release v0.1.0-f9d8bbf (1000)
+Uploaded Brapmony-0.1.0-f9d8bbf-debug.apk (sha256 8ce7e5d8e036d885523e801b295e9135bebf04c0268284edd0a57f91f612d4ab)
+Uploaded Brapmony-0.1.0-f9d8bbf-debug.apk.sha256
+Published v0.1.0-f9d8bbf: draft
+Deleted the old rolling release android-rolling-main
+Deleted the old rolling release android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa
+Deleted the old rolling tag android-rolling-main
+Deleted the old rolling tag android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa
 ran 1 step(s) of .github/workflows/android.yml publish
-GITHUB_OUTPUT:
-apk=android-apk/Brapmony-1.9.6-e5b7aec-debug.apk
-tag=android-rolling-main
-release-id=100
-sha256=aa600d9da917481fcea01e4dbc7211b7e7343d89098a6827b47a1b42d7f8de2d
+```
+
+## What the API was asked to do
+
+```
+fake GitHub API on http://127.0.0.1:8099 for WWPOL/harmony-android
+created release 1000 v0.1.0-f9d8bbf draft=true name="0.1.0-f9d8bbf"
+uploaded Brapmony-0.1.0-f9d8bbf-debug.apk (43 bytes, label -)
+uploaded Brapmony-0.1.0-f9d8bbf-debug.apk.sha256 (99 bytes, label -)
+patched release 1000 v0.1.0-f9d8bbf draft=false
+deleted release 453200307 android-rolling-main with 5 asset(s)
+deleted release 453200308 android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa with 1 asset(s)
+deleted tag android-rolling-main
+deleted tag android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa
+```
+
+## The release it left behind, read back from the API
+
+```
+tag:    v0.1.0-f9d8bbf
+name:   0.1.0-f9d8bbf
+draft:  False  prerelease: False
+commit: f9d8bbfc16a9e78de67d3a31d32a2d52aad1148c
+body:
+## Changes since `v0.1.0`
+
+- fix(notifications): stop a duplicate inbox row ([`f9d8bbf`](https://github.com/WWPOL/harmony-android/commit/f9d8bbfc16a9e78de67d3a31d32a2d52aad1148c))
+- feat(drive): show a restricted link's owner ([`59e52a5`](https://github.com/WWPOL/harmony-android/commit/59e52a5912f33bd17ad621ba1aad6ab927291473))
+- docs(builds): say what a test-signed APK installs over ([`3f12d96`](https://github.com/WWPOL/harmony-android/commit/3f12d969763b4a7722ce2ea68e0567725b7bed8d))
+
+sha256: `8ce7e5d8e036d885523e801b295e9135bebf04c0268284edd0a57f91f612d4ab` · [Full comparison](https://github.com/WWPOL/harmony-android/compare/v0.1.0...f9d8bbfc16a9e78de67d3a31d32a2d52aad1148c)
+
+assets:
+  - Brapmony-0.1.0-f9d8bbf-debug.apk label='' digest=sha256:8ce7e5d8e036d885523e801b295e9135bebf04c0268284edd0a57f91f612d4ab
+  - Brapmony-0.1.0-f9d8bbf-debug.apk.sha256 label='' digest=sha256:5e97bc0b2d4a8ff4f61a06700f1432a091f9264ab1d92856e331938e13c9739d
+```

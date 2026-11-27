@@ -1,22 +1,21 @@
 name: Clean up releases and builds
 
-# Removes what a rolling publish leaves behind when nothing will publish to it again, and
-# the Actions artifacts that outlived their use:
+# Removes what a publish leaves behind that nothing will read again:
 #
-#   * the rolling release and tag of a branch that no longer exists -- the release is one
-#     nothing will ever refresh, and the tag points at a commit no release on the
-#     repository describes any more;
-#   * a rolling tag with no release at all, which a release deleted by hand leaves behind;
+#   * the APK of a release older than the newest few. The release and its changelog stay --
+#     the page is the project's history -- and only the file it carries goes: a build is
+#     reproducible from its commit, and the page is what is worth keeping;
+#   * the rolling releases and tags of the scheme this replaced, one per branch, which are
+#     the old files that made a downloader guess which one to take;
 #   * Actions artifacts beyond the newest few. An artifact is the record of one run, it
 #     expires on its own, and the release is the copy that outlives a run.
 #
-# It is a manual dispatch, never a push: deleting a release and a tag is not something a
-# build should do by accident, and the decision that a branch is gone is a person's. The
-# default is a dry run that lists what it would delete.
+# It is a manual dispatch, never a push: deleting a published file is not something a build
+# should do by accident. The default is a dry run that lists what it would delete.
 #
-# What it never touches: a version release (`vX.Y.Z`) and its tag, the rolling release of a
-# branch that still exists, and the rolling release of the default branch. Those are
-# `scripts/release.mjs`'s own rules, and `npm test` asserts them.
+# What it never touches: a release inside the kept window, a version tag, a commit tag, or
+# the release either of them names. Those are `scripts/release.mjs`'s own rules, and
+# `npm test` asserts them.
 on:
   workflow_dispatch:
     inputs:
@@ -24,12 +23,16 @@ on:
         description: 'Delete what the run lists. Leave unchecked for a dry run.'
         type: boolean
         default: false
+      keep-releases:
+        description: 'How many of the newest releases keep their APK.'
+        type: string
+        default: '30'
       keep-artifacts:
         description: 'How many of the newest Actions artifacts to keep.'
         type: string
         default: '10'
 
-# One run at a time, so two dispatches cannot try to delete the same release.
+# One run at a time, so two dispatches cannot try to delete the same file.
 concurrency:
   group: cleanup
   cancel-in-progress: false
@@ -37,18 +40,13 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # The branch whose rolling release is the repository's release, and the one branch that
-  # is never stale whatever the API says about it.
-  DEFAULT_BRANCH: main
-
 jobs:
   cleanup:
-    name: Remove stale releases, tags and old artifacts
+    name: Remove old release files, old rolling releases and old artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Deleting a release and a tag is a write to the repository; deleting an artifact is
-    # `actions: write`. Neither is granted to any other job in this repository.
+    # Deleting a release asset and a tag is a write to the repository; deleting an artifact
+    # is `actions: write`. Neither is granted to any other job in this repository.
     permissions:
       contents: write
       actions: write
@@ -63,9 +61,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLY: ${{ inputs.apply }}
+          KEEP_RELEASES: ${{ inputs.keep-releases }}
           KEEP_ARTIFACTS: ${{ inputs.keep-artifacts }}
         run: |
-          args=(cleanup --default-branch "$DEFAULT_BRANCH" --keep-artifacts "${KEEP_ARTIFACTS:-10}")
+          args=(cleanup --keep-releases "${KEEP_RELEASES:-30}" --keep-artifacts "${KEEP_ARTIFACTS:-10}")
           if [ "$APPLY" = 'true' ]; then
             args+=(--apply)
           fi

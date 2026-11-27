@@ -8,7 +8,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -17,37 +17,34 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  COMMIT_TAG_RE,
   DEFAULT_ARTIFACT_KEEP,
-  LATEST_ASSET,
-  LATEST_SHA256_ASSET,
-  RETIRED_ASSETS,
-  ROLLING_TAG_PREFIX,
+  DEFAULT_CHANGELOG_LIMIT,
+  DEFAULT_RELEASE_KEEP,
+  LEGACY_ROLLING_PREFIX,
+  VERSION_TAG_RE,
   BOT_LOGIN,
   LEGACY_OWNER,
   RETRY_ATTEMPTS,
   RETRY_BACKOFF_MS,
+  changelogEntries,
   client,
+  commitTag,
   deleteArtifact,
+  ensureCommitRelease,
+  ensureTagRelease,
   isTransientStatus,
+  notesFor,
+  oldArtifacts,
+  previousReleaseTag,
+  pruneOldReleaseAssets,
+  publishAsset,
+  publishRelease,
+  releaseBody,
+  releaseTitle,
+  retireRollingScheme,
   retryAfterMs,
   retrySettings,
-  deleteTag,
-  deleteStaleRelease,
-  ensureRollingRelease,
-  ensureTagRelease,
-  isPublishedRelease,
-  moveRollingTag,
-  oldArtifacts,
-  orphanRollingTags,
-  tagNamesLiveBranch,
-  pruneRollingAssets,
-  publishBuild,
-  releaseTitle,
-  replaceStable,
-  retireAssets,
-  rollingTag,
-  rollingName,
-  staleRollingReleases,
 } from './release.mjs';
 
 const run = promisify(execFile);
@@ -348,15 +345,21 @@ async function fakeGitHub({ releases: seed = [], failUploads = null, corruptUplo
   };
 }
 
-// A rolling release of the default branch, created the way a publish creates it, for a
-// test that then works on the release directly.
-async function seedRolling(gh) {
-  return ensureRollingRelease(gh, {
-    branch: 'master', commit: 'abc1234', defaultBranch: 'master', version: '1.9.6', body: '',
+// The commit's release, created the way a publish creates it, for a test that then works on
+// the release directly.
+async function seedRelease(gh) {
+  return ensureCommitRelease(gh, {
+    version: '1.9.6', commit: 'abc1234', name: releaseTitle('1.9.6', 'abc1234'), body: '',
   });
 }
 
-// A published version release with assets, which nothing in this workflow may touch.
+// A release a publish made visible: seeded releases are drafts until something publishes
+// them, which is what the publisher does once the files are on.
+async function visible(gh, id) {
+  return publishRelease(gh, { id });
+}
+
+// A published version release with assets, which a commit's publish may not touch.
 function versionRelease() {
   return {
     id: 41,
@@ -366,11 +369,29 @@ function versionRelease() {
     prerelease: false,
     assets: [
       { id: 4101, name: 'Other_Tool_V1.9.6.apk', label: '', size: 12, state: 'uploaded', browser_download_url: 'x' },
-      { id: 4102, name: 'Brapmony-1.9.6.apk', label: '', size: 13, state: 'uploaded', browser_download_url: 'y' },
+      { id: 4102, name: 'Brapmony-1.9.6.apk', label: '', size: 13, state: 'uploaded', uploader: { login: BOT_LOGIN }, browser_download_url: 'y' },
       // An asset from before the name scheme changed. It is still this workflow's, and on
       // a version release it is left exactly where it is.
-      { id: 4104, name: 'Brapmony_Android_V1.9.6.apk', label: '', size: 14, state: 'uploaded', browser_download_url: 'w' },
+      { id: 4104, name: 'Brapmony_Android_V1.9.6.apk', label: '', size: 14, state: 'uploaded', uploader: { login: BOT_LOGIN }, browser_download_url: 'w' },
       { id: 4103, name: 'latest.json', label: '', size: 34, state: 'uploaded', browser_download_url: 'z' },
+    ],
+    upload_url: '',
+  };
+}
+
+// The rolling releases of the scheme this replaced: one per branch, with a stable name
+// beside the builds. They are what a publish removes.
+function rollingRelease(tag, { id = 70, prerelease = true } = {}) {
+  return {
+    id,
+    tag_name: `${LEGACY_ROLLING_PREFIX}${tag}`,
+    name: `Brapmony for Android \u2014 newest build of ${tag}`,
+    body: 'an older body',
+    draft: false,
+    prerelease,
+    assets: [
+      { id: id * 10 + 1, name: 'Brapmony-1.9.6-abc1234-debug.apk', label: '', size: 9, state: 'uploaded', uploader: { login: BOT_LOGIN } },
+      { id: id * 10 + 2, name: 'Brapmony-latest.apk', label: '', size: 9, state: 'uploaded', uploader: { login: BOT_LOGIN } },
     ],
     upload_url: '',
   };
@@ -383,11 +404,6 @@ function workspace(commit = 'abc1234', bytes = null) {
   return { dir, apk, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-// A publish of [args], with the arguments the workflow always passes filled in unless
-// the caller names them: `--default-branch` decides whether the build is published as a
-// release or a prerelease, and `--version` names the release.
-const DEFAULT_BRANCH = 'master';
-
 // The publisher retries a request that got no usable answer, waiting longer each time, which
 // is fifteen seconds of waiting for a request that fails every attempt. What these tests
 // check is which requests are retried and what a retry does, not how long it waits, so the
@@ -398,6 +414,8 @@ const DEFAULT_BRANCH = 'master';
 process.env.HARMONY_RETRY_BACKOFF_MS = '0';
 const FAST_RETRIES = { HARMONY_RETRY_BACKOFF_MS: '0', HARMONY_RETRY_ATTEMPTS: String(RETRY_ATTEMPTS) };
 
+// A publish of [args], with the arguments the workflow always passes filled in unless the
+// caller names them. `--version` is the release line, and `--commit` the build.
 async function publish(args, { gh: existing, releases, failUploads, corruptUploads } = {}) {
   const gh = existing ?? (await fakeGitHub({ releases, failUploads, corruptUploads }));
   // A reused server may be told to fail this publish's uploads.
@@ -406,10 +424,11 @@ async function publish(args, { gh: existing, releases, failUploads, corruptUploa
   const out = join(mkdtempSync(join(tmpdir(), 'brapmony-out-')), 'output');
   writeFileSync(out, '');
   const full = [...args];
-  for (const [flag, value] of [['--default-branch', DEFAULT_BRANCH], ['--version', '1.9.6']]) {
-    if (!full.includes(flag)) full.push(flag, value);
-  }
-  const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'rolling', ...full], {
+  if (!full.includes('--version')) full.push('--version', '1.9.6');
+  // The notes are composed from git; a test names them, so what a release says does not
+  // depend on the checkout the tests run in.
+  if (!full.includes('--body')) full.push('--body', 'the changes of this build');
+  const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'publish', ...full], {
     env: {
       ...process.env,
       ...FAST_RETRIES,
@@ -422,66 +441,138 @@ async function publish(args, { gh: existing, releases, failUploads, corruptUploa
   return { gh, stdout, output: readFileSync(out, 'utf8') };
 }
 
-test('rolling tag and name are derived from the branch and cannot collide with a version tag', () => {
-  assert.equal(rollingTag('master'), `${ROLLING_TAG_PREFIX}master`);
-  assert.equal(rollingTag('task/build-native-android-app-with-parity-v8hy4zr4'),
-    'android-rolling-task-build-native-android-app-with-parity-v8hy4zr4');
-  assert.equal(rollingName('master'), 'Brapmony for Android \u2014 newest build of master');
-  for (const branch of ['v1.9.6', 'v2.0.0', 'release/1.9.6']) {
-    assert.ok(!/^v\d/.test(rollingTag(branch)), `a branch named ${branch} must not make a version tag`);
-  }
-  assert.throws(() => rollingTag('///'), /no characters a tag can carry/);
-  assert.throws(() => rollingTag(''), /--branch is required/);
+// A release is a commit of the default branch: `v<version>-<sha7>`, named for the build and
+// not for a branch. A version tag has no suffix, so the two cannot collide, and a version
+// release can never be found by the commit path.
+test('a commit tag and its release name are derived from the version and the commit', () => {
+  assert.equal(commitTag('1.9.6', 'abc1234def'), 'v1.9.6-abc1234');
+  assert.equal(releaseTitle('1.9.6', 'abc1234def'), '1.9.6-abc1234');
+  // Seven characters of the commit, as the APK's own version name carries.
+  assert.equal(releaseTitle('0.1.0', 'FBD613F0000'), '0.1.0-fbd613f');
+  assert.ok(COMMIT_TAG_RE.test(commitTag('1.9.6', 'abc1234')));
+  assert.ok(!VERSION_TAG_RE.test(commitTag('1.9.6', 'abc1234')), 'a commit tag is never a version tag');
+  assert.ok(!COMMIT_TAG_RE.test('v1.9.6'), 'and a version tag is never a commit tag');
+  assert.throws(() => commitTag('1.9', 'abc1234'), /--version must be x\.y\.z/);
+  assert.throws(() => commitTag('1.9.6', 'main'), /--commit must be a commit id/);
+  assert.throws(() => commitTag('1.9.6', ''), /--commit must be a commit id/);
 });
 
-// The rolling release is a window on a branch, not a version. Its title used to be
-// `Brapmony <VERSION>`, which read as a release named `Brapmony 1.9.6` for every commit
-// of every branch, because VERSION was one number nothing bumped. A version belongs to a
-// build (in the body, beside its commit) or to a tag release (in its title); not to a
-// release that holds a different build every day.
-test('a rolling release is named for its branch, never for a version', () => {
-  assert.equal(releaseTitle('master'), 'Brapmony for Android \u2014 newest build of master');
-  assert.equal(releaseTitle('main'), 'Brapmony for Android \u2014 newest build of main');
-  assert.equal(releaseTitle('feature/x'), 'Brapmony for Android \u2014 newest build of feature/x');
-  // Whatever version it is given, none of it reaches the title.
-  for (const version of ['1.9.6', '0.1.0', '2.0.0']) {
-    assert.equal(releaseTitle('main', version), 'Brapmony for Android \u2014 newest build of main');
+// The body of a release is the changelog and nothing else. What the app is, how to install
+// an APK, and which Android versions it runs on are the same on every release, so repeating
+// them here would be the same paragraphs on every page and would push the one thing that
+// differs -- what changed -- off the screen.
+test('a release body is the changelog, not a page of instructions', () => {
+  const body = releaseBody({
+    commit: 'abc1234def',
+    sha256: 'a'.repeat(64),
+    previous: 'v1.9.5',
+    entries: [
+      { sha: 'abc1234def', subject: 'feat(chat): keep a draft when the room closes' },
+      { sha: 'def5678abc', subject: 'fix(appearance): draw the account\u2019s accent on the rail' },
+    ],
+    repository: OWNER_REPO,
+  });
+  assert.match(body, /^## Changes since `v1\.9\.5`/);
+  assert.match(body, /^- feat\(chat\): keep a draft when the room closes \(\[`abc1234`\]/m);
+  assert.match(body, /- fix\(appearance\)/);
+  assert.match(body, new RegExp(`sha256: \`${'a'.repeat(64)}\``));
+  assert.match(body, new RegExp(`compare/v1\\.9\\.5\\.\\.\\.abc1234def`), 'a link to the whole diff');
+  // Nothing that is the same on every release.
+  for (const noise of [/install/i, /download/i, /Android 8\.0/, /API 26/, /adb /, /Harmony\)/, /native Android client/i]) {
+    assert.ok(!noise.test(body), `the body repeats ${noise}`);
   }
-  // A branch name that is also a version cannot make a title that reads as a version.
-  assert.equal(releaseTitle('v1.9.6'), 'Brapmony for Android \u2014 newest build of v1.9.6');
-  assert.ok(!/^Brapmony \d/.test(releaseTitle('v1.9.6')), 'the app name alone is not the title');
-  // The title says what the release is to somebody who has never heard of a rolling
-  // release: the app, the platform, and which branch's build this is.
-  assert.match(releaseTitle('main'), /^Brapmony for Android/);
-  assert.match(releaseTitle('main'), /main$/);
-  assert.ok(!/\(rolling\)/.test(releaseTitle('main')), 'and does not use the internal word');
+  // A first release has no previous tag to compare with, and says what changed all the same.
+  const first = releaseBody({ commit: 'abc1234', sha256: 'b'.repeat(64), entries: [{ sha: 'abc1234', subject: 'the first commit' }], repository: OWNER_REPO });
+  assert.match(first, /^## Changes\n/);
+  assert.match(first, /- the first commit/);
+  assert.ok(!/compare/.test(first), 'there is nothing to compare with');
+  // A release with more commits than it lists says how many it left out.
+  const many = releaseBody({ commit: 'abc1234', sha256: 'c'.repeat(64), previous: 'v1.9.5', entries: [{ sha: 'abc1234', subject: 'one' }], more: 12 });
+  assert.match(many, /and 12 more commits/);
 });
 
-test('a publish creates one release and uploads the build plus the stable names', async () => {
+// The changelog is the commits since the previous release, read from the checkout's own
+// history. It runs against a scratch repository, so what it reports is a real git history
+// rather than a stub.
+test('the changelog is the commits since the previous release tag', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'brapmony-git-'));
+  const git = (...args) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  try {
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    const commit = (subject) => {
+      writeFileSync(join(dir, 'file.txt'), `${subject}\n`, { flag: 'a' });
+      git('add', 'file.txt');
+      git('commit', '-q', '-m', subject);
+      return git('rev-parse', 'HEAD');
+    };
+    const first = commit('feat: the first thing');
+    // No release behind this commit yet, so the changelog is the commit itself.
+    const beforeAny = changelogEntries({ cwd: dir });
+    assert.equal(beforeAny.previous, null);
+    assert.deepEqual(beforeAny.entries.map((e) => e.subject), ['feat: the first thing']);
+    git('tag', 'v0.1.0', first);
+    const second = commit('fix: the second thing');
+    commit('docs: the third thing');
+    // The changelog starts at the previous release, and is newest first.
+    const notes = changelogEntries({ cwd: dir });
+    assert.equal(notes.previous, 'v0.1.0');
+    assert.deepEqual(notes.entries.map((e) => e.subject), ['docs: the third thing', 'fix: the second thing']);
+    assert.deepEqual(notes.entries.map((e) => e.sha.length), [40, 40]);
+    // A re-run of a commit that already has a release reports the same changes as the
+    // first run: the previous release is the one behind the commit, never the commit's own
+    // tag, so its changelog is not empty.
+    git('tag', 'v0.1.0-def5678', git('rev-parse', 'HEAD'));
+    const rerun = changelogEntries({ cwd: dir });
+    assert.equal(rerun.previous, 'v0.1.0', 'the release behind the commit, not the one on it');
+    assert.deepEqual(rerun.entries.map((e) => e.subject), ['docs: the third thing', 'fix: the second thing']);
+    // A merge commit names the pull request; the commits it brought in are in the range.
+    git('checkout', '-q', '-b', 'side', second);
+    writeFileSync(join(dir, 'side.txt'), 'a branch\'s work\n');
+    git('add', 'side.txt');
+    git('commit', '-q', '-m', "feat: a branch's work");
+    git('checkout', '-q', 'main');
+    git('merge', '-q', '--no-ff', '-m', 'Merge branch side', 'side');
+    const merged = changelogEntries({ cwd: dir, from: 'v0.1.0' });
+    assert.ok(!merged.entries.some((e) => e.subject.startsWith('Merge ')), 'a merge commit is not a changelog line');
+    assert.ok(merged.entries.some((e) => e.subject === 'feat: a branch\'s work'), 'the work it merged is');
+    // The limit bounds what a page renders, and what is left out is counted rather than lost.
+    const limited = changelogEntries({ cwd: dir, from: 'v0.1.0', limit: 1 });
+    assert.equal(limited.entries.length, 1);
+    assert.ok(limited.more > 0, 'the commits beyond the limit are counted');
+    assert.equal(limited.entries.length + limited.more, merged.entries.length);
+    // And the whole body composes from it: the release behind the commit is the one the
+    // merge brought in, and the comparison link names it.
+    const body = notesFor({ cwd: dir, commit: 'HEAD', sha256: 'd'.repeat(64), repository: OWNER_REPO });
+    assert.match(body, /^## Changes since `v0\.1\.0-def5678`/);
+    assert.match(body, /- feat: a branch's work/);
+    assert.match(body, /compare\/v0\.1\.0-def5678\.\.\.HEAD/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a publish creates one release for its commit, holding only that build', async () => {
   const ws = workspace();
   try {
-    const { gh, stdout, output } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234']);
-    assert.match(stdout, /Created rolling release/);
+    const { gh, stdout, output } = await publish(['--apk', ws.apk, '--commit', 'abc1234']);
+    assert.match(stdout, /Created release v1\.9\.6-abc1234/);
     assert.equal(gh.releases.length, 1);
     const release = gh.releases[0];
-    assert.equal(release.tag_name, `${ROLLING_TAG_PREFIX}master`);
-    // The default branch's build is the repository's release, not a prerelease: a
-    // prerelease is skipped by /releases/latest and by the repository's Releases box.
+    assert.equal(release.tag_name, 'v1.9.6-abc1234');
+    assert.equal(release.name, '1.9.6-abc1234', 'named for the build, not for a branch');
+    assert.equal(release.draft, false, 'and made visible once its files are on it');
     assert.equal(release.prerelease, false);
-    assert.equal(release.draft, false);
-    // Named for the branch, not a version: this release is a window on a stream of
-    // builds, and a version in its title would be one stale number for all of them --
-    // which is exactly what `Brapmony 1.9.6` was, for every commit, when the version line
-    // never moved. The version of the build that is on it is in the body.
-    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of master',
-      'the release is named for the branch');
-    assert.ok(!/\d+\.\d+\.\d+/.test(release.name), 'and its title claims no version');
+    assert.equal(release.body, 'the changes of this build');
+    // One APK and the checksum beside it. Nothing else: no second copy of the same bytes
+    // under a stable name, and no build of another commit.
     const names = release.assets.map((a) => a.name).sort();
-    assert.deepEqual(names, [
-      'Brapmony-1.9.6-abc1234-debug.apk',
-      LATEST_ASSET,
-      LATEST_SHA256_ASSET,
-    ].sort());
+    assert.deepEqual(names, ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256']);
     // No asset carries a label: GitHub shows a label in place of the file name, so a
     // labelled asset is one a person cannot find by its name on the release page.
     for (const a of release.assets) {
@@ -489,36 +580,36 @@ test('a publish creates one release and uploads the build plus the stable names'
       assert.equal(a.uploader.login, BOT_LOGIN, 'every upload is attributed to the workflow');
     }
     const expected = sha(readFileSync(ws.apk));
-    const stable = release.assets.find((a) => a.name === LATEST_ASSET);
-    assert.equal(stable.content, release.assets.find((a) => a.name.endsWith('-abc1234-debug.apk')).content);
-    const checksum = release.assets.find((a) => a.name === LATEST_SHA256_ASSET);
-    assert.equal(Buffer.from(checksum.content, 'base64').toString('utf8'), `${expected}  ${LATEST_ASSET}\n`);
-    assert.match(output, /tag=android-rolling-master/);
+    const checksum = release.assets.find((a) => a.name.endsWith('.sha256'));
+    assert.equal(
+      Buffer.from(checksum.content, 'base64').toString('utf8'),
+      `${expected}  Brapmony-1.9.6-abc1234-debug.apk\n`,
+      'the checksum names the file it is beside, so sha256sum -c finds it',
+    );
+    assert.match(output, /tag=v1\.9\.6-abc1234/);
     assert.match(output, /release-id=\d+/);
     assert.match(output, new RegExp(`sha256=${expected}`));
+    assert.match(output, /name=Brapmony-1\.9\.6-abc1234-debug\.apk/);
   } finally {
     await ws.cleanup();
   }
 });
 
-test('a second push keeps the first build and moves the stable name to the new one', async () => {
+test('each commit gets its own release, and one commit keeps one', async () => {
   const first = workspace('abc1234');
   const second = workspace('def5678');
   try {
-    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
-    const again = await publish(['--apk', second.apk, '--branch', 'master', '--commit', 'def5678'], { gh: firstRun.gh });
-    assert.match(again.stdout, /Found rolling release/);
-    assert.equal(again.gh.releases.length, 1, 'the same branch keeps one rolling release');
-    const release = again.gh.releases[0];
-    const names = release.assets.map((a) => a.name);
-    assert.ok(names.includes('Brapmony-1.9.6-abc1234-debug.apk'), 'the first build is still there');
-    assert.ok(names.includes('Brapmony-1.9.6-def5678-debug.apk'));
-    assert.equal(names.filter((n) => n === LATEST_ASSET).length, 1, 'one stable asset, not two');
-    const stable = release.assets.find((a) => a.name === LATEST_ASSET);
-    const newest = release.assets.find((a) => a.name.endsWith('-def5678-debug.apk'));
-    assert.equal(stable.content, newest.content, 'the stable name follows the newest build');
-    // The staging name the swap went through is gone, not left behind.
-    assert.ok(!names.some((n) => n.includes('.staging-')), `left a staging asset: ${names.join(', ')}`);
+    const firstRun = await publish(['--apk', first.apk, '--commit', 'abc1234']);
+    const again = await publish(['--apk', second.apk, '--commit', 'def5678'], { gh: firstRun.gh });
+    assert.match(again.stdout, /Created release v1\.9\.6-def5678/);
+    assert.deepEqual(again.gh.releases.map((r) => r.tag_name).sort(), ['v1.9.6-abc1234', 'v1.9.6-def5678']);
+    // Neither release carries the other's build: a release is one commit's.
+    const older = again.gh.releases.find((r) => r.tag_name === 'v1.9.6-abc1234');
+    const newer = again.gh.releases.find((r) => r.tag_name === 'v1.9.6-def5678');
+    assert.deepEqual(older.assets.map((a) => a.name).sort(),
+      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256']);
+    assert.deepEqual(newer.assets.map((a) => a.name).sort(),
+      ['Brapmony-1.9.6-def5678-debug.apk', 'Brapmony-1.9.6-def5678-debug.apk.sha256']);
   } finally {
     await first.cleanup();
     await second.cleanup();
@@ -528,12 +619,13 @@ test('a second push keeps the first build and moves the stable name to the new o
 test('a re-run of the same commit with the same bytes changes nothing', async () => {
   const ws = workspace();
   try {
-    const firstRun = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234']);
+    const firstRun = await publish(['--apk', ws.apk, '--commit', 'abc1234']);
     const before = firstRun.gh.releases[0].assets.map((a) => `${a.name}:${a.id}`).sort();
-    const rerun = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh: firstRun.gh });
+    const rerun = await publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh: firstRun.gh });
     assert.match(rerun.stdout, /Kept Brapmony-1\.9\.6-abc1234-debug\.apk/);
     const after = rerun.gh.releases[0].assets.map((a) => `${a.name}:${a.id}`).sort();
     assert.deepEqual(after, before, 'a re-run neither re-uploads nor renames anything');
+    assert.equal(rerun.gh.releases.length, 1, 'and creates no second release');
   } finally {
     await ws.cleanup();
   }
@@ -543,9 +635,9 @@ test('a rebuild of the same commit gets its own name, leaving the earlier bytes 
   const first = workspace('abc1234', Buffer.from('first build of abc1234'));
   const rebuilt = workspace('abc1234', Buffer.from('second build of abc1234'));
   try {
-    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
+    const firstRun = await publish(['--apk', first.apk, '--commit', 'abc1234']);
     const before = firstRun.gh.releases[0].assets.find((a) => a.name.endsWith('-abc1234-debug.apk'));
-    const again = await publish(['--apk', rebuilt.apk, '--branch', 'master', '--commit', 'abc1234', '--attempt', '2'], { gh: firstRun.gh });
+    const again = await publish(['--apk', rebuilt.apk, '--commit', 'abc1234', '--attempt', '2'], { gh: firstRun.gh });
     const names = again.gh.releases[0].assets.map((a) => a.name);
     assert.ok(names.includes('Brapmony-1.9.6-abc1234-debug.apk'), 'the first name is unchanged');
     assert.ok(
@@ -555,9 +647,15 @@ test('a rebuild of the same commit gets its own name, leaving the earlier bytes 
     const after = again.gh.releases[0].assets.find((a) => a.name.endsWith('-abc1234-debug.apk'));
     assert.equal(after.id, before.id, 'the earlier asset was not replaced');
     assert.equal(after.content, before.content, 'the earlier bytes are what they were');
-    // And the stable name follows the newest bytes.
-    const stable = again.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
-    assert.equal(stable.content, Buffer.from('second build of abc1234').toString('base64'));
+    // The checksum is written for the file that is really on the release, so the pair a
+    // downloader gets still matches.
+    const sums = again.gh.releases[0].assets
+      .filter((a) => a.name.endsWith('.sha256'))
+      .map((a) => Buffer.from(a.content, 'base64').toString('utf8'));
+    assert.ok(
+      sums.some((line) => line.includes('Brapmony-1.9.6-abc1234-debug.r2.apk')),
+      `the rebuild has its own checksum: ${sums.join(' | ')}`,
+    );
   } finally {
     await first.cleanup();
     await rebuilt.cleanup();
@@ -568,20 +666,21 @@ test('an asset this workflow did not upload is never replaced', async () => {
   const ws = workspace();
   try {
     const gh = await fakeGitHub();
-    const { id } = await seedRolling(gh);
-    // Somebody attached a file under the stable name by hand: it carries their account, not
-    // the workflow's.
+    const { id } = await seedRelease(gh);
+    const name = 'Brapmony-1.9.6-abc1234-debug.apk';
+    // Somebody attached a file under this build's name by hand: it carries their account,
+    // not the workflow's.
     gh.state.uploader = { login: 'a-person', type: 'User' };
-    await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(LATEST_ASSET)}`, {
+    await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
       body: Buffer.from('hand made'),
       contentType: 'application/octet-stream',
     });
     gh.state.uploader = null;
     await assert.rejects(
-      replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET }),
+      publishAsset(gh, { releaseId: id, file: ws.apk, name }),
       /was not uploaded by this workflow; refusing to replace it/,
     );
-    const asset = gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
+    const asset = gh.releases[0].assets.find((a) => a.name === name);
     assert.equal(Buffer.from(asset.content, 'base64').toString('utf8'), 'hand made');
     await gh.close();
   } finally {
@@ -589,74 +688,66 @@ test('an asset this workflow did not upload is never replaced', async () => {
   }
 });
 
-test('a collision with a foreign build name is refused rather than overwritten', async () => {
+test('a release at the commit tag that carries no build of ours is refused', async () => {
   const ws = workspace();
   try {
-    const gh = await fakeGitHub();
-    const { id } = await seedRolling(gh);
-    const name = 'Brapmony-1.9.6-abc1234-debug.apk';
-    gh.state.uploader = { login: 'a-person', type: 'User' };
-    await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
-      body: Buffer.from('not ours'),
-      contentType: 'application/octet-stream',
-    });
-    gh.state.uploader = null;
     await assert.rejects(
-      publishBuild(gh, { releaseId: id, file: ws.apk, name }),
-      /was not uploaded by this workflow; refusing to replace it/,
+      publish(['--apk', ws.apk, '--commit', 'abc1234'], {
+        releases: [{
+          id: 55,
+          tag_name: 'v1.9.6-abc1234',
+          name: 'somebody else\'s release',
+          draft: false,
+          prerelease: false,
+          assets: [
+            { id: 5501, name: 'Their_App.apk', label: '', size: 9, state: 'uploaded' },
+            { id: 5502, name: 'notes.txt', label: '', size: 9, state: 'uploaded' },
+          ],
+        }],
+      }),
+      /carries no build of this workflow's; refusing to publish into it/,
     );
-    const asset = gh.releases[0].assets.find((a) => a.name === name);
-    assert.equal(Buffer.from(asset.content, 'base64').toString('utf8'), 'not ours');
-    await gh.close();
   } finally {
     await ws.cleanup();
   }
 });
 
-test('a failed build upload leaves the stable build people are downloading intact', async () => {
-  const first = workspace('abc1234');
-  const second = workspace('def5678');
+// The draft is what makes a failed publish harmless: the release exists, but it is not on
+// the Releases page and /releases/latest does not offer it, so nobody is sent to a page
+// whose download is not there.
+test('a publish that fails before its files are on the release leaves it a draft', async () => {
+  const ws = workspace();
   try {
-    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
-    const before = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
-    // The next build's own upload fails: the stable name must not move.
-    await assert.rejects(
-      publish(['--apk', second.apk, '--branch', 'master', '--commit', 'def5678'], {
-        gh: firstRun.gh,
-        failUploads: /def5678/,
-      }),
-      /upload failed/,
-    );
-    const after = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
-    assert.equal(after.id, before.id, 'the stable asset is the same one');
-    assert.equal(after.content, before.content, 'and it still holds the last good build');
-    assert.ok(!firstRun.gh.releases[0].assets.some((a) => a.name.endsWith('-def5678.apk')));
+    const gh = await fakeGitHub();
+    gh.state.failUploads = /abc1234/;
+    await assert.rejects(publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh }), /upload failed/);
+    assert.equal(gh.releases.length, 1, 'the release was created, so the retry has something to finish');
+    assert.equal(gh.releases[0].draft, true, 'and it is not visible to a downloader');
+    assert.deepEqual(gh.releases[0].assets, [], 'with no file on it');
+    // The next attempt of the same commit finishes the release the first one started.
+    gh.state.failUploads = null;
+    const done = await publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh });
+    assert.match(done.stdout, /Found release v1\.9\.6-abc1234/);
+    assert.equal(gh.releases.length, 1, 'not a second release');
+    assert.equal(gh.releases[0].draft, false);
+    assert.equal(gh.releases[0].assets.length, 2);
   } finally {
-    await first.cleanup();
-    await second.cleanup();
+    await ws.cleanup();
   }
 });
 
-test('a failed stable upload leaves the previous stable build in place', async () => {
-  const first = workspace('abc1234');
-  const second = workspace('def5678');
+// A release is published only after both files are on it, so a failure between the APK and
+// its checksum cannot leave a release that offers a download with no checksum beside it.
+test('a release is not made visible until its checksum is on it too', async () => {
+  const ws = workspace();
   try {
-    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
-    const before = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
-    // The build uploads, but the stable copy's upload fails.
-    await assert.rejects(
-      publish(['--apk', second.apk, '--branch', 'master', '--commit', 'def5678'], {
-        gh: firstRun.gh,
-        failUploads: `${LATEST_ASSET}.staging`,
-      }),
-      /upload failed/,
-    );
-    const after = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
-    assert.equal(after.id, before.id);
-    assert.equal(after.content, before.content, 'the previous stable build is still downloadable');
+    const gh = await fakeGitHub();
+    gh.state.failUploads = /\.sha256/;
+    await assert.rejects(publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh }), /upload failed/);
+    assert.equal(gh.releases[0].draft, true, 'the release is still a draft');
+    assert.deepEqual(gh.releases[0].assets.map((a) => a.name), ['Brapmony-1.9.6-abc1234-debug.apk']);
   } finally {
-    await first.cleanup();
-    await second.cleanup();
+    await ws.cleanup();
   }
 });
 
@@ -668,12 +759,12 @@ test('a request that fails transiently is sent again, and the publish goes throu
   const ws = workspace();
   try {
     const gh = await fakeGitHub();
-    const { id } = await seedRolling(gh);
+    const { id } = await seedRelease(gh);
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
     // The first upload attempt is answered 500 before the request is served, as a request
     // that never got a usable answer. The second is served.
     gh.state.transient.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, 1);
-    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name });
+    const build = await publishAsset(gh, { releaseId: id, file: ws.apk, name });
     assert.equal(build.uploaded, true);
     assert.equal(build.name, name);
     const uploads = gh.calls.filter((c) => c.method === 'POST' && c.name === name);
@@ -695,11 +786,11 @@ test('an upload whose answer was lost is not uploaded twice', async () => {
   const ws = workspace();
   try {
     const gh = await fakeGitHub();
-    const { id } = await seedRolling(gh);
+    const { id } = await seedRelease(gh);
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
     // Served, then answered 500. The retry finds the name taken by its own first attempt.
     gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, 1);
-    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name });
+    const build = await publishAsset(gh, { releaseId: id, file: ws.apk, name });
     assert.equal(build.name, name);
     const assets = gh.releases[0].assets.filter((a) => a.name === name);
     assert.equal(assets.length, 1, 'the lost answer did not leave a second asset behind');
@@ -711,30 +802,6 @@ test('an upload whose answer was lost is not uploaded twice', async () => {
   }
 });
 
-// The same for the stable name, which is moved by upload-then-rename rather than by an
-// upload that replaces anything. A retried staging upload finds its own first attempt under
-// the staging name, and the swap goes on from there.
-test('a stable name whose upload answer was lost is still moved onto the new build', async () => {
-  const first = workspace('abc1234');
-  const second = workspace('def5678');
-  try {
-    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
-    const gh = firstRun.gh;
-    const id = gh.releases[0].id;
-    gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, 1);
-    const secondRun = await publish(['--apk', second.apk, '--branch', 'master', '--commit', 'def5678'], { gh });
-    assert.equal(gh.releases[0].assets.find((a) => a.name === LATEST_ASSET).content,
-      gh.releases[0].assets.find((a) => a.name.endsWith('-def5678-debug.apk')).content,
-      'the stable name holds the new build');
-    assert.ok(!gh.releases[0].assets.some((a) => a.name.includes('.staging-')),
-      'no staging asset was left behind');
-    assert.match(secondRun.stdout, /Updated Brapmony-latest\.apk/);
-  } finally {
-    await first.cleanup();
-    await second.cleanup();
-  }
-});
-
 // A retry is bounded: a service that is failing for every attempt must end the publish
 // rather than loop until the job times out. What is checked is that it fails with the
 // server's own answer, after the attempts it was given.
@@ -742,11 +809,11 @@ test('a request that keeps failing ends the publish after a bounded number of at
   const ws = workspace();
   try {
     const gh = await fakeGitHub();
-    const { id } = await seedRolling(gh);
+    const { id } = await seedRelease(gh);
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
     gh.state.transient.set(`POST /repos/${OWNER_REPO}/releases/${id}/assets`, RETRY_ATTEMPTS);
     await assert.rejects(
-      publishBuild(gh, { releaseId: id, file: ws.apk, name }),
+      publishAsset(gh, { releaseId: id, file: ws.apk, name }),
       /500/,
     );
     const uploads = gh.calls.filter((c) => c.method === 'POST' && c.name === name);
@@ -771,7 +838,7 @@ test('a 4xx is an answer, and is not sent again', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'brapmony-422-'));
     const file = join(dir, 'Brapmony-1.9.6-abc1234-debug.apk');
     writeFileSync(file, Buffer.from('bytes'));
-    const { id } = await seedRolling(gh);
+    const { id } = await seedRelease(gh);
     gh.state.uploader = { login: 'a-person', type: 'User' };
     await gh.json('POST', `/releases/${id}/assets?name=Brapmony-1.9.6-abc1234-debug.apk`, {
       body: Buffer.from('not ours'),
@@ -780,7 +847,7 @@ test('a 4xx is an answer, and is not sent again', async () => {
     gh.state.uploader = null;
     const attempts = gh.calls.length;
     await assert.rejects(
-      publishBuild(gh, { releaseId: id, file, name: 'Brapmony-1.9.6-abc1234-debug.apk' }),
+      publishAsset(gh, { releaseId: id, file, name: 'Brapmony-1.9.6-abc1234-debug.apk' }),
       /was not uploaded by this workflow; refusing to replace it/,
     );
     const uploads = gh.calls.slice(attempts).filter((c) => c.method === 'POST' && c.name);
@@ -797,7 +864,7 @@ test('a 4xx is an answer, and is not sent again', async () => {
 test('an answer cut off part way through is sent again', async () => {
   const gh = await fakeGitHub();
   try {
-    const { id } = await seedRolling(gh);
+    const { id } = await seedRelease(gh);
     gh.state.cutOff.set(`GET /repos/${OWNER_REPO}/releases/${id}`, 1);
     const release = await gh.json('GET', `/releases/${id}`);
     assert.equal(release.id, id, 'the retried read got the whole answer');
@@ -842,17 +909,19 @@ test('a release create whose answer was lost does not fail the publish, or make 
   try {
     const gh = await fakeGitHub();
     gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/releases`, 1);
-    const { stdout } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
+    const { stdout } = await publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh });
     assert.equal(gh.releases.length, 1, 'one release, not two');
-    assert.equal(gh.releases[0].tag_name, `${ROLLING_TAG_PREFIX}master`);
-    assert.match(stdout, /Created rolling release/);
-    // The build still went on: the assets are on the release the first attempt made.
-    const names = gh.releases[0].assets.map((a) => a.name).sort();
-    assert.deepEqual(names, ['Brapmony-1.9.6-abc1234-debug.apk', LATEST_ASSET, LATEST_SHA256_ASSET].sort());
-    // And what the release says was brought up to date, because the read-back is the release
-    // as it really is rather than a create that was assumed to have happened.
-    assert.equal(gh.releases[0].name, 'Brapmony for Android \u2014 newest build of master');
-    assert.equal(gh.releases[0].prerelease, false);
+    assert.equal(gh.releases[0].tag_name, 'v1.9.6-abc1234');
+    assert.match(stdout, /Created release v1\.9\.6-abc1234/);
+    // The build still went on: the files are on the release the first attempt made, and it
+    // was made visible, because the read-back is the release as it really is rather than a
+    // create that was assumed to have happened.
+    assert.deepEqual(
+      gh.releases[0].assets.map((a) => a.name).sort(),
+      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256'],
+    );
+    assert.equal(gh.releases[0].draft, false, 'and it is published');
+    assert.equal(gh.releases[0].name, '1.9.6-abc1234');
   } finally {
     await ws.cleanup();
   }
@@ -876,21 +945,6 @@ test('a version release whose create answer was lost is found again, not refused
       'the id it prints is the release that is really there');
   } finally {
     await gh.close();
-  }
-});
-
-// The rolling tag is moved onto each build, and the first publish creates its ref. A retried
-// create is answered 422 because the ref now exists; reading it back says it points where
-// this attempt was putting it, so the publish carries on rather than failing on its own work.
-test('a tag ref create whose answer was lost leaves the tag where the publish put it', async () => {
-  const ws = workspace();
-  try {
-    const gh = await fakeGitHub();
-    gh.state.lostAnswers.set(`POST /repos/${OWNER_REPO}/git/refs`, 1);
-    await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
-    assert.equal(gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'abc1234', 'the tag names this build');
-  } finally {
-    await ws.cleanup();
   }
 });
 
@@ -948,19 +1002,22 @@ test('the asset GitHub stored is checked against the file that was uploaded', as
   const first = workspace('abc1234');
   const second = workspace('def5678');
   try {
-    const firstRun = await publish(['--apk', first.apk, '--branch', 'master', '--commit', 'abc1234']);
-    const before = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
+    const firstRun = await publish(['--apk', first.apk, '--commit', 'abc1234']);
+    const before = firstRun.gh.releases[0].assets.map((a) => `${a.name}:${a.id}`).sort();
     // The next build's bytes are stored as something else: a proxy or a truncated upload.
     await assert.rejects(
-      publish(['--apk', second.apk, '--branch', 'master', '--commit', 'def5678'], {
+      publish(['--apk', second.apk, '--commit', 'def5678'], {
         gh: firstRun.gh,
         corruptUploads: /def5678/,
       }),
       /GitHub stored Brapmony-1\.9\.6-def5678-debug\.apk as sha256:[0-9a-f]{64}, but the file hashes to sha256:[0-9a-f]{64}/,
     );
-    const after = firstRun.gh.releases[0].assets.find((a) => a.name === LATEST_ASSET);
-    assert.equal(after.id, before.id, 'the stable name did not move onto bytes that are not the build');
-    assert.equal(after.content, before.content);
+    // The published release is exactly what it was: a publish that failed leaves the last
+    // good download where it is.
+    const after = firstRun.gh.releases[0].assets.map((a) => `${a.name}:${a.id}`).sort();
+    assert.deepEqual(after, before, 'the release that was already published is untouched');
+    const failed = firstRun.gh.releases.find((r) => r.tag_name === 'v1.9.6-def5678');
+    assert.equal(failed.draft, true, 'and the failed one is not offered to anybody');
   } finally {
     await first.cleanup();
     await second.cleanup();
@@ -977,7 +1034,7 @@ test('a stored asset without a digest is not a failure', async () => {
   try {
     const gh = await fakeGitHub();
     gh.state.digests = false;
-    const { id } = await seedRolling(gh);
+    const { id } = await seedRelease(gh);
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
     const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
       body: readFileSync(ws.apk),
@@ -985,16 +1042,13 @@ test('a stored asset without a digest is not a failure', async () => {
     });
     assert.equal(uploaded.digest, undefined, 'the stand-in answered without a digest');
     // The same bytes are already there under that name, so nothing is re-uploaded, and
-    // with no digest to compare the publish continues.
-    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name });
+    // with no digest to compare the publish continues. The byte count is what is left to
+    // compare, and it is GitHub's too.
+    const build = await publishAsset(gh, { releaseId: id, file: ws.apk, name });
     assert.equal(build.uploaded, false);
     assert.equal(build.asset.id, uploaded.id);
-    // The stable name, too: the same bytes and no digest to contradict it.
-    const stable = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET });
-    assert.ok(stable.asset, 'the stable name was published');
-    const replaced = await replaceStable(gh, { releaseId: id, file: ws.apk, name: LATEST_ASSET });
-    assert.equal(replaced.replaced, 0, 'a second call is a no-op, as a re-run must be');
-    assert.equal(replaced.asset.id, stable.asset.id, 'the stable asset is the same one, not a new upload');
+    const again = await publishAsset(gh, { releaseId: id, file: ws.apk, name });
+    assert.equal(again.asset.id, uploaded.id, 'a second call is a no-op, as a re-run must be');
     await gh.close();
   } finally {
     await ws.cleanup();
@@ -1010,7 +1064,7 @@ test('a re-run whose stored bytes are not the build gets its own name, not a sil
   const ws = workspace();
   try {
     const gh = await fakeGitHub();
-    const { id } = await seedRolling(gh);
+    const { id } = await seedRelease(gh);
     const name = 'Brapmony-1.9.6-abc1234-debug.apk';
     const uploaded = await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
       body: readFileSync(ws.apk),
@@ -1020,7 +1074,7 @@ test('a re-run whose stored bytes are not the build gets its own name, not a sil
     // What is stored is not what this run built: the digest GitHub computed says so. The
     // asset list the publisher reads is where the digest comes from.
     gh.releases[0].assets.find((a) => a.id === uploaded.id).digest = `sha256:${'c'.repeat(64)}`;
-    const build = await publishBuild(gh, { releaseId: id, file: ws.apk, name, attempt: 2 });
+    const build = await publishAsset(gh, { releaseId: id, file: ws.apk, name, attempt: 2 });
     assert.equal(build.uploaded, true, 'the bytes in hand are published, not assumed to be there');
     assert.equal(build.name, 'Brapmony-1.9.6-abc1234-debug.r2.apk', 'under a name of their own');
     // The earlier name was not replaced, so whatever a link to it resolves to still does.
@@ -1036,40 +1090,41 @@ test('a re-run whose stored bytes are not the build gets its own name, not a sil
   }
 });
 
-test('pruning keeps the newest builds and only ever deletes this workflow own assets', async () => {
+// A release per commit would grow without bound: one APK for every push, for ever. The
+// window is on the releases, and what it drops is the file, not the page: the changelog is
+// the record of the commit, and the build is reproducible from it.
+test('releases beyond the window lose their APK, and keep their changelog', async () => {
   const gh = await fakeGitHub();
   try {
-    const { id } = await seedRolling(gh);
-    for (let i = 0; i < 12; i += 1) {
-      const name = `Brapmony-1.9.6-${String(i).padStart(7, '0')}-debug.apk`;
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
+    // Five releases, each with an APK and its checksum, newest last.
+    for (let i = 0; i < 5; i += 1) {
+      const commit = `abc000${i}`;
+      const release = await ensureCommitRelease(gh, {
+        version: '1.9.6', commit, name: releaseTitle('1.9.6', commit), body: `the changes of ${commit}`,
+      });
+      await visible(gh, release.id);
+      await gh.json('POST', `/releases/${release.id}/assets?name=${encodeURIComponent(`Brapmony-1.9.6-${commit}-debug.apk`)}`, {
         body: Buffer.from(`build ${i}`),
         contentType: 'application/octet-stream',
       });
-    }
-    // A hand-attached APK, the stable names, the retired names, and a stray file: none is
-    // a pruning candidate. They are attached by a person, not uploaded by the workflow.
-    gh.state.uploader = { login: 'a-person', type: 'User' };
-    for (const name of ['Brapmony-1.9.6-handmade.apk', LATEST_ASSET, LATEST_SHA256_ASSET,
-                        ...RETIRED_ASSETS, 'notes.txt']) {
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
-        body: Buffer.from('x'),
+      await gh.json('POST', `/releases/${release.id}/assets?name=${encodeURIComponent(`Brapmony-1.9.6-${commit}-debug.apk.sha256`)}`, {
+        body: Buffer.from(`${sha(Buffer.from(`build ${i}`))}  Brapmony-1.9.6-${commit}-debug.apk\n`),
         contentType: 'application/octet-stream',
       });
     }
-    gh.state.uploader = null;
-    const pruned = await pruneRollingAssets(gh, { releaseId: id, keep: 10 });
-    assert.equal(pruned.length, 2);
-    assert.deepEqual(pruned.sort(), [
-      'Brapmony-1.9.6-0000000-debug.apk',
-      'Brapmony-1.9.6-0000001-debug.apk',
-    ]);
-    const names = gh.releases[0].assets.map((a) => a.name);
-    for (const kept of ['Brapmony-1.9.6-handmade.apk', LATEST_ASSET, LATEST_SHA256_ASSET,
-                        ...RETIRED_ASSETS, 'notes.txt']) {
-      assert.ok(names.includes(kept), `${kept} must survive pruning`);
+    const pruned = await pruneOldReleaseAssets(gh, { keep: 2 });
+    assert.equal(pruned.length, 6, 'three releases beyond the window, two files each');
+    assert.equal(gh.releases.length, 5, 'no release is deleted: the page is the record');
+    const kept = gh.releases.slice(-2);
+    for (const release of kept) assert.equal(release.assets.length, 2, `${release.tag_name} keeps its files`);
+    for (const release of gh.releases.slice(0, 3)) {
+      assert.deepEqual(release.assets, [], `${release.tag_name} lost its APK`);
+      assert.match(release.body, /the changes of/, 'and still says what the commit was');
     }
-    assert.equal(names.filter((n) => /-\d{7}-debug\.apk$/.test(n)).length, 10);
+    // A version release is not in this window at all: it is the archive, and nothing here
+    // touches it.
+    assert.ok(!pruned.some((name) => name.includes('V1.9.6')));
+    await assert.rejects(pruneOldReleaseAssets(gh, { keep: 0 }), /--keep must be at least 1/);
   } finally {
     await gh.close();
   }
@@ -1083,31 +1138,31 @@ test('a bot upload under a name this workflow does not generate is not its own',
   const gh = await fakeGitHub();
   const ws = workspace();
   try {
-    const { id } = await seedRolling(gh);
-    // Uploaded by a workflow (so by the bot), but not a name this one ever publishes.
-    for (const name of ['Release-Tool-1.0.0.apk', 'checksums.txt']) {
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
-        body: Buffer.from('another workflow\'s file'),
+    // An old release with another workflow's file on it, beside its own.
+    const old = await ensureCommitRelease(gh, { version: '1.9.6', commit: 'abc0001', name: releaseTitle('1.9.6', 'abc0001'), body: 'x' });
+    await visible(gh, old.id);
+    for (const name of ['Release-Tool-1.0.0.apk', 'checksums.txt', 'Brapmony-1.9.6-abc0001-debug.apk']) {
+      await gh.json('POST', `/releases/${old.id}/assets?name=${encodeURIComponent(name)}`, {
+        body: Buffer.from('a file'),
         contentType: 'application/octet-stream',
       });
     }
-    // Fill the window so pruning has work to do.
-    for (let i = 0; i < 12; i += 1) {
-      const name = `Brapmony-1.9.6-${String(i).padStart(7, '0')}-debug.apk`;
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
-        body: Buffer.from(`build ${i}`),
-        contentType: 'application/octet-stream',
-      });
-    }
-    const pruned = await pruneRollingAssets(gh, { releaseId: id, keep: 10 });
-    assert.equal(pruned.length, 2);
-    const names = gh.releases[0].assets.map((a) => a.name);
-    for (const kept of ['Release-Tool-1.0.0.apk', 'checksums.txt']) {
-      assert.ok(names.includes(kept), `${kept} belongs to another workflow and must survive pruning`);
-    }
-    // And the same rule holds when it is a name this workflow would replace.
+    const newer = await ensureCommitRelease(gh, { version: '1.9.6', commit: 'abc0002', name: releaseTitle('1.9.6', 'abc0002'), body: 'y' });
+    await visible(gh, newer.id);
+    const pruned = await pruneOldReleaseAssets(gh, { keep: 1 });
+    assert.deepEqual(pruned, ['Brapmony-1.9.6-abc0001-debug.apk'], 'only this workflow\'s own file went');
+    const names = gh.releases.find((r) => r.id === old.id).assets.map((a) => a.name).sort();
+    assert.deepEqual(names, ['Release-Tool-1.0.0.apk', 'checksums.txt'], 'another workflow\'s files survive');
+    // And the same rule holds when it is a name this workflow would replace: a file attached
+    // by a person under a name this one publishes is not replaced either.
+    gh.state.uploader = { login: 'a-person', type: 'User' };
+    await gh.json('POST', `/releases/${newer.id}/assets?name=${encodeURIComponent('Brapmony-1.9.6-abc0002-debug.apk')}`, {
+      body: Buffer.from('a person put this here'),
+      contentType: 'application/octet-stream',
+    });
+    gh.state.uploader = null;
     await assert.rejects(
-      publishBuild(gh, { releaseId: id, file: ws.apk, name: 'Release-Tool-1.0.0.apk' }),
+      publishAsset(gh, { releaseId: newer.id, file: ws.apk, name: 'Brapmony-1.9.6-abc0002-debug.apk' }),
       /was not uploaded by this workflow; refusing to replace it/,
     );
   } finally {
@@ -1116,130 +1171,104 @@ test('a bot upload under a name this workflow does not generate is not its own',
   }
 });
 
-// The names an earlier version of this workflow published under are retired, so a
-// download does not sit under a name the documentation no longer mentions, holding bytes
-// nothing updates. Only this workflow's own assets are removed: a file somebody attached
-// by hand is never deleted, whatever it is called.
-//
-// The fixture is the release `main` actually had before this change, asset for asset and
-// label for label (read from the GitHub API): the two old stable names and one old build,
-// and the labelled assets the labelled publish left. This is the first push after the
-// change merges, so the result is what a downloader will find there.
-test('the first publish after the change turns the old release into the new one', async () => {
+// The first publish after this change finds the rolling releases the scheme this replaced
+// left behind: one per branch, ten builds each and a `Brapmony-latest.apk` beside them,
+// labelled so their names are hidden. That is the release page somebody sees now, and what
+// makes a downloader guess which file to take, so it is removed rather than added to.
+test('the first publish removes the rolling releases and tags, and leaves the version releases', async () => {
   const ws = workspace();
   try {
     const old = `${LEGACY_OWNER} sha256:${'b'.repeat(64)}`;
     const gh = await fakeGitHub({
-      releases: [{
-        id: 453200307,
-        tag_name: `${ROLLING_TAG_PREFIX}main`,
-        name: 'Android (rolling) main',
-        body: 'Rolling build of `main` for the Android client.',
-        draft: false,
-        prerelease: true,
-        target_commitish: '606ab10ff2c37b983d482607303d53d19ff31845',
-        assets: [
-          { id: 1, name: 'Brapmony_Android_latest.apk', label: old, size: 9, state: 'uploaded' },
-          { id: 2, name: 'Brapmony_Android_latest.apk.sha256', label: old, size: 9, state: 'uploaded' },
-          { id: 3, name: 'Brapmony_Android_V1.9.6_debug-main-606ab10.apk', label: old, size: 9, state: 'uploaded' },
-          // The labelled assets the release has today: their names are hidden on the page.
-          { id: 4, name: 'Brapmony-1.9.6-85332c5-debug.apk', label: old, size: 9, state: 'uploaded' },
-        ],
-      }],
+      releases: [
+        {
+          id: 453200307,
+          tag_name: `${LEGACY_ROLLING_PREFIX}main`,
+          name: 'Android (rolling) main',
+          body: 'Rolling build of `main` for the Android client.',
+          draft: false,
+          prerelease: false,
+          target_commitish: '606ab10ff2c37b983d482607303d53d19ff31845',
+          assets: [
+            { id: 1, name: 'Brapmony_Android_latest.apk', label: old, size: 9, state: 'uploaded' },
+            { id: 2, name: 'Brapmony_Android_latest.apk.sha256', label: old, size: 9, state: 'uploaded' },
+            { id: 3, name: 'Brapmony_Android_V1.9.6_debug-main-606ab10.apk', label: old, size: 9, state: 'uploaded' },
+            { id: 4, name: 'Brapmony-1.9.6-85332c5-debug.apk', label: old, size: 9, state: 'uploaded' },
+          ],
+        },
+        {
+          id: 453200308,
+          tag_name: `${LEGACY_ROLLING_PREFIX}task-build-native-android-app-with-parity`,
+          name: 'Android (rolling) task/build-native-android-app-with-parity',
+          body: 'Rolling build of a task branch.',
+          draft: false,
+          prerelease: true,
+          assets: [{ id: 5, name: 'Brapmony-latest.apk', label: '', size: 9, state: 'uploaded' }],
+        },
+        versionRelease(),
+      ],
     });
-    const { stdout } = await publish(
-      // The file is named the way the namer names it, and the publisher uses that name.
-      ['--apk', ws.apk, '--branch', 'main', '--commit', 'abc1234', '--default-branch', 'main', '--body', 'the new build'],
-      { gh },
+    gh.refs.set(`${LEGACY_ROLLING_PREFIX}main`, '606ab10ff2c37b983d482607303d53d19ff31845');
+    // A rolling tag whose release was deleted by hand, which is only in the tag list.
+    gh.refs.set(`${LEGACY_ROLLING_PREFIX}gone`, 'a'.repeat(40));
+    gh.refs.set('v1.9.6', 'b'.repeat(40));
+
+    const { stdout } = await publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh });
+    // This commit has its own release, holding only its own build.
+    const release = gh.releases.find((r) => r.tag_name === 'v1.9.6-abc1234');
+    assert.ok(release, 'the commit has a release');
+    assert.deepEqual(release.assets.map((a) => a.name).sort(),
+      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256']);
+    // And the rolling releases and tags are gone, so the one file on the page is a build.
+    assert.deepEqual(
+      gh.releases.map((r) => r.tag_name).sort(),
+      ['v1.9.6', 'v1.9.6-abc1234'],
+      'the old rolling releases are removed and the version release is not',
     );
-    const release = gh.releases[0];
-    // It becomes the repository's release, named for the branch it is a window on. Its
-    // old title, `Brapmony 1.9.6`, was the version line the app had never bumped.
-    assert.equal(release.prerelease, false);
-    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of main');
-    assert.equal(release.body, 'the new build');
-    // The names it published are gone; the new ones are there.
-    const names = release.assets.map((a) => a.name).sort();
-    assert.deepEqual(names, [
-      'Brapmony-1.9.6-85332c5-debug.apk',
-      'Brapmony-1.9.6-abc1234-debug.apk',
-      LATEST_ASSET,
-      LATEST_SHA256_ASSET,
-      // The old build stays: it is a name a link may point at, and pruning removes it on
-      // its own schedule rather than this publish reaching for it.
-      'Brapmony_Android_V1.9.6_debug-main-606ab10.apk',
-    ]);
-    assert.match(stdout, /Retired Brapmony_Android_latest\.apk, Brapmony_Android_latest\.apk\.sha256/);
-    assert.match(stdout, /Updated android-rolling-main: prerelease, name, body/);
-    // Every asset on the page shows its own name, including the ones the labelled publish
-    // left there: that is what was wrong with the page, and it is what this fixes.
-    for (const a of release.assets) assert.equal(a.label, '', `${a.name} still has a label, so its name is hidden`);
-    assert.match(stdout, /Cleared the old label from .*Brapmony-1\.9\.6-85332c5-debug\.apk/);
-    // And the tag names the commit these assets came from, not the one the release was
-    // created at.
-    assert.equal(gh.refs.get(`${ROLLING_TAG_PREFIX}main`), 'abc1234');
-    const stable = release.assets.find((a) => a.name === LATEST_ASSET);
-    assert.equal(stable.content, release.assets.find((a) => a.name.endsWith('-abc1234-debug.apk')).content);
+    assert.ok(![...gh.refs.keys()].some((tag) => tag.startsWith(LEGACY_ROLLING_PREFIX)),
+      `a rolling tag is still there: ${[...gh.refs.keys()].join(', ')}`);
+    assert.ok(gh.refs.has('v1.9.6'), 'and the version tag is not touched');
+    assert.match(stdout, new RegExp(`Deleted the old rolling release ${LEGACY_ROLLING_PREFIX}main`));
+    assert.match(stdout, new RegExp(`Deleted the old rolling release ${LEGACY_ROLLING_PREFIX}task-`));
+    assert.match(stdout, /Deleted the old rolling tag android-rolling-gone/);
+    // The version release and its assets are exactly as they were.
+    const version = gh.releases.find((r) => r.tag_name === 'v1.9.6');
+    assert.deepEqual(
+      version.assets.map((a) => a.name).sort(),
+      ['Brapmony-1.9.6.apk', 'Brapmony_Android_V1.9.6.apk', 'Other_Tool_V1.9.6.apk', 'latest.json'],
+    );
   } finally {
     await ws.cleanup();
   }
 });
 
-test('the previous stable names are retired, and nothing else is', async () => {
-  const ws = workspace();
+// Only a rolling tag is ever deleted. A commit tag and a version tag are what the releases
+// above are addressed by, and a sweep that reached one would take a download link with it.
+test('only a rolling tag or release is ever retired', async () => {
+  const gh = await fakeGitHub({
+    releases: [
+      versionRelease(),
+      { id: 90, tag_name: 'v1.9.6-abc1234', name: '1.9.6-abc1234', draft: false, prerelease: false, assets: [] },
+    ],
+  });
   try {
-    const gh = await fakeGitHub();
-    const { id } = await seedRolling(gh);
-    for (const name of RETIRED_ASSETS) {
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
-        body: Buffer.from('stale'),
-        contentType: 'application/octet-stream',
-      });
-    }
-    // A hand-attached file under a retired-looking name: attached by a person, so not ours.
-    gh.state.uploader = { login: 'a-person', type: 'User' };
-    await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent('Brapmony_Android_latest_handmade.apk')}`, {
-      body: Buffer.from('hand made'),
-      contentType: 'application/octet-stream',
-    });
-    gh.state.uploader = null;
-    const { stdout } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
-    assert.match(stdout, new RegExp(`Retired ${RETIRED_ASSETS.map((n) => n.replace(/\./g, '\\.')).join(', ')}`));
-    const names = gh.releases[0].assets.map((a) => a.name);
-    for (const gone of RETIRED_ASSETS) assert.ok(!names.includes(gone), `${gone} must be gone`);
-    assert.ok(names.includes('Brapmony_Android_latest_handmade.apk'), 'a file this workflow did not upload is kept');
-    assert.ok(names.includes(LATEST_ASSET), 'and the current stable name is there');
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-test('a retired name that is not this workflow\'s is refused, not deleted', async () => {
-  const gh = await fakeGitHub();
-  try {
-    const { id } = await seedRolling(gh);
-    // A person attached these under the retired names, not the workflow.
-    gh.state.uploader = { login: 'a-person', type: 'User' };
-    for (const name of RETIRED_ASSETS) {
-      await gh.json('POST', `/releases/${id}/assets?name=${encodeURIComponent(name)}`, {
-        body: Buffer.from('somebody else put this here'),
-        contentType: 'application/octet-stream',
-      });
-    }
-    gh.state.uploader = null;
-    const retired = await retireAssets(gh, { releaseId: id });
-    assert.deepEqual(retired, []);
-    const names = gh.releases[0].assets.map((a) => a.name);
-    for (const kept of RETIRED_ASSETS) assert.ok(names.includes(kept), `${kept} must be kept`);
+    gh.refs.set('v1.9.6', 'b'.repeat(40));
+    gh.refs.set('v1.9.6-abc1234', 'c'.repeat(40));
+    const retired = await retireRollingScheme(gh, {});
+    assert.deepEqual(retired, [], 'nothing that is not a rolling release or tag is retired');
+    assert.deepEqual(gh.releases.map((r) => r.tag_name).sort(), ['v1.9.6', 'v1.9.6-abc1234']);
+    assert.deepEqual([...gh.refs.keys()].sort(), ['v1.9.6', 'v1.9.6-abc1234']);
   } finally {
     await gh.close();
   }
 });
 
-test('a rolling publish leaves a version release and its assets alone', async () => {
+// A publish is one commit's. It may not move, retitle or add a file to the release a version
+// tag names: that is the archive, cut deliberately, and nothing a push does.
+test('a commit publish leaves a version release and its assets alone', async () => {
   const ws = workspace();
   try {
-    const { gh } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], {
+    const { gh } = await publish(['--apk', ws.apk, '--commit', 'abc1234'], {
       releases: [versionRelease()],
     });
     const version = gh.releases.find((r) => r.tag_name === 'v1.9.6');
@@ -1247,7 +1276,7 @@ test('a rolling publish leaves a version release and its assets alone', async ()
       version.assets.map((a) => a.name).sort(),
       ['Brapmony-1.9.6.apk', 'Brapmony_Android_V1.9.6.apk', 'Other_Tool_V1.9.6.apk', 'latest.json'],
     );
-    assert.equal(version.prerelease, false);
+    assert.equal(version.name, 'Brapmony 1.9.6');
     assert.equal(version.draft, false);
     const deletes = gh.calls.filter((c) => c.method === 'DELETE');
     assert.ok(deletes.every((c) => !String(c.path).includes('/41/')), 'nothing of the version release is deleted');
@@ -1256,145 +1285,17 @@ test('a rolling publish leaves a version release and its assets alone', async ()
   }
 });
 
-// The rolling tag's release is only ever this workflow's. One that carries none of its
-// builds is somebody else's release at a tag this workflow computed, and rewriting what it
-// says -- or putting bytes under a name a link there already means -- is not this
-// workflow's to do.
-test('a release at the rolling tag that carries no build of ours is refused', async () => {
-  const ws = workspace();
-  try {
-    await assert.rejects(
-      publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], {
-        releases: [{
-          id: 55,
-          tag_name: `${ROLLING_TAG_PREFIX}master`,
-          name: 'somebody else\'s release',
-          draft: false,
-          prerelease: false,
-          assets: [
-            { id: 5501, name: 'Their_App.apk', label: '', size: 9, state: 'uploaded' },
-            { id: 5502, name: 'notes.txt', label: '', size: 9, state: 'uploaded' },
-          ],
-        }],
-      }),
-      /carries no build of this workflow's; refusing to publish into it/,
-    );
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-// The one change that would quietly alter what an existing download link means: a branch's
-// prerelease becoming the repository's release. Publishing the default branch's build does
-// exactly that to a rolling release an earlier version of this workflow created, so it is
-// done deliberately, after the build uploads, and tested here.
-test('a rolling release of the default branch is moved out of the prereleases', async () => {
-  const ws = workspace();
-  try {
-    const gh = await fakeGitHub({
-      releases: [{
-        id: 60,
-        tag_name: `${ROLLING_TAG_PREFIX}master`,
-        name: 'Android (rolling) master',
-        body: 'an older body',
-        draft: false,
-        prerelease: true,
-        assets: [
-          { id: 6001, name: 'Brapmony_Android_V1.9.6_debug-master-abc1234.apk', label: '', size: 9, state: 'uploaded' },
-        ],
-      }],
-    });
-    const { stdout } = await publish(
-      ['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234', '--body', 'the build of abc1234'],
-      { gh },
-    );
-    assert.match(stdout, /Updated android-rolling-master: prerelease, name, body/);
-    const release = gh.releases.find((r) => r.id === 60);
-    assert.equal(release.prerelease, false, 'the default branch is a release, not a prerelease');
-    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of master',
-      'and says which branch it is');
-    assert.equal(release.body, 'the build of abc1234', 'and describes the build that is now there');
-    // The build it held is kept: it is a name a download link may point at.
-    assert.ok(release.assets.some((a) => a.name === 'Brapmony_Android_V1.9.6_debug-master-abc1234.apk'));
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-test('a build of another branch is a prerelease, and publishing it moves no release', async () => {
-  const ws = workspace();
-  try {
-    const { gh, stdout } = await publish([
-      '--apk', ws.apk, '--branch', 'feature/x', '--commit', 'abc1234', '--default-branch', 'master',
-    ]);
-    assert.match(stdout, /Created rolling prerelease android-rolling-feature-x/);
-    const release = gh.releases.find((r) => r.tag_name === `${ROLLING_TAG_PREFIX}feature-x`);
-    assert.equal(release.prerelease, true, 'a branch build is not an offer to anybody');
-    assert.equal(release.name, 'Brapmony for Android \u2014 newest build of feature/x');
-    // And a default-branch publish afterwards leaves it alone.
-    await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
-    assert.equal(gh.releases.find((r) => r.tag_name === `${ROLLING_TAG_PREFIX}feature-x`).prerelease, true);
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-// A publish that fails before its build is uploaded must not have moved the repository's
-// release: the page has to describe the bytes that are actually there.
-test('a failed publish does not change what the release says', async () => {
-  const ws = workspace();
-  try {
-    const gh = await fakeGitHub({
-      releases: [{
-        id: 61,
-        tag_name: `${ROLLING_TAG_PREFIX}master`,
-        name: 'Android (rolling) master',
-        body: 'the build that is there',
-        draft: false,
-        prerelease: true,
-        assets: [{ id: 6101, name: 'Brapmony_Android_V1.9.6_debug-master-old.apk', label: '', size: 9, state: 'uploaded' }],
-      }],
-    });
-    gh.state.failUploads = 'abc1234';
-    await assert.rejects(publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh }));
-    const release = gh.releases.find((r) => r.id === 61);
-    assert.equal(release.prerelease, true, 'the release is still what it was');
-    assert.equal(release.name, 'Android (rolling) master');
-    assert.equal(release.body, 'the build that is there');
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-// GitHub shows an asset's label **in place of its file name** on the release page. A
-// labelled asset is therefore one a person cannot find by name: the live release listed
-// `brapmony-android sha256:baf1c5…` five times and no `Brapmony-latest.apk` at all, which
-// is the whole of "the apk doesn't seem to be showing up". Nothing this workflow uploads
-// may carry a label, and the ones an earlier version labelled have it cleared.
+// GitHub shows an asset's label **in place of its file name** on the release page. Nothing
+// this workflow uploads may carry one: a labelled asset is one a person cannot find by name.
 test('no asset this workflow publishes carries a label, so every name is visible', async () => {
   const ws = workspace();
   try {
-    const legacy = `${LEGACY_OWNER} sha256:${'d'.repeat(64)}`;
-    const gh = await fakeGitHub({
-      releases: [{
-        id: 71,
-        tag_name: `${ROLLING_TAG_PREFIX}master`,
-        name: 'Android (rolling) master',
-        draft: false,
-        prerelease: true,
-        assets: [{ id: 7101, name: 'Brapmony-1.9.6-0ldc0de-debug.apk', label: legacy, size: 9, state: 'uploaded' }],
-      }],
-    });
-    await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
+    const gh = await fakeGitHub();
+    await publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh });
     const release = gh.releases[0];
     for (const a of release.assets) {
       assert.equal(a.label, '', `${a.name} carries a label, which hides its name on the page`);
     }
-    // And the name that was hidden is readable again.
-    assert.ok(
-      release.assets.some((a) => a.name === 'Brapmony-1.9.6-0ldc0de-debug.apk'),
-      'the earlier build is still there, now under a visible name',
-    );
     // Nothing the publisher sends asks for a label in the first place.
     const uploads = gh.calls.filter((c) => c.method === 'POST' && c.name);
     assert.ok(uploads.length, 'the publish uploaded something');
@@ -1404,79 +1305,14 @@ test('no asset this workflow publishes carries a label, so every name is visible
   }
 });
 
-// A label that an API refuses to clear cannot be fixed by this workflow, but it must not be
-// reported as fixed either: the run says the names are still hidden rather than publishing
-// a summary that says the page is readable.
-test('a label that will not clear is reported rather than passed over', async () => {
-  const ws = workspace();
-  try {
-    const legacy = `${LEGACY_OWNER} sha256:${'e'.repeat(64)}`;
-    const gh = await fakeGitHub({
-      releases: [{
-        id: 72,
-        tag_name: `${ROLLING_TAG_PREFIX}master`,
-        name: 'Android (rolling) master',
-        draft: false,
-        prerelease: true,
-        assets: [{ id: 7201, name: 'Brapmony-1.9.6-0ldc0de-debug.apk', label: legacy, size: 9, state: 'uploaded' }],
-      }],
-    });
-    gh.state.ignoresLabel = true;
-    const { stdout } = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234'], { gh });
-    assert.match(stdout, /::warning::the label on Brapmony-1\.9\.6-0ldc0de-debug\.apk did not clear/);
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-// The release page shows the commit its tag points at. A rolling tag left where the
-// release was created would name the first build's commit beside the newest build's
-// assets, so every publish moves it.
-test('a publish moves the rolling tag onto the commit it built', async () => {
-  const ws = workspace();
-  try {
-    const first = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'abc1234']);
-    assert.equal(first.gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'abc1234', 'the tag names this build');
-    assert.match(first.stdout, /Moved tag android-rolling-master at abc1234/);
-    // The next build moves it again.
-    const second = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'def5678'], { gh: first.gh });
-    assert.equal(second.gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'def5678');
-    // A re-run of the same commit leaves it where it is, and says so.
-    const again = await publish(['--apk', ws.apk, '--branch', 'master', '--commit', 'def5678'], { gh: first.gh });
-    assert.equal(again.gh.refs.get(`${ROLLING_TAG_PREFIX}master`), 'def5678');
-    assert.match(again.stdout, /Kept tag android-rolling-master at def5678/);
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-test('only a rolling tag is ever moved, and a version tag is refused', async () => {
-  const gh = await fakeGitHub({ releases: [versionRelease()] });
-  try {
-    await assert.rejects(
-      moveRollingTag(gh, { tag: 'v1.9.6', commit: 'abc1234' }),
-      /refusing to move v1\.9\.6: not a rolling tag/,
-    );
-    await assert.rejects(
-      moveRollingTag(gh, { tag: `${ROLLING_TAG_PREFIX}master`, commit: '' }),
-      /a commit is required/,
-    );
-    const before = gh.refs.get('v1.9.6');
-    assert.equal(before, 'f'.repeat(40), 'the version tag was there before');
-    assert.equal(gh.refs.get('v1.9.6'), before, 'and the version tag was not created or moved');
-  } finally {
-    await gh.close();
-  }
-});
-
 test('a dry run contacts nothing and says what it would publish', async () => {
   const ws = workspace();
   try {
-    const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'rolling',
-      '--apk', ws.apk, '--branch', 'master', '--default-branch', 'master', '--dry-run'], {
+    const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'publish',
+      '--apk', ws.apk, '--version', '1.9.6', '--commit', 'abc1234', '--dry-run'], {
       env: { ...process.env, GITHUB_TOKEN: '', GITHUB_REPOSITORY: OWNER_REPO },
     });
-    assert.match(stdout, /Would publish Brapmony-1\.9\.6-abc1234-debug\.apk to release android-rolling-master/);
+    assert.match(stdout, /Would publish Brapmony-1\.9\.6-abc1234-debug\.apk as 1\.9\.6-abc1234 \(v1\.9\.6-abc1234\)/);
   } finally {
     await ws.cleanup();
   }
@@ -1544,22 +1380,46 @@ async function tagCommand(args, gh) {
   return { stdout, output: readFileSync(out, 'utf8') };
 }
 
-test('a tag creates its release once and re-running the tag finds the same one', async () => {
+test('a tag creates its release once, as a draft, and re-running the tag finds the same one', async () => {
   const gh = await fakeGitHub();
   try {
-    const first = await tagCommand(['--tag', 'v1.9.6'], gh);
+    const first = await tagCommand(['--tag', 'v1.9.6', '--body', 'what changed for 1.9.6'], gh);
     assert.match(first.stdout, /Created release v1\.9\.6/);
     assert.equal(gh.releases.length, 1);
     assert.equal(gh.releases[0].tag_name, 'v1.9.6');
-    assert.equal(gh.releases[0].name, 'Brapmony 1.9.6');
+    assert.equal(gh.releases[0].name, '1.9.6');
+    assert.equal(gh.releases[0].body, 'what changed for 1.9.6', 'the body is the changelog, not instructions');
     assert.equal(gh.releases[0].prerelease, false, 'a version release is not a prerelease');
+    // A draft until its APK is on it: a tag whose build fails offers nobody a download that
+    // is not there. The upload step is what makes it visible (publish-release).
+    assert.equal(gh.releases[0].draft, true, 'created as a draft');
     const id = gh.releases[0].id;
     assert.match(first.output, new RegExp(`id=${id}\\n`), 'the id goes to GITHUB_OUTPUT');
 
-    const second = await tagCommand(['--tag', 'v1.9.6'], gh);
+    const second = await tagCommand(['--tag', 'v1.9.6', '--body', 'what changed for 1.9.6'], gh);
     assert.match(second.stdout, /Found release v1\.9\.6/);
     assert.equal(gh.releases.length, 1, 'a second run creates no second release');
     assert.match(second.output, new RegExp(`id=${id}\\n`), 'and names the release that exists');
+
+    // The step that follows the upload: the release is made visible, and says what changed.
+    await run(process.execPath, [join(here, 'release.mjs'), 'publish-release', '--release-id', String(id)], {
+      env: { ...process.env, GITHUB_TOKEN: 't', GITHUB_REPOSITORY: OWNER_REPO, GITHUB_API_URL: gh.url },
+    });
+    assert.equal(gh.releases[0].draft, false, 'the release is published');
+  } finally {
+    await gh.close();
+  }
+});
+
+// A release found on a re-run gets this run's notes: they name the commits since the
+// previous release, which is not what a body written when the tag was first cut says.
+test('a re-run of a tag brings its notes up to date', async () => {
+  const gh = await fakeGitHub();
+  try {
+    await tagCommand(['--tag', 'v1.9.6', '--body', 'the first draft of the notes'], gh);
+    await tagCommand(['--tag', 'v1.9.6', '--body', 'the notes as they are now'], gh);
+    assert.equal(gh.releases.length, 1);
+    assert.equal(gh.releases[0].body, 'the notes as they are now');
   } finally {
     await gh.close();
   }
@@ -1568,7 +1428,7 @@ test('a tag creates its release once and re-running the tag finds the same one',
 test('a tag is only ever vX.Y.Z, so a rolling tag can never become a version release', async () => {
   const gh = await fakeGitHub();
   try {
-    for (const tag of [`${ROLLING_TAG_PREFIX}master`, 'master', 'v1.9', 'v1.9.6-rc1']) {
+    for (const tag of [`${LEGACY_ROLLING_PREFIX}master`, 'master', 'v1.9', 'v1.9.6-rc1']) {
       await assert.rejects(
         tagCommand(['--tag', tag], gh),
         /--tag must be vX\.Y\.Z/,
@@ -1583,123 +1443,67 @@ test('a tag is only ever vX.Y.Z, so a rolling tag can never become a version rel
   }
 });
 
-test('a version release that carries a rolling tag is refused, not adopted', async () => {
+test('a version release never carries a commit tag, and a rolling tag is refused', async () => {
   const gh = await fakeGitHub();
   try {
-    await assert.rejects(
-      ensureTagRelease(gh, { tag: 'v1.9.6' }).then(() => {
-        throw new Error('expected the call to be refused');
-      }),
-      (error) => error instanceof Error,
-    );
-    // The real check: a rolling tag never reaches the version path at all.
-    await assert.rejects(ensureTagRelease(gh, { tag: 'android-rolling-master' }), /--tag must be vX\.Y\.Z/);
+    // A commit tag is a different namespace: the version path must not adopt one.
+    await assert.rejects(ensureTagRelease(gh, { tag: 'v1.9.6-abc1234' }), /--tag must be vX\.Y\.Z/);
+    // And the rolling tags of the scheme this replaced are not version tags either.
+    await assert.rejects(ensureTagRelease(gh, { tag: 'android-rolling-main' }), /--tag must be vX\.Y\.Z/);
+    assert.equal(gh.releases.length, 0, 'nothing was created');
   } finally {
     await gh.close();
   }
 });
 
-// A rolling tag is created by the first publish of a branch and moved by every one after
-// it. When the branch is deleted or renamed nothing moves it again, so it stays in the
-// repository's tag list and its release stays on the Releases page pointing at a build no
-// branch will ever replace -- which is how `android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa`
-// was left behind. The cleanup sweep is the only thing that can notice: a workflow only
-// ever runs for the branch it is publishing.
-test('a rolling release whose branch is gone is stale, and a live branch\'s is not', async () => {
-  const gh = await fakeGitHub({
-    releases: [
-      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
-      { id: 71, tag_name: `${ROLLING_TAG_PREFIX}feature-old`, name: 'Brapmony (rolling) feature/old', prerelease: true, assets: [] },
-      { id: 72, tag_name: `${ROLLING_TAG_PREFIX}feature-live`, name: 'Brapmony (rolling) feature/live', prerelease: true, assets: [] },
-      // A version release is never a candidate, whatever branch list it is given.
-      versionRelease(),
-    ],
-  });
-  try {
-    gh.state.branches = ['main', 'feature/live'];
-    const stale = await staleRollingReleases(gh, { defaultBranch: 'main', branches: gh.state.branches });
-    assert.deepEqual(stale.map((r) => r.tag), [`${ROLLING_TAG_PREFIX}feature-old`]);
-    // A branch that exists is not stale, even as a prerelease.
-    assert.ok(!stale.some((r) => r.tag === `${ROLLING_TAG_PREFIX}feature-live`));
-    // The default branch is never stale: it is the repository's release.
-    assert.ok(!stale.some((r) => r.tag === `${ROLLING_TAG_PREFIX}main`));
-    // And a version release is not a rolling one, so it is not in the list at all.
-    assert.ok(!stale.some((r) => r.tag === 'v1.9.6'));
-  } finally {
-    await gh.close();
-  }
-});
-
-// Deleting a tag is refused for anything that is not a rolling tag, so the sweep cannot be
-// pointed at a version release by a wrong argument.
-test('only a rolling tag is ever deleted', async () => {
-  const gh = await fakeGitHub();
-  try {
-    await assert.rejects(
-      deleteStaleRelease(gh, { id: 41, tag: 'v1.9.6' }),
-      /not a rolling tag/,
-      'a version tag must be refused',
-    );
-    assert.equal(gh.releases.length, 0, 'and nothing was deleted');
-  } finally {
-    await gh.close();
-  }
-});
-
-test('a stale release is deleted with its tag, and nothing else is', async () => {
-  const gh = await fakeGitHub({
-    releases: [
-      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
-      { id: 71, tag_name: `${ROLLING_TAG_PREFIX}gone`, name: 'Brapmony (rolling) gone', prerelease: true, assets: [] },
-      versionRelease(),
-    ],
-  });
-  try {
-    gh.state.branches = ['main'];
-    const stale = await staleRollingReleases(gh, { defaultBranch: 'main', branches: ['main'] });
-    assert.deepEqual(stale.map((r) => r.tag), [`${ROLLING_TAG_PREFIX}gone`]);
-    for (const release of stale) await deleteStaleRelease(gh, release);
-    const tags = gh.releases.map((r) => r.tag_name);
-    assert.ok(!tags.includes(`${ROLLING_TAG_PREFIX}gone`), 'the stale release is gone');
-    assert.ok(tags.includes(`${ROLLING_TAG_PREFIX}main`), 'the live one is untouched');
-    assert.ok(tags.includes('v1.9.6'), 'the version release is untouched');
-    assert.ok(!gh.refs.has(`${ROLLING_TAG_PREFIX}gone`), 'its tag is gone too');
-    assert.ok(gh.refs.has(`${ROLLING_TAG_PREFIX}main`), 'and the live tag is still there');
-    assert.ok(gh.refs.has('v1.9.6'), 'and the version tag is still there');
-  } finally {
-    await gh.close();
-  }
-});
-
-// The cleanup command deletes nothing without --apply: it lists what it would remove, so
-// a dispatch that was meant as a dry run cannot take a release down.
+// The cleanup command deletes nothing without --apply: it lists what it would remove, so a
+// dispatch that was meant as a dry run cannot take a download down.
 test('cleanup lists without --apply and deletes with it', async () => {
   const gh = await fakeGitHub({
     releases: [
-      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
-      { id: 71, tag_name: `${ROLLING_TAG_PREFIX}gone`, name: 'Brapmony (rolling) gone', prerelease: true, assets: [] },
+      // Three of this workflow's own releases, and one the version tag names.
+      { id: 80, tag_name: 'v1.9.6-aaa0001', name: '1.9.6-aaa0001', draft: false, prerelease: false, assets: [
+        { id: 8001, name: 'Brapmony-1.9.6-aaa0001-debug.apk', label: '', size: 9, state: 'uploaded', uploader: { login: BOT_LOGIN } },
+        { id: 8002, name: 'Brapmony-1.9.6-aaa0001-debug.apk.sha256', label: '', size: 9, state: 'uploaded', uploader: { login: BOT_LOGIN } },
+      ] },
+      { id: 81, tag_name: 'v1.9.6-aaa0002', name: '1.9.6-aaa0002', draft: false, prerelease: false, assets: [
+        { id: 8101, name: 'Brapmony-1.9.6-aaa0002-debug.apk', label: '', size: 9, state: 'uploaded', uploader: { login: BOT_LOGIN } },
+      ] },
+      rollingRelease('main', { id: 71, prerelease: false }),
       versionRelease(),
     ],
   });
   try {
-    gh.state.branches = ['main'];
     gh.state.artifacts = [
       { id: 1, name: 'old-artifact', size_in_bytes: 10 },
-      { id: 2, name: 'newer-artifact', size_in_bytes: 10 },
-      { id: 3, name: 'newest-artifact', size_in_bytes: 10 },
+      { id: 2, name: 'newest-artifact', size_in_bytes: 10 },
     ];
     const env = { ...process.env, GITHUB_TOKEN: 'test-token', GITHUB_REPOSITORY: OWNER_REPO, GITHUB_API_URL: gh.url };
-    const args = [join(here, 'release.mjs'), 'cleanup', '--default-branch', 'main', '--keep-artifacts', '1'];
+    const args = [join(here, 'release.mjs'), 'cleanup', '--keep-releases', '1', '--keep-artifacts', '1'];
 
     const dry = await run(process.execPath, args, { env });
     assert.match(dry.stdout, /Nothing deleted/);
-    assert.equal(gh.releases.length, 3, 'a dry run deletes nothing');
-    assert.equal(gh.state.artifacts.length, 3);
+    assert.match(dry.stdout, /v1\.9\.6-aaa0001/, 'the dry run names what it would take');
+    assert.match(dry.stdout, /Old rolling releases to remove: android-rolling-main/);
+    assert.equal(gh.releases.length, 4, 'a dry run deletes nothing');
+    assert.equal(gh.state.artifacts.length, 2);
 
     const applied = await run(process.execPath, [...args, '--apply'], { env });
-    assert.match(applied.stdout, /Deleted release android-rolling-gone/);
-    assert.match(applied.stdout, /Deleted tag android-rolling-gone/);
-    assert.deepEqual(gh.releases.map((r) => r.tag_name).sort(), ['android-rolling-main', 'v1.9.6']);
+    assert.match(applied.stdout, /Deleted 2 release asset/);
+    assert.match(applied.stdout, /Deleted the old rolling release android-rolling-main/);
+    // The release that is inside the window keeps its file; the ones beyond it keep their
+    // page and lose the APK.
+    const inside = gh.releases.find((r) => r.tag_name === 'v1.9.6-aaa0002');
+    assert.equal(inside.assets.length, 1, 'the newest release keeps its APK');
+    const beyond = gh.releases.find((r) => r.tag_name === 'v1.9.6-aaa0001');
+    assert.deepEqual(beyond.assets, [], 'an older release loses its APK');
+    assert.ok(beyond, 'and stays on the page');
+    // The rolling release and its tag are gone; the version release and its tag are not.
+    assert.ok(!gh.releases.some((r) => r.tag_name.startsWith(LEGACY_ROLLING_PREFIX)));
+    assert.ok(![...gh.refs.keys()].some((tag) => tag.startsWith(LEGACY_ROLLING_PREFIX)));
+    assert.ok(gh.releases.some((r) => r.tag_name === 'v1.9.6'));
+    assert.equal(gh.releases.find((r) => r.tag_name === 'v1.9.6').assets.length, 4,
+      'the version release is the archive, and keeps its files');
     assert.deepEqual(gh.state.artifacts.map((a) => a.name), ['newest-artifact'], 'only the newest artifact is kept');
   } finally {
     await gh.close();
@@ -1724,59 +1528,6 @@ test('artifact retention keeps the newest and deletes the oldest', async () => {
     // Nothing is deleted when there are not more than `keep` of them.
     assert.deepEqual(await oldArtifacts(gh, { keep: DEFAULT_ARTIFACT_KEEP }), []);
     await assert.rejects(oldArtifacts(gh, { keep: -1 }), /must not be negative/);
-  } finally {
-    await gh.close();
-  }
-});
-
-// A release deleted by hand leaves its tag behind. A tag is a page on the repository as
-// much as a release is -- it names a commit and reads as a build of a branch -- so the
-// sweep has to find those too, and it can only find them from the tag list: there is no
-// release to find them from. `android-rolling-task-verify-apk-ci-publish-flow-3e8cphaa`
-// is exactly this on the live repository.
-test('a rolling tag with no release is stale, and a live branch\'s tag is not', async () => {
-  const gh = await fakeGitHub({
-    releases: [
-      { id: 70, tag_name: `${ROLLING_TAG_PREFIX}main`, name: 'Brapmony (rolling) main', prerelease: false, assets: [] },
-    ],
-  });
-  try {
-    // A tag whose release was deleted, and one that never had a release.
-    gh.refs.set(`${ROLLING_TAG_PREFIX}deleted-by-hand`, 'a'.repeat(40));
-    gh.refs.set(`${ROLLING_TAG_PREFIX}main`, 'f'.repeat(40));
-    gh.refs.set('v1.9.6', 'b'.repeat(40));
-    gh.state.branches = ['main'];
-    const orphans = await orphanRollingTags(gh, { defaultBranch: 'main', branches: ['main'] });
-    assert.deepEqual(orphans, [`${ROLLING_TAG_PREFIX}deleted-by-hand`]);
-    // The default branch's tag has a release, so it is not an orphan.
-    assert.ok(!orphans.includes(`${ROLLING_TAG_PREFIX}main`));
-    // A version tag is never a rolling tag, whatever it is.
-    assert.ok(!orphans.includes('v1.9.6'));
-  } finally {
-    await gh.close();
-  }
-});
-
-test('the tag of a branch that exists is never an orphan, whatever its slug', async () => {
-  const gh = await fakeGitHub();
-  try {
-    // A slug is lossy, so the comparison is on slugs rather than parsed branch names.
-    assert.ok(tagNamesLiveBranch(`${ROLLING_TAG_PREFIX}feature-x`, ['feature/x']));
-    assert.ok(tagNamesLiveBranch(`${ROLLING_TAG_PREFIX}feature-x`, ['feature-x']));
-    assert.ok(!tagNamesLiveBranch(`${ROLLING_TAG_PREFIX}feature-y`, ['feature/x']));
-    // A version tag never names a rolling branch.
-    assert.ok(!tagNamesLiveBranch('v1.9.6', ['v1.9.6']));
-  } finally {
-    await gh.close();
-  }
-});
-
-// The orphan tags are deleted with the same refusal as a release's tag: only a rolling tag,
-// never a version tag.
-test('an orphan version tag is refused rather than deleted', async () => {
-  const gh = await fakeGitHub();
-  try {
-    await assert.rejects(deleteTag(gh, { tag: 'v1.9.6' }), /not a rolling tag/);
   } finally {
     await gh.close();
   }

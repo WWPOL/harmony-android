@@ -261,64 +261,37 @@ jobs:
           fi
           ( cd "$(dirname "$apk")" && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256" )
           cat "$apk.sha256"
-      # A tag's release is created or found by this job alone, so nothing races it. Uploads
+      # A tag's release is created or found by this job alone, so nothing races it. It is
+      # created as a draft and made visible below, once the APK and its checksum are on it:
+      # a tag whose build fails leaves no page offering a download that is not there. Uploads
       # replace only the two names this workflow owns.
+      #
+      # The title is the version and nothing else, as a commit's release is the version and
+      # its commit: the release is on the app's repository, so the app's name in front of
+      # every title says nothing the page does not already say.
+      #
+      # The body is the changelog, composed from this checkout's own history: the commits
+      # since the previous release. What the app is and how to install an APK are the same on
+      # every release and are in the README; a release says what changed.
       - name: Create or find the release
         id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           node .ci/scripts/release.mjs tag --tag "$RELEASE_TAG" \
-            --name "Brapmony ${{ steps.version.outputs.version }}" \
-            --body "$(printf '%s\n' \
-              "Brapmony ${{ steps.version.outputs.version }} for Android, a native client for" \
-              "[Harmony](https://mony.lol) instances." \
-              "" \
-              "**[Download ${{ steps.name.outputs.stem }}.apk](https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${{ steps.name.outputs.stem }}.apk)**" \
-              "" \
-              "## Install" \
-              "" \
-              "1. Open it on the phone or tablet and tap the downloaded file." \
-              "2. Allow the install when Android asks. Unless a release key is configured, the" \
-              "   APK is test-signed, so Play Protect may warn." \
-              "3. On first launch, enter your instance's address and sign in." \
-              "" \
-              "Over a cable: \`adb install -r ${{ steps.name.outputs.stem }}.apk\`. Installing" \
-              "over an older build keeps the app's data." \
-              "" \
-              "Android 8.0 (API 26) or newer. A signature mismatch means an older build signed" \
-              "with a different key: uninstall it once." \
-              "" \
-              "## This build" \
-              "" \
-              "| | |" \
-              "| --- | --- |" \
-              "| Release | ${{ steps.version.outputs.version }} |" \
-              "| Commit | [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |" \
-              "| Checksum | \`$(cut -d' ' -f1 "${{ steps.name.outputs.path }}.sha256")\` |" \
-              "" \
-              "One APK for one version, kept as it is; the branch builds are elsewhere." \
-              "[How builds are named and signed](https://github.com/${{ github.repository }}/blob/main/docs/builds.md)." \
-              "" \
-              "## Check the download" \
-              "" \
-              "With the GitHub CLI:" \
-              "" \
-              '```sh' \
-              "gh attestation verify ${{ steps.name.outputs.stem }}.apk --repo ${{ github.repository }}" \
-              '```' \
-              "" \
-              "Or \`sha256sum -c ${{ steps.name.outputs.stem }}.apk.sha256\`." \
-              "" \
-              "No end-to-end encryption, no push notifications, and several media and" \
-              "administration flows are missing: not yet a drop-in replacement for the official" \
-              "client. [The gap audit](https://github.com/${{ github.repository }}/blob/main/docs/parity-audit.md)" \
-              "lists what is not there.")"
+            --apk "${{ steps.name.outputs.path }}" \
+            --commit "${{ github.sha }}"
       - name: Attach the APK and its checksum
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.release.outputs.id }}
         run: node .ci/scripts/release.mjs upload --release-id "$RELEASE_ID" "${{ steps.name.outputs.path }}" "${{ steps.name.outputs.path }}.sha256"
+      # Only now that both files are on it is the release made visible.
+      - name: Publish the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: node .ci/scripts/release.mjs publish-release --release-id "$RELEASE_ID"
       # Provenance, for the same bytes the release carries: the subject is the APK file, so
       # the check works on what a person downloads. GitHub signs a statement that this
       # digest was produced by this workflow, in this repository, at this tag's commit, and
