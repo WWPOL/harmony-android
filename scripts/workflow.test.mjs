@@ -411,6 +411,12 @@ test('the published download link names the release and is fetched back', () => 
   assert.match(check.run, /aapt2" dump badging|aapt2 dump badging/, 'and its package and versionCode read');
   assert.match(check.run, /apksigner" verify|apksigner verify/, 'and its certificate');
   assert.match(check.run, /sha256sum/, 'and its checksum');
+  // The update manifest that was published beside it is fetched back and checked against the
+  // APK that was just fetched back: a manifest naming another build is the one failure a
+  // person would only meet as a wrong download, so it is checked where the APK is.
+  assert.match(check.run, /releases\/download\/\$TAG\/update\.json/, 'the manifest is fetched by the release tag');
+  assert.match(check.run, /versionCode/, 'and its versionCode compared with the build\'s');
+  assert.match(check.run, /EXPECTED_SHA256/, 'and its checksum with the file that was downloaded');
   // The summary links to the same file, and to the release it is on.
   const report = publish.find((s) => s.name === 'Report the download links');
   assert.match(report.run, /releases\/download\/\$TAG\/\$NAME/);
@@ -419,6 +425,36 @@ test('the published download link names the release and is fetched back', () => 
   // The tag comes from the publish, which is where it is computed.
   assert.equal(String(check.env.TAG), '${{ steps.publish.outputs.tag }}');
   assert.match(String(report.env.TAG), /steps\.publish\.outputs\.tag/);
+});
+
+// The app checks for updates by reading one small static file on a release, not by asking
+// GitHub's API: every install in the world asking the API the same question is what this
+// avoids. Both workflows that publish a build therefore have to publish that file with it.
+test('every publish writes the update manifest the app reads, and nothing asks the API instead', () => {
+  const android = parse(ANDROID);
+  const publish = android.jobs.publish.steps.find((s) => s.run && s.run.includes('release.mjs publish'));
+  // The numbers the manifest carries are the build's own outputs, read back out of the APK,
+  // rather than numbers computed a second time beside it.
+  assert.match(publish.run, /--package "\$PACKAGE"/);
+  assert.match(publish.run, /--version-name "\$VERSION_NAME"/);
+  assert.match(publish.run, /--version-code "\$VERSION_CODE"/);
+  assert.equal(String(publish.env.VERSION_NAME), '${{ needs.build.outputs.version-name }}');
+  assert.equal(String(publish.env.VERSION_CODE), '${{ needs.build.outputs.version-code }}');
+  // The tag release writes one too, from the APK it has already checked, and uploads it.
+  const release = parse(RELEASE);
+  const manifest = release.jobs.release.steps.find((s) => s.id === 'manifest');
+  assert.ok(manifest, 'the tag release writes the manifest');
+  assert.match(manifest.run, /release\.mjs manifest/);
+  assert.match(manifest.run, /--tag "\$RELEASE_TAG"/);
+  assert.match(manifest.run, /--version-code "\$\{\{ steps\.version\.outputs\.version-code \}\}"/);
+  const upload = release.jobs.release.steps.find((s) => s.run && s.run.includes('release.mjs upload'));
+  assert.match(upload.run, /steps\.manifest\.outputs\.path/, 'and uploads it with the APK');
+  // The app's own side: it fetches the release asset, and nothing in it calls the API.
+  const app = read('app/src/main/java/lol/mony/harmony/data/update/UpdateChecker.kt');
+  assert.match(app, /If-None-Match/, 'an unchanged manifest is a conditional request');
+  assert.ok(!/api\.github\.com/.test(app), 'the check never calls GitHub\'s API');
+  const build = read('app/build.gradle.kts');
+  assert.match(build, /releases\/latest\/download\/update\.json/, 'it reads the release asset');
 });
 
 test('the upgrade test compares package, fingerprint and versionCode', () => {

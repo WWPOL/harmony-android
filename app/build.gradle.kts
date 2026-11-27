@@ -105,6 +105,29 @@ android {
         fun literal(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
         buildConfigField("String", "DEFAULT_INSTANCE_URL", literal(providers.gradleProperty("harmonyInstanceUrl").getOrElse("")))
         buildConfigField("String", "DEFAULT_INSTANCE_ANON_KEY", literal(providers.gradleProperty("harmonyAnonKey").getOrElse("")))
+        // Where the automatic update check looks. It is the *release asset*, not the GitHub API:
+        // a static file served through the CDN, a few hundred bytes, answerable with a 304, and
+        // the same document for every install (data/update/UpdateManifest.kt says why that
+        // matters). `harmonyUpdateRepo` points a fork's builds at its own releases, and an empty
+        // value turns the check off for a build that has no releases to check.
+        val updateRepo = providers.gradleProperty("harmonyUpdateRepo").getOrElse("WWPOL/harmony-android")
+        buildConfigField("String", "UPDATE_REPOSITORY", literal(updateRepo))
+        buildConfigField(
+            "String", "UPDATE_MANIFEST_URL",
+            literal(
+                if (updateRepo.isBlank()) ""
+                else "https://github.com/$updateRepo/releases/latest/download/update.json"
+            ),
+        )
+        // The base an offered APK's own download URL is built from. The tag is appended to it,
+        // so the link keeps pointing at the build it named after the next release is published.
+        buildConfigField(
+            "String", "RELEASE_DOWNLOAD_BASE",
+            literal(
+                if (updateRepo.isBlank()) ""
+                else "https://github.com/$updateRepo/releases/download"
+            ),
+        )
     }
 
     // A test key, never a release key: the stable one when the build has it, otherwise

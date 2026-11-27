@@ -103,8 +103,12 @@ export const LEGACY_OWNER = 'brapmony-android';
 // these are told apart on a release whose assets predate the ownership label, and it is what
 // keeps a file another workflow uploaded from being taken for this one's.
 export function ownName(name) {
-  return /^Brapmony[_-]/.test(name);
+  return /^Brapmony[_-]/.test(name) || name === UPDATE_MANIFEST;
 }
+
+// The file the app's update check reads, by name. It is not an APK, so it is not matched by
+// the prefix above; it is named here, once, so ownership, pruning and replacement agree.
+export const UPDATE_MANIFEST = 'update.json';
 export function isOwned(asset) {
   if (typeof asset?.label === 'string' && asset.label.startsWith(`${LEGACY_OWNER} `)) return true;
   return asset?.uploader?.login === BOT_LOGIN && ownName(asset?.name);
@@ -456,6 +460,70 @@ export function notesFor({ commit = 'HEAD', sha256, repository, limit, cwd } = {
   return releaseBody({ commit, sha256, previous, entries, more, repository });
 }
 
+// The file the app's own update check reads: `update.json`, published beside the APK on
+// every release.
+//
+// The app does not ask GitHub's REST API what the newest release is. That answer is a
+// 15-20 KB document, it is rate limited per client address (sixty requests an hour
+// unauthenticated, shared by everybody behind one carrier's NAT), and every install in the
+// world would be asking it the same question. This is a few hundred bytes of static file
+// served from the release's own assets through a CDN that answers `If-None-Match` with a
+// 304, and it is identical for every install, so GitHub's cache absorbs the traffic instead
+// of its API counting it.
+//
+// What it says is what an installed app needs to decide whether there is a newer build and
+// where its APK is: the package, the versionCode Android compares, the release tag and the
+// asset's own name (both of which are path segments of the download URL, so the app checks
+// them against the shapes this script can produce), the SHA-256 of the file, its size, and
+// the release page for anyone who wants to read what changed. `schema` is the format's own
+// version, so a later change to it can be ignored by a build that does not know it rather
+// than half-understood.
+//
+// The version name is the one the APK itself reports (`version-name` below), not a number
+// computed a second time here: the app shows it, and a name that disagreed with the file
+// would be a second, unchecked claim about what the file is.
+export function updateManifest({ pkg, versionName, versionCode, tag, apk, sha256, size, commit, repository }) {
+  const line = String(versionName || '').trim();
+  if (!line) throw new PublishError('the update manifest needs the version the APK reports');
+  if (!Number.isInteger(versionCode) || versionCode <= 0) {
+    throw new PublishError(`the update manifest needs a positive versionCode, not ${versionCode}`);
+  }
+  if (!COMMIT_TAG_RE.test(String(tag || '')) && !VERSION_TAG_RE.test(String(tag || ''))) {
+    throw new PublishError(`the update manifest needs a release tag, not ${tag}`);
+  }
+  if (!ownName(String(apk || ''))) {
+    throw new PublishError(`the update manifest needs this workflow's APK name, not ${apk}`);
+  }
+  if (!/^[0-9a-f]{64}$/.test(String(sha256 || ''))) {
+    throw new PublishError('the update manifest needs the APK\'s SHA-256');
+  }
+  if (!(Number.isFinite(size) && size > 0)) {
+    throw new PublishError(`the update manifest needs the APK's size, not ${size}`);
+  }
+  const repo = String(repository || '').trim() || null;
+  return `${JSON.stringify({
+    schema: 1,
+    package: pkg,
+    versionCode,
+    versionName: line,
+    tag,
+    apk,
+    sha256: String(sha256).toLowerCase(),
+    size,
+    notes: repo ? `https://github.com/${repo}/releases/tag/${tag}` : '',
+    commit: String(commit || '').toLowerCase(),
+  }, null, 2)}\n`;
+}
+
+// The manifest, written to a file an upload can send. It is written to a temporary directory
+// rather than the checkout: it is build output, not something the tree carries.
+export function updateManifestFile(manifest) {
+  const dir = mkdtempSync(join(tmpdir(), 'brapmony-'));
+  const file = join(dir, 'update.json');
+  writeFileSync(file, manifest);
+  return file;
+}
+
 // The same, for a text asset written rather than copied: the `.sha256` that travels with
 // the APK, in the form `sha256sum -c` reads.
 export function checksumFile(sha256, name) {
@@ -537,6 +605,30 @@ export async function publishAsset(gh, { releaseId, file, name, attempt = 1 }) {
   }
   const asset = await uploadFile(gh, { releaseId, file, name });
   return { asset, uploaded: true, sha256, name };
+}
+
+// Publishes the update manifest on a release, replacing the one that is there.
+//
+// Unlike an APK, which never has its name re-pointed at different bytes, this file *must* be
+// replaced: it describes the APK beside it, and a rebuild of the same commit uploads its
+// bytes under a new name (`....r2.apk`), so the manifest that names it has to change too. The
+// old one is deleted first, because GitHub's upload endpoint will not overwrite a name; that
+// is safe only because the release is still a draft at this point, so a failure here leaves
+// nothing on the Releases page that a phone could read. A re-run completes the release.
+export async function publishUpdateManifest(gh, { releaseId, file }) {
+  const sha256 = sha256File(file);
+  const size = statSync(file).size;
+  const existing = (await listAssets(gh, releaseId)).filter((a) => a.name === UPDATE_MANIFEST);
+  const same = existing.find((a) => storedBytes(a, sha256, size));
+  if (same) return { asset: same, uploaded: false, sha256, name: UPDATE_MANIFEST };
+  for (const asset of existing) {
+    if (!isOwned(asset)) {
+      throw new PublishError(`asset ${UPDATE_MANIFEST} was not uploaded by this workflow; refusing to replace it`);
+    }
+    await deleteIfPresent(gh, `/releases/assets/${asset.id}`);
+  }
+  const asset = await uploadFile(gh, { releaseId, file, name: UPDATE_MANIFEST });
+  return { asset, uploaded: true, sha256, name: UPDATE_MANIFEST };
 }
 
 // Finds the release for a commit's tag, or creates it as a draft. A release at that tag is
@@ -765,6 +857,9 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       apk: { type: 'string' },
       version: { type: 'string' },
       commit: { type: 'string' },
+      package: { type: 'string' },
+      'version-name': { type: 'string' },
+      'version-code': { type: 'string' },
       body: { type: 'string' },
       keep: { type: 'string' },
       attempt: { type: 'string' },
@@ -779,7 +874,11 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
   });
 
   if (command === 'publish') {
-    required(values, ['apk', 'version', 'commit']);
+    // The package and the two numbers are what the app's update check compares, and they are
+    // passed rather than derived here: the workflow reads them back out of the finished APK
+    // and has already refused a build that disagrees with them, so this is the same claim
+    // the file makes about itself rather than a second one computed beside it.
+    required(values, ['apk', 'version', 'commit', 'package', 'version-name', 'version-code']);
     const version = values.version;
     const commit = values.commit;
     const tag = commitTag(version, commit);
@@ -807,6 +906,24 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
     const checksum = checksumFile(build.sha256, build.name);
     const sum = await publishAsset(gh, { releaseId: id, file: checksum, name: basename(checksum) });
     log(`${sum.uploaded ? 'Uploaded' : 'Kept'} ${sum.name}`);
+    // The app's own update check reads this, from `/releases/latest/download/update.json`.
+    // It names the APK that is really on the release, which is the file's own name unless a
+    // rebuild gave it another one, and the version name the APK reports -- so a phone is
+    // offered the build that is here rather than one Gradle was asked to produce.
+    const manifest = updateManifest({
+      pkg: values.package,
+      versionName: values['version-name'],
+      versionCode: Number(values['version-code']),
+      tag,
+      apk: build.name,
+      sha256: build.sha256,
+      size: statSync(values.apk).size,
+      commit,
+      repository: process.env.GITHUB_REPOSITORY,
+    });
+    const manifestPath = updateManifestFile(manifest);
+    const published = await publishUpdateManifest(gh, { releaseId: id, file: manifestPath });
+    log(`${published.uploaded ? 'Uploaded' : 'Kept'} update.json (versionCode ${JSON.parse(manifest).versionCode})`);
     // Only now that the files are on it is the release made visible: a publish that fails
     // before this point leaves a draft, not a page whose download does not exist.
     const { updated } = await publishRelease(gh, { id, name, body });
@@ -823,6 +940,31 @@ export async function main(argv, { gh: ghOverride, log = console.log } = {}) {
       );
     }
     return { id, tag, uploaded: build.uploaded ? build.name : null, sha256: build.sha256, pruned, retired };
+  }
+
+  // Writes the update manifest for an APK this workflow built and has already checked, and
+  // prints its path. It is a separate command because a tag's release uploads its files by
+  // name rather than through `publish`: the format lives in one place either way.
+  if (command === 'manifest') {
+    required(values, ['apk', 'tag', 'package', 'version-name', 'version-code']);
+    if (!existsSync(values.apk)) throw new PublishError(`no such file: ${values.apk}`);
+    const manifest = updateManifest({
+      pkg: values.package,
+      versionName: values['version-name'],
+      versionCode: Number(values['version-code']),
+      tag: values.tag,
+      apk: basename(values.apk),
+      sha256: sha256File(values.apk),
+      size: statSync(values.apk).size,
+      commit: values.commit ?? '',
+      repository: process.env.GITHUB_REPOSITORY,
+    });
+    // Written to a temporary directory and printed: the workflow uploads it by the name the
+    // path ends in, and nothing in the checkout is build output.
+    const file = updateManifestFile(manifest);
+    log(file);
+    if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `path=${file}\n`);
+    return { path: file, manifest };
   }
 
   if (command === 'tag') {

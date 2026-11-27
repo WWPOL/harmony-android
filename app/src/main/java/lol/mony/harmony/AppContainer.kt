@@ -14,6 +14,9 @@ import lol.mony.harmony.data.repo.ServerRepository
 import lol.mony.harmony.data.repo.SettingsRepository
 import lol.mony.harmony.data.session.AuthRepository
 import lol.mony.harmony.data.session.SessionStore
+import lol.mony.harmony.data.update.InstalledBuild
+import lol.mony.harmony.data.update.PreferencesUpdateStore
+import lol.mony.harmony.data.update.UpdateChecker
 
 /**
  * The app's object graph, built once.
@@ -44,4 +47,23 @@ class AppContainer(context: Context, store: SessionStore = SessionStore(context.
     val network: NetworkMonitor = NetworkMonitor(context.applicationContext)
 
     val auth: AuthRepository = AuthRepository(sessionStore, authApi, profiles)
+
+    /**
+     * The automatic update check.
+     *
+     * It is built here, once per process, because it owns the device's own memory of when it
+     * last asked: two instances would each think a check was due and ask twice. It talks to
+     * GitHub and to nothing on the instance, so it exists before anybody signs in.
+     */
+    val updates: UpdateChecker = UpdateChecker(
+        installed = InstalledBuild(
+            packageName = BuildConfig.APPLICATION_ID,
+            versionCode = BuildConfig.VERSION_CODE,
+            versionName = BuildConfig.VERSION_NAME,
+            downloadBase = BuildConfig.RELEASE_DOWNLOAD_BASE,
+        ),
+        store = PreferencesUpdateStore(context.applicationContext),
+        manifestUrl = BuildConfig.UPDATE_MANIFEST_URL,
+        client = Http.client,
+    )
 }

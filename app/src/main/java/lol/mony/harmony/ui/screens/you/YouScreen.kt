@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PersonOutline
+import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -224,6 +225,7 @@ fun YouScreen(
                         YouSection.Privacy -> AccountPrivacyPanel(state, repository, loaded) { profile = it }
                         YouSection.Notifications -> AccountNotificationsPanel(state, repository, loaded.id)
                         YouSection.Security -> AccountSecurityPanel(state)
+                        YouSection.Updates -> AccountUpdatesPanel(state.container.updates)
                     }
                 }
             }
@@ -273,6 +275,7 @@ private enum class YouSection(
     Privacy("Privacy", "Who can follow you and message you", Icons.Outlined.Lock, "you-privacy"),
     Notifications("Notifications", "What this device tells you about", Icons.Outlined.Notifications, "you-notifications"),
     Security("Security", "Password, sessions and devices", Icons.Outlined.Badge, "you-security"),
+    Updates("Updates", "Check for a newer build, and what it found", Icons.Outlined.SystemUpdate, "you-updates"),
 }
 
 /**

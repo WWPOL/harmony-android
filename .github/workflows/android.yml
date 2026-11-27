@@ -370,6 +370,10 @@ jobs:
           VERSION_NAME: ${{ needs.build.outputs.version-name }}
           VERSION_CODE: ${{ needs.build.outputs.version-code }}
           SHA256: ${{ needs.build.outputs.sha256 }}
+          # The package and the two numbers the APK reports, which go into the update
+          # manifest beside it. They are read from the build's own outputs rather than
+          # computed again here, so the manifest cannot disagree with the file.
+          PACKAGE: io.github.wwpol.brapmony
         run: |
           set -- android-apk/*.apk
           if [ $# -ne 1 ] || [ ! -f "$1" ]; then
@@ -390,7 +394,8 @@ jobs:
           # next. The release is created as a draft and made visible once both files are on
           # it, so a failure here leaves nothing on the Releases page to download.
           node scripts/release.mjs publish --apk "$apk" \
-            --version "$VERSION" --commit "$COMMIT" --attempt "${GITHUB_RUN_ATTEMPT:-1}"
+            --version "$VERSION" --commit "$COMMIT" --attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+            --package "$PACKAGE" --version-name "$VERSION_NAME" --version-code "$VERSION_CODE"
       # Provenance. The attestation is what binds these bytes to this commit: GitHub signs
       # a statement that this digest was produced by this workflow, in this repository, at
       # this commit, and keeps it where a downloader can check it. The subject is the APK
@@ -484,6 +489,42 @@ jobs:
           fingerprint=$(sed -n 's/^.*certificate SHA-256 digest: //p' published-signature.txt | head -1)
           [ -n "$fingerprint" ] || { echo '::error::the published APK is not signed'; exit 1; }
           echo "published APK: versionCode $EXPECTED_VERSION_CODE, sha256 $actual, certificate SHA-256 $fingerprint"
+          # The manifest the app's update check reads, fetched back the same way. A published
+          # `update.json` that names another build, or that a phone would refuse, is the one
+          # failure this feature has that nobody would see until somebody was offered the wrong
+          # download -- so it is checked here, against the APK that was just fetched back.
+          # Addressed by the tag, not by `latest`: a re-run of an older commit publishes an
+          # older build, and `latest` would then be somebody else's manifest.
+          manifest_url="https://github.com/${{ github.repository }}/releases/download/$TAG/update.json"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL -o published-update.json "$manifest_url"; then break; fi
+            echo "attempt $attempt: the update manifest is not downloadable yet"; sleep 10
+          done
+          [ -s published-update.json ] || { echo "::error::$manifest_url did not download"; exit 1; }
+          cat published-update.json
+          node -e '
+            const m = JSON.parse(require("node:fs").readFileSync("published-update.json", "utf8"));
+            const want = {
+              schema: 1,
+              package: "io.github.wwpol.brapmony",
+              versionCode: Number(process.env.EXPECTED_VERSION_CODE),
+              apk: process.env.NAME,
+              sha256: process.env.EXPECTED_SHA256,
+              tag: process.env.TAG,
+            };
+            const bad = [];
+            for (const [key, value] of Object.entries(want)) {
+              if (m[key] !== value) bad.push(`${key}: manifest says ${JSON.stringify(m[key])}, the build is ${JSON.stringify(value)}`);
+            }
+            if (!String(m.versionName || "").startsWith(process.env.EXPECTED_VERSION_NAME)) {
+              bad.push(`versionName: manifest says ${JSON.stringify(m.versionName)}`);
+            }
+            if (!(m.size > 0)) bad.push("size: the manifest gives no size");
+            if (!/^[0-9a-f]{64}$/.test(String(m.sha256 || ""))) bad.push("sha256: not a digest");
+            if (bad.length) { console.error(bad.join("\n")); process.exit(1); }
+            console.log(`update.json names ${m.apk} (versionCode ${m.versionCode}), the build that was just published`);
+          '
+          echo "- Published \`update.json\` and checked it: it names versionCode $EXPECTED_VERSION_CODE, sha256 $actual, and the APK that was fetched back." >> "$GITHUB_STEP_SUMMARY"
           echo "- Fetched the download back and checked it: package io.github.wwpol.brapmony, versionCode $EXPECTED_VERSION_CODE, sha256 $actual, certificate SHA-256 $fingerprint." >> "$GITHUB_STEP_SUMMARY"
       - name: Report the download links
         env:

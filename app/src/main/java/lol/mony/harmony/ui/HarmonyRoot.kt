@@ -18,6 +18,7 @@ import lol.mony.harmony.data.api.Endpoint
 import lol.mony.harmony.data.session.AuthState
 import lol.mony.harmony.ui.components.*
 import lol.mony.harmony.ui.screens.instance.InstancePickerScreen
+import lol.mony.harmony.ui.screens.you.UpdateAvailableDialog
 import lol.mony.harmony.ui.screens.signin.AuthFormScreen
 import lol.mony.harmony.ui.theme.*
 
@@ -81,6 +82,12 @@ fun HarmonyRoot(state: AppState) {
         ProvideAppState(state) {
             Surface(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true },
                 color = MaterialTheme.colorScheme.background) {
+                // A newer build, offered once per run of the app. It is over every screen
+                // rather than inside one, because it is about the app and not about what is on
+                // it: a person who never opens the account screen should still learn that their
+                // build is a release behind. The checker's own state decides whether it shows,
+                // and "Not now" is remembered for that build.
+                UpdateNotice(state.container.updates)
                 when {
                     startupError != null -> ErrorState(startupError!!) { startupError = null; retry++ }
                     showPicker || auth == AuthState.NeedsInstance -> InstancePickerScreen(
@@ -127,6 +134,40 @@ fun HarmonyRoot(state: AppState) {
             }
         }
     }
+}
+
+/**
+ * The update notice: the dialog, shown once per run for the newest build not already dismissed.
+ *
+ * [noticed] is what this run has already put in front of the person -- the version code, or a
+ * sentinel before the first offer -- and it is remembered for the composition: a rotation is not
+ * a second offer, and neither is coming back from another screen. It is a value rather than a
+ * flag because the check can finish after the app is open, and a *newer* release found later in
+ * the same run is a new question worth asking once. "Not now" is remembered for the build
+ * itself, in the checker's own store, so it is not asked about again on the next launch either.
+ */
+@Composable
+private fun UpdateNotice(checker: lol.mony.harmony.data.update.UpdateChecker) {
+    val update by checker.update.collectAsState()
+    val uriHandler = LocalUriHandler.current
+    // 0 is "nothing offered yet"; a version code is what has been shown.
+    var noticed by remember { mutableIntStateOf(0) }
+    val offered = update ?: return
+    // `noticed == 0` is the first offer of the run; after that only a newer build is shown.
+    val unseen = noticed == 0 || offered.versionCode > noticed
+    if (!unseen || !checker.shouldNotify(offered)) return
+    // Recorded here rather than in a LaunchedEffect so the same build cannot be drawn twice by
+    // two recompositions: this is a decision about what is on screen, made while composing it.
+    noticed = offered.versionCode
+    UpdateAvailableDialog(
+        update = offered,
+        onDownload = { uriHandler.openUri(offered.downloadUrl) },
+        onNotes = offered.notesUrl?.let { url -> { uriHandler.openUri(url) } },
+        onDismiss = {
+            checker.dismiss(offered.versionCode)
+            noticed = offered.versionCode
+        },
+    )
 }
 
 @Composable

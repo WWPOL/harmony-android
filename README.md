@@ -37,6 +37,12 @@ adb install -r Brapmony-0.1.0-606ab10-debug.apk
 Android 8.0 (API 26) or newer. A signature mismatch means an older build signed with a
 different key: uninstall it once.
 
+The app also checks for a newer build by itself, once a day at most and only while it is open.
+When one is published it offers it with a **Download** button that goes straight to the APK, so
+a tap downloads it and the next tap installs it over the running build. The switch is in
+**You → Updates**; [docs/builds.md](docs/builds.md#how-an-installed-app-learns-there-is-a-newer-build)
+says what it asks GitHub and why it asks it that way.
+
 Names, keys and checksums: [docs/builds.md](docs/builds.md).
 
 ## What it does

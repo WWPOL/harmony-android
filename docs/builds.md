@@ -89,7 +89,7 @@ publishes no release at all — its APK is an Actions artifact and a line in the
 
 | Where | What | Lifetime |
 | --- | --- | --- |
-| Release `v0.1.0-<sha7>`, e.g. `v0.1.0-606ab10` | That commit's APK (`Brapmony-0.1.0-606ab10-debug.apk`) and its `.sha256` — and nothing else | The release stays; its APK is deleted once 30 newer releases exist |
+| Release `v0.1.0-<sha7>`, e.g. `v0.1.0-606ab10` | That commit's APK (`Brapmony-0.1.0-606ab10-debug.apk`), its `.sha256`, and the `update.json` an installed app reads — and nothing else | The release stays; its APK is deleted once 30 newer releases exist |
 | Actions artifact, named after the APK | The debug APK, its `.sha256` and a `.txt` naming the commit, version, versionCode and signing | 30 days, never overwritten |
 | Attestation, for the APK | A signed build-provenance statement naming this repository, this workflow and this commit | As long as the repository keeps it |
 | The run's summary | Links to the download, the release, the artifact and the attestation | With the run |
@@ -321,9 +321,11 @@ a number the tree does not carry.
 | `ANDROID_KEYSTORE_BASE64` and its three companions | `Brapmony-X.Y.Z.apk` |
 | Not configured | `Brapmony-X.Y.Z-debug.apk` |
 
-Both are accompanied by a `.sha256`. The job creates the tag's release if it does not exist
-and finds it if it does, so re-running a tag attaches to the same release instead of creating
-a second one, and it replaces only the two names it owns. It never touches another release.
+Both are accompanied by a `.sha256` and by `update.json`, the file an installed app's update
+check reads (see [How an installed app learns there is a newer build](#how-an-installed-app-learns-there-is-a-newer-build)).
+The job creates the tag's release if it does not exist and finds it if it does, so re-running a
+tag attaches to the same release instead of creating a second one, and it replaces only the
+names it owns. It never touches another release.
 The release's body is the same changelog a commit's release carries — the commits since the
 previous release, up to the tagged commit — and it is created as a draft, filled, and made
 visible, so a tag whose build fails offers nobody a download that is not there. The APK is
@@ -515,6 +517,86 @@ The debug variant appends `-debug` to the version name, so the About row and the
 name say which build is installed. The package is the same in every build type: a debug build
 and a release build of one commit are the same app to Android, and only the certificate decides
 whether one installs over the other.
+
+## How an installed app learns there is a newer build
+
+The app checks for updates by itself, the way FairEmail does: when a newer build is published
+it offers it, and its **Download** button opens the APK file itself, so a tap downloads it and
+the next tap installs it over the running build. No release page to navigate, and no
+`REQUEST_INSTALL_PACKAGES` or download service of the app's own — Android's browser does the
+download and its package installer does the install.
+
+What it reads is a file every release publishes beside its APK:
+
+```
+https://github.com/WWPOL/harmony-android/releases/latest/download/update.json
+```
+
+```json
+{
+  "schema": 1,
+  "package": "io.github.wwpol.brapmony",
+  "versionCode": 2000200,
+  "versionName": "0.1.0-def5678",
+  "tag": "v0.1.0-def5678",
+  "apk": "Brapmony-0.1.0-def5678-debug.apk",
+  "sha256": "…",
+  "size": 72920972,
+  "notes": "https://github.com/WWPOL/harmony-android/releases/tag/v0.1.0-def5678",
+  "commit": "def5678"
+}
+```
+
+`scripts/release.mjs` writes it from the APK that was just checked, and it is uploaded with
+that APK by both workflows, so it cannot describe a build the release does not carry: the
+`versionCode`, `versionName` and `sha256` are the finished file's own, and the `apk` is the
+name the release really holds (a rebuild's `.r2` name included). The publish job fetches it back
+and compares it with the APK it downloaded, so a manifest naming another build fails the run
+rather than being published.
+
+The app acts on it only when it names **this** package and a `versionCode` strictly higher than
+the installed one, and only when its tag, file name and checksum are shaped like the ones this
+tooling produces — a manifest is data from the network, and the link it carries is one a person
+is asked to tap.
+
+### Why a file on the release, and not the GitHub API
+
+`api.github.com/repos/…/releases/latest` is the obvious thing to ask, and it is the wrong one
+for an app installed on a lot of devices:
+
+- it answers with a 15–20 KB document, of which the app uses four fields;
+- it is **rate limited per client address** — 60 requests an hour unauthenticated, shared by
+  everyone behind one carrier's NAT — so a popular release would start failing for people who
+  did nothing wrong;
+- every install asks it the same question, and none of the answers are cacheable across them.
+
+The asset above is a few hundred bytes of static file behind GitHub's CDN. It is identical for
+every install, so GitHub's own caches absorb the traffic; it answers `If-None-Match` with a
+`304` and no body, so an unchanged release costs one conditional request and nothing else; and
+no request carries a token, an account or an instance.
+
+### What the check costs, by design
+
+The rules live in `data/update/UpdatePolicy.kt`, where they are a pure function of the clock and
+the device's stored state, and each one is there for the same reason — this runs on many
+devices against one repository:
+
+| Rule | Why |
+| --- | --- |
+| At most **one check a day**, spread by up to six hours per install | A release is published a handful of times a month; a day is already generous, and the spread is what stops every device that installed in the same week from asking at the same minute for ever |
+| The **first check waits a minute**, spread over half an hour | A launch is already restoring a session and opening a socket; the check must not compete with it, and a release week must not be a stampede |
+| Only **while the app is open** (launch and resume) | A timer in the background spends battery to learn something the person will see next time they open the app anyway |
+| A **conditional request**, with the validator from last time | An unchanged manifest is a `304` with no body |
+| A failure **backs off**: a day, then two, up to a week | An offline device, a captive portal or a repository that is briefly down must ask *less* often, never more |
+| A **404 is an answer**, not a failure | A release from before this file existed does not start the backoff |
+| The switch is in **You → Updates**, and it is on by default | A person can turn it off, and the section says what it costs when they look at it |
+
+A check that is not due makes no request at all, so being called on every resume costs nothing.
+A found update stays on offer when a later check fails: a network error is not the update going
+away. "Not now" is remembered for that build, so the same notice does not come back tomorrow.
+
+`harmonyUpdateRepo` points a fork's builds at its own releases (`-PharmonyUpdateRepo=owner/repo`);
+an empty value builds an app that never checks.
 
 ## Cutting a release
 

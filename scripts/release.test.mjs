@@ -42,6 +42,7 @@ import {
   publishRelease,
   releaseBody,
   releaseTitle,
+  updateManifest,
   retireRollingScheme,
   retryAfterMs,
   retrySettings,
@@ -50,6 +51,11 @@ import {
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const OWNER_REPO = 'acme/harmony-android';
+// What the APK a test publishes reports: the package, and the version name and code the
+// workflow reads out of the finished file. `workspace()` names its file for the same build.
+const PACKAGE = 'io.github.wwpol.brapmony';
+const VERSION_NAME = '1.9.6-abc1234';
+const VERSION_CODE = 2000099;
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 
 // Release REST subset: list/create/get releases, list assets, upload with a name, rename
@@ -428,6 +434,11 @@ async function publish(args, { gh: existing, releases, failUploads, corruptUploa
   // The notes are composed from git; a test names them, so what a release says does not
   // depend on the checkout the tests run in.
   if (!full.includes('--body')) full.push('--body', 'the changes of this build');
+  // What the APK reports, which the update manifest beside it names. The workflow reads these
+  // back out of the finished file; here they are the values `workspace()`'s name implies.
+  if (!full.includes('--package')) full.push('--package', PACKAGE);
+  if (!full.includes('--version-name')) full.push('--version-name', VERSION_NAME);
+  if (!full.includes('--version-code')) full.push('--version-code', String(VERSION_CODE));
   const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'publish', ...full], {
     env: {
       ...process.env,
@@ -572,7 +583,7 @@ test('a publish creates one release for its commit, holding only that build', as
     // One APK and the checksum beside it. Nothing else: no second copy of the same bytes
     // under a stable name, and no build of another commit.
     const names = release.assets.map((a) => a.name).sort();
-    assert.deepEqual(names, ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256']);
+    assert.deepEqual(names, ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256', 'update.json']);
     // No asset carries a label: GitHub shows a label in place of the file name, so a
     // labelled asset is one a person cannot find by its name on the release page.
     for (const a of release.assets) {
@@ -607,9 +618,9 @@ test('each commit gets its own release, and one commit keeps one', async () => {
     const older = again.gh.releases.find((r) => r.tag_name === 'v1.9.6-abc1234');
     const newer = again.gh.releases.find((r) => r.tag_name === 'v1.9.6-def5678');
     assert.deepEqual(older.assets.map((a) => a.name).sort(),
-      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256']);
+      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256', 'update.json']);
     assert.deepEqual(newer.assets.map((a) => a.name).sort(),
-      ['Brapmony-1.9.6-def5678-debug.apk', 'Brapmony-1.9.6-def5678-debug.apk.sha256']);
+      ['Brapmony-1.9.6-def5678-debug.apk', 'Brapmony-1.9.6-def5678-debug.apk.sha256', 'update.json']);
   } finally {
     await first.cleanup();
     await second.cleanup();
@@ -660,6 +671,108 @@ test('a rebuild of the same commit gets its own name, leaving the earlier bytes 
     await first.cleanup();
     await rebuilt.cleanup();
   }
+});
+
+// The update manifest is what the app's own check reads, so it has to describe the file that
+// is really on the release -- and a rebuild of one commit, whose APK got a distinct name, is
+// exactly where a manifest could go stale and offer a phone a download that is not there.
+test('a rebuild re-points the update manifest at the build that is on the release', async () => {
+  const first = workspace('abc1234', Buffer.from('first build of abc1234'));
+  const rebuilt = workspace('abc1234', Buffer.from('second build of abc1234'));
+  try {
+    const firstRun = await publish(['--apk', first.apk, '--commit', 'abc1234']);
+    const read = (gh) => {
+      const asset = gh.releases[0].assets.find((a) => a.name === 'update.json');
+      return JSON.parse(Buffer.from(asset.content, 'base64').toString('utf8'));
+    };
+    const before = read(firstRun.gh);
+    assert.equal(before.apk, 'Brapmony-1.9.6-abc1234-debug.apk');
+    assert.equal(before.sha256, sha(readFileSync(first.apk)));
+    assert.equal(before.size, readFileSync(first.apk).length);
+    const again = await publish(['--apk', rebuilt.apk, '--commit', 'abc1234', '--attempt', '2'], { gh: firstRun.gh });
+    const after = read(again.gh);
+    assert.equal(after.apk, 'Brapmony-1.9.6-abc1234-debug.r2.apk', 'the manifest names the rebuilt file');
+    assert.equal(after.sha256, sha(readFileSync(rebuilt.apk)), 'and its checksum');
+    assert.equal(after.size, readFileSync(rebuilt.apk).length, 'and its size');
+    // One manifest, not two: a release with two of them would have no answer to "which build".
+    assert.equal(again.gh.releases[0].assets.filter((a) => a.name === 'update.json').length, 1);
+  } finally {
+    await first.cleanup();
+    await rebuilt.cleanup();
+  }
+});
+
+// A manifest that is somebody else's file is not replaced, for the same reason an APK is not:
+// a name on a published release belongs to whoever put it there.
+test('an update manifest this workflow did not upload is never replaced', async () => {
+  const ws = workspace();
+  try {
+    const gh = await fakeGitHub();
+    const { id } = await seedRelease(gh);
+    gh.state.uploader = { login: 'a-person', type: 'User' };
+    await gh.json('POST', `/releases/${id}/assets?name=update.json`, {
+      body: Buffer.from('{"schema":1}'),
+      contentType: 'application/json',
+    });
+    gh.state.uploader = null;
+    await assert.rejects(
+      publish(['--apk', ws.apk, '--commit', 'abc1234'], { gh }),
+      /update\.json was not uploaded by this workflow/,
+    );
+    const kept = gh.releases[0].assets.find((a) => a.name === 'update.json');
+    assert.equal(Buffer.from(kept.content, 'base64').toString('utf8'), '{"schema":1}');
+  } finally {
+    await ws.cleanup();
+  }
+});
+
+// What the manifest says, checked field by field rather than by its shape: it is the one file
+// an installed app acts on, and every field of it is a decision the app makes.
+test('the update manifest says what an installed app needs to decide and where to download', () => {
+  const text = updateManifest({
+    pkg: PACKAGE,
+    versionName: '0.1.0-abc1234',
+    versionCode: 2_000_123,
+    tag: 'v0.1.0-abc1234',
+    apk: 'Brapmony-0.1.0-abc1234-debug.apk',
+    sha256: 'a'.repeat(64),
+    size: 72_920_972,
+    commit: 'ABC1234',
+    repository: OWNER_REPO,
+  });
+  const m = JSON.parse(text);
+  assert.deepEqual(m, {
+    schema: 1,
+    package: PACKAGE,
+    versionCode: 2_000_123,
+    versionName: '0.1.0-abc1234',
+    tag: 'v0.1.0-abc1234',
+    apk: 'Brapmony-0.1.0-abc1234-debug.apk',
+    sha256: 'a'.repeat(64),
+    size: 72_920_972,
+    notes: `https://github.com/${OWNER_REPO}/releases/tag/v0.1.0-abc1234`,
+    commit: 'abc1234',
+  });
+  // A version release is a tag with no commit, and its APK is named for the version alone.
+  const version = JSON.parse(updateManifest({
+    pkg: PACKAGE, versionName: '1.9.6', versionCode: 2_000_123, tag: 'v1.9.6',
+    apk: 'Brapmony-1.9.6.apk', sha256: 'b'.repeat(64), size: 1, commit: 'abc1234', repository: OWNER_REPO,
+  }));
+  assert.equal(version.apk, 'Brapmony-1.9.6.apk');
+  // What it refuses: a tag the app cannot build a URL from, a file name that is not this
+  // workflow's, a missing checksum, and a size that is no size.
+  const base = {
+    pkg: PACKAGE, versionName: '1.9.6', versionCode: 1, tag: 'v1.9.6',
+    apk: 'Brapmony-1.9.6.apk', sha256: 'c'.repeat(64), size: 10, commit: 'abc1234', repository: OWNER_REPO,
+  };
+  assert.throws(() => updateManifest({ ...base, tag: 'latest' }), /needs a release tag/);
+  assert.throws(() => updateManifest({ ...base, tag: 'v1.9.6/../../x' }), /needs a release tag/);
+  assert.throws(() => updateManifest({ ...base, apk: 'Their_App.apk' }), /this workflow's APK name/);
+  assert.throws(() => updateManifest({ ...base, sha256: '' }), /SHA-256/);
+  assert.throws(() => updateManifest({ ...base, sha256: 'nothex' }), /SHA-256/);
+  assert.throws(() => updateManifest({ ...base, size: 0 }), /size/);
+  assert.throws(() => updateManifest({ ...base, versionCode: 0 }), /versionCode/);
+  assert.throws(() => updateManifest({ ...base, versionName: '' }), /version the APK reports/);
 });
 
 test('an asset this workflow did not upload is never replaced', async () => {
@@ -730,7 +843,9 @@ test('a publish that fails before its files are on the release leaves it a draft
     assert.match(done.stdout, /Found release v1\.9\.6-abc1234/);
     assert.equal(gh.releases.length, 1, 'not a second release');
     assert.equal(gh.releases[0].draft, false);
-    assert.equal(gh.releases[0].assets.length, 2);
+    // The APK, its checksum, and the update manifest the app's own check reads.
+    assert.deepEqual(gh.releases[0].assets.map((a) => a.name).sort(),
+      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256', 'update.json']);
   } finally {
     await ws.cleanup();
   }
@@ -918,7 +1033,7 @@ test('a release create whose answer was lost does not fail the publish, or make 
     // create that was assumed to have happened.
     assert.deepEqual(
       gh.releases[0].assets.map((a) => a.name).sort(),
-      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256'],
+      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256', 'update.json'],
     );
     assert.equal(gh.releases[0].draft, false, 'and it is published');
     assert.equal(gh.releases[0].name, '1.9.6-abc1234');
@@ -1218,7 +1333,7 @@ test('the first publish removes the rolling releases and tags, and leaves the ve
     const release = gh.releases.find((r) => r.tag_name === 'v1.9.6-abc1234');
     assert.ok(release, 'the commit has a release');
     assert.deepEqual(release.assets.map((a) => a.name).sort(),
-      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256']);
+      ['Brapmony-1.9.6-abc1234-debug.apk', 'Brapmony-1.9.6-abc1234-debug.apk.sha256', 'update.json']);
     // And the rolling releases and tags are gone, so the one file on the page is a build.
     assert.deepEqual(
       gh.releases.map((r) => r.tag_name).sort(),
@@ -1309,7 +1424,8 @@ test('a dry run contacts nothing and says what it would publish', async () => {
   const ws = workspace();
   try {
     const { stdout } = await run(process.execPath, [join(here, 'release.mjs'), 'publish',
-      '--apk', ws.apk, '--version', '1.9.6', '--commit', 'abc1234', '--dry-run'], {
+      '--apk', ws.apk, '--version', '1.9.6', '--commit', 'abc1234', '--dry-run',
+      '--package', PACKAGE, '--version-name', VERSION_NAME, '--version-code', String(VERSION_CODE)], {
       env: { ...process.env, GITHUB_TOKEN: '', GITHUB_REPOSITORY: OWNER_REPO },
     });
     assert.match(stdout, /Would publish Brapmony-1\.9\.6-abc1234-debug\.apk as 1\.9\.6-abc1234 \(v1\.9\.6-abc1234\)/);

@@ -45,6 +45,10 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // The person may have changed the permission in system settings while the app was away.
         (application as HarmonyApp).notifications.refreshPermission()
+        // And this is the one moment the app asks GitHub whether there is a newer build. The
+        // checker itself decides whether it is due, so a resume a minute after the last one
+        // does nothing at all.
+        (application as HarmonyApp).checkForUpdates()
     }
 
     /**

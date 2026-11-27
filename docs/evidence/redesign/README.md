@@ -25,7 +25,10 @@ Compact captures are 400x900dp, expanded are 1000x800dp, both at xhdpi.
 |---|---|
 | `page-you-dark.png`, `page-you-light.png` | The account screen: the identity at the top, then grouped settings rows. Five tabs became this. |
 | `page-you-appearance-dark.png` | A row opened: the appearance section, with the live preview and the account's own look. |
+| `page-you-version-dark.png` | The same list at the About rows, where the build's own version name and versionCode are shown. |
 | `page-you-expanded-dark.png` | The same page at 1000dp. |
+| `you-updates-dark.png`, `you-updates-off-light.png` | You → Updates, drawn from a `MockWebServer` answering the manifest a release publishes: the switch, when the check last ran, and the build it found with its size and its download. The second is the same section with the check off. |
+| `update-available-dark.png`, `update-available-light.png` | The notice an installed app shows when a release lands: the build, the APK's name and size, "What changed" when the release published a page, and one **Download** that opens the APK itself. |
 | `page-alerts-dark.png`, `page-alerts-light.png` | The notification inbox: an app bar whose supporting line says what is waiting, one segmented filter, day groups, unread rows toned. |
 | `page-alerts-expanded-dark.png` | The inbox at 1000dp. |
 | `page-social-dark.png`, `page-social-light.png` | The feed: a scrollable primary tab strip for the timeline, and each post as a card. |

@@ -281,11 +281,31 @@ jobs:
           node .ci/scripts/release.mjs tag --tag "$RELEASE_TAG" \
             --apk "${{ steps.name.outputs.path }}" \
             --commit "${{ github.sha }}"
-      - name: Attach the APK and its checksum
+      # The manifest the app's own update check reads, written from the APK that was just
+      # checked: its own version name and versionCode, its SHA-256, and its size. It goes on
+      # the release beside the APK, and `/releases/latest/download/update.json` is where an
+      # installed app asks for it.
+      - name: Write the update manifest
+        id: manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node .ci/scripts/release.mjs manifest \
+            --apk "${{ steps.name.outputs.path }}" \
+            --tag "$RELEASE_TAG" \
+            --package io.github.wwpol.brapmony \
+            --version-name "${{ steps.version.outputs.version }}" \
+            --version-code "${{ steps.version.outputs.version-code }}" \
+            --commit "${{ github.sha }}"
+      - name: Attach the APK, its checksum and the update manifest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.release.outputs.id }}
-        run: node .ci/scripts/release.mjs upload --release-id "$RELEASE_ID" "${{ steps.name.outputs.path }}" "${{ steps.name.outputs.path }}.sha256"
+        run: |
+          node .ci/scripts/release.mjs upload --release-id "$RELEASE_ID" \
+            "${{ steps.name.outputs.path }}" \
+            "${{ steps.name.outputs.path }}.sha256" \
+            "${{ steps.manifest.outputs.path }}"
       # Only now that both files are on it is the release made visible.
       - name: Publish the release
         env:
