@@ -141,10 +141,10 @@ sheet, and the same row with the old `SelectionContainer` put back, must. See
 
 `ThreadsSheetTest` is the regression for the sheet claiming a channel had no threads. It runs
 **offline**, against `FixtureInstance`, so it is checked in CI rather than skipped: the fixture
-answers the channel's `threads` read with one thread in each of the three states -- open, past
-its own auto-archive window, and archived -- and the test drives the real `RoomScreen` from the
-overflow to the sheet and requires all three on screen, the closed ones marked with the reason,
-and the "no threads" sentence gone. `docs/evidence/render/threads-sheet.png` is its capture. See
+answers the channel's `threads` read with threads in three states -- open, past its own
+auto-archive window, and archived -- and the test drives the real `RoomScreen` from the overflow
+to the sheet and requires every one on screen, the closed ones marked with the reason, and the
+"no threads" sentence gone. `docs/evidence/render/threads-sheet.png` is its capture. See
 [ux-fixes.md](ux-fixes.md#9-a-channel-with-threads-said-it-had-none).
 
 ### Journeys: `NativeJourneyTest`

@@ -93,14 +93,17 @@ internal class FixtureInstance : AutoCloseable {
             path.contains("/conversation_participants") -> CONVERSATION_PARTICIPANTS
             path.contains("/conversations") -> CONVERSATIONS
             path.contains("/messages") -> MESSAGES
-            // The channel's threads. Three rows, in the three states a real channel's threads
-            // are in: one still open, one the instance archived, and one whose own auto-archive
-            // clock has run out before any sweep archived it. The Threads list has to draw all
-            // three -- the sidebar nests only the first -- and a client that applies the
-            // sidebar's rule to the list claims the channel has none, which is the report this
+            // The channel's threads, in the states a real channel's threads are in: two still
+            // open, one the instance archived, and one whose own auto-archive clock has run out
+            // before any sweep archived it. The Threads list has to draw all four -- the sidebar
+            // nests only the open ones, and draws a branch into each -- and a client that applies
+            // the sidebar's rule to the list claims the channel has none, which is the report this
             // fixture is here to keep fixed.
             //
-            // All three belong to `general`; the read is filtered by `channel_id` like the
+            // Two open ones, not one, because the column's branch is a `├` and a `└`: a single
+            // open thread can only ever draw the last thread's branch.
+            //
+            // All four belong to `general`; the read is filtered by `channel_id` like the
             // app's own, so a channel with no threads is answered with none rather than with
             // another channel's -- which is what a path-routed fixture did, and what made a
             // column that nests every thread it read under every channel look right.
@@ -421,10 +424,11 @@ internal class FixtureInstance : AutoCloseable {
          * while its own auto-archive clock has not run out, so a fixture dated last week would
          * have every thread closed by the time it was read -- which is the bug this fixture is
          * here to catch, not a way to catch it. `t-open` was replied to half an hour ago inside
-         * its day; `t-expired` two days ago with the same 1440-minute window this client asks
-         * for on create, so its clock ran out before any sweep archived it; `t-archived` was
-         * archived by the instance. The Threads list must draw all three, and the channel
-         * sidebar must nest only the first.
+         * its day and `t-open-2` an hour ago, so the column nests two and the branch into them is
+         * a `├` and a `└` rather than a single turn; `t-expired` two days ago with the same
+         * 1440-minute window this client asks for on create, so its clock ran out before any
+         * sweep archived it; `t-archived` was archived by the instance. The Threads list must draw
+         * all of them, and the channel sidebar must nest only the open ones.
          */
         private fun minutesAgo(minutes: Long): String =
             java.time.Instant.now().minusSeconds(minutes * 60).toString()
@@ -434,6 +438,9 @@ internal class FixtureInstance : AutoCloseable {
             [{"id":"t-open","channel_id":"c2","parent_message_id":"m1","name":"Release planning",
               "message_count":4,"archived":false,"locked":false,"auto_archive_duration":1440,
               "created_at":"${minutesAgo(2880)}","last_message_at":"${minutesAgo(30)}"},
+             {"id":"t-open-2","channel_id":"c2","parent_message_id":"m1","name":"Copy review",
+              "message_count":3,"archived":false,"locked":false,"auto_archive_duration":1440,
+              "created_at":"${minutesAgo(1500)}","last_message_at":"${minutesAgo(60)}"},
              {"id":"t-expired","channel_id":"c2","parent_message_id":"m2","name":"Frame sketches",
               "message_count":2,"archived":false,"locked":false,"auto_archive_duration":1440,
               "created_at":"${minutesAgo(4320)}","last_message_at":"${minutesAgo(2880)}"},

@@ -36,9 +36,9 @@ import org.robolectric.annotation.GraphicsMode
  * while the instance still held it and the reference client's Threads list still drew it
  * (`AllThreadsModal.vue`: `channelThreads(id, { includeArchived: true })`).
  *
- * The fixture answers with one thread in each of the three states -- open, past its window,
- * archived -- and this drives the real `RoomScreen` from the overflow menu to the sheet, so a
- * build that filters again fails on the row it dropped.
+ * The fixture answers with threads in three states -- open, past its window, archived -- and this
+ * drives the real `RoomScreen` from the overflow menu to the sheet, so a build that filters again
+ * fails on the row it dropped.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -158,7 +158,7 @@ class ThreadsSheetTest {
 
             val nested = state.threadsByChannel.value["c2"].orEmpty().map { it.id }
             assertTrue("the sheet's read put the closed threads in the sidebar too: $nested",
-                nested == listOf("t-open"))
+                nested == listOf("t-open", "t-open-2"))
         }
     }
 }

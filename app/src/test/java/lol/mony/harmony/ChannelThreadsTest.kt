@@ -4,7 +4,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -33,9 +36,9 @@ import org.robolectric.annotation.GraphicsMode
  *
  * The reference's channel list draws a channel's *open* threads under it
  * (`activeChannelThreads`: unarchived, and inside the thread's own auto-archive clock), and this
- * column is the app's counterpart. The fixture answers with one thread in each of the three
- * states, on two different channels, so a list that nests the wrong thread, nests it under the
- * wrong channel, or drops it altogether fails here.
+ * column is the app's counterpart. The fixture answers with two open threads and two closed ones
+ * in three different states, so a list that nests the wrong thread, nests it under the wrong
+ * channel, draws the wrong branch, or drops it altogether fails here.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -66,14 +69,21 @@ class ChannelThreadsTest {
         compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
     }
 
+    /** A dp length in this window's pixels, so the assertions are written in the app's own units. */
+    private fun px(dp: Float): Float = with(compose.density) { dp.dp.toPx() }
+
     /**
-     * The reported screen: the open thread is in the list, indented under its own channel.
+     * The reported screen: the open thread is in the list, indented under its own channel, drawn
+     * the way Discord draws one.
      *
-     * Indented is measured, not asserted by eye: the thread's own title starts further in than
-     * the channel's name and sits below it, and the next channel's row is below the thread's,
-     * which is what "nested under the channel" means on screen.
+     * Measured, not asserted by eye. The thread's row is the column's own row -- the full width,
+     * so the whole row is the tap target -- with its name one level in, in the channel's name
+     * column, and no glyph of its own, because the channel above it is the glyph. What says the
+     * row belongs to that channel is the branch: a hairline in the gutter from the channel's glyph
+     * into the row, and on to the next thread when there is one. A row that lost the indent, kept
+     * a glyph, or drew no branch fails here.
      */
-    @Test fun anActiveThreadIsIndentedUnderItsOwnChannel() {
+    @Test fun anActiveThreadIsIndentedUnderItsChannelWithABranch() {
         FixtureInstance().use { instance ->
             instance.start()
             val state = signedIn(instance)
@@ -81,19 +91,58 @@ class ChannelThreadsTest {
             waitForTag("channel-list")
             waitForTag("thread-t-open")
 
-            val channel = compose.onNodeWithText("general", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
-            val thread = compose.onNodeWithText("Release planning", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
-            assertTrue(
-                "the thread's title starts at ${thread.left}, no further in than the channel's ${channel.left}",
-                thread.left > channel.left,
-            )
-            assertTrue(
-                "the thread's title is above its channel's, so it is not nested under it",
-                thread.top > channel.top,
-            )
-            // Nested under *this* channel: the next channel's row is below the thread's.
-            val below = compose.onNodeWithText("design", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
-            assertTrue("the thread is not under its channel, but after the next one", thread.top < below.top)
+            val channelRow = compose.onNodeWithTag("channel-general").fetchSemanticsNode().boundsInRoot
+            val threadRow = compose.onNodeWithTag("thread-t-open").fetchSemanticsNode().boundsInRoot
+            assertEquals("the thread's row is ${threadRow.width} wide, the column's ${channelRow.width}",
+                channelRow.width, threadRow.width, 0.5f)
+            assertTrue("the thread's row is above its channel's, so it is not under it",
+                threadRow.top > channelRow.top)
+            // Under *this* channel: the next channel's row is below the thread's.
+            val below = compose.onNodeWithTag("channel-design").fetchSemanticsNode().boundsInRoot
+            assertTrue("the thread is not under its channel, but after the next one", threadRow.bottom <= below.top)
+
+            // The indent: the thread's name is in the channel's name column, one level in from
+            // the row's edge. A thread drawn at the edge is the row this test is here to catch.
+            val channelTitle = compose.onNodeWithText("general", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val threadTitle = compose.onNodeWithText("Release planning", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            assertEquals("the thread's name starts at ${threadTitle.left}, the channel's at ${channelTitle.left}",
+                channelTitle.left, threadTitle.left, 0.5f)
+            val indent = px(32f)
+            assertTrue("the thread's name starts at ${threadTitle.left}, the row's edge at ${threadRow.left}: not indented",
+                threadTitle.left - threadRow.left >= indent)
+
+            // The branch, measured on the paint: the thread's row is a hairline in the gutter,
+            // not a glyph. Every pixel the gutter draws is within a stroke's width of the
+            // branch's spine or of the arm into the row, and the arm is there at the row's middle.
+            val gutterEnd = px(40f)
+            val spine = px(28f)
+            val stroke = px(2.5f)
+            val armEnd = px(42f)
+            val threadPixels = compose.onNodeWithTag("thread-t-open").captureToImage().asAndroidBitmap()
+            val background = threadPixels.getPixel(threadPixels.width - 1, 0)
+            var inGutter = 0
+            var offBranch = 0
+            var armAtMiddle = 0
+            for (y in 0 until threadPixels.height) {
+                for (x in 0 until gutterEnd.toInt()) {
+                    if (threadPixels.getPixel(x, y) == background) continue
+                    inGutter++
+                    val onSpine = kotlin.math.abs(x - spine) <= stroke
+                    val nearMiddle = kotlin.math.abs(y - threadPixels.height / 2f) <= stroke
+                    val onArm = nearMiddle && x <= armEnd
+                    if (!onSpine && !onArm) offBranch++
+                    if (onArm && x > spine + stroke) armAtMiddle++
+                }
+            }
+            assertTrue("the thread's row draws nothing in the gutter, so there is no branch", inGutter > 0)
+            assertTrue("$offBranch of the gutter's $inGutter pixels are off the branch: it draws a glyph",
+                offBranch == 0)
+            assertTrue("the branch never turns into the row: no arm at the row's middle", armAtMiddle > 0)
+
+            // The reply count in the thread's supporting line was the other half of the old
+            // special row; the count lives in the room's Threads sheet now.
+            assertTrue("the thread still draws its reply count",
+                compose.onAllNodesWithText("4 replies", substring = true).fetchSemanticsNodes().isEmpty())
 
             RenderHarness.run { compose.capture("channel-threads") }
         }
@@ -134,8 +183,8 @@ class ChannelThreadsTest {
             waitForTag("channel-welcome")
 
             val nested = state.threadsByChannel.value
-            assertEquals("the open thread is not filed under its own channel",
-                listOf("t-open"), nested["c2"].orEmpty().map { it.id })
+            assertEquals("the open threads are not filed under their own channel",
+                listOf("t-open", "t-open-2"), nested["c2"].orEmpty().map { it.id })
             assertTrue("a channel with no threads was given one: ${nested["c1"]}",
                 nested["c1"].orEmpty().isEmpty())
         }
@@ -174,6 +223,10 @@ class ChannelThreadsTest {
 
             assertEquals("the thread being read is not nested under its channel",
                 listOf("t-open"), state.threadsByChannel.value["c2"].orEmpty().map { it.id })
+            // The rest of the channel's open threads are not read by this path, so the column has
+            // the one thread the room reported: nesting a thread is not a reason to read them all.
+            assertTrue("the column gained a thread nothing reported",
+                state.threadsByChannel.value["c2"].orEmpty().size == 1)
         }
     }
 }

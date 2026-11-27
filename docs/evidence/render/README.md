@@ -90,10 +90,15 @@ on the glyphs drawing: they assert the tree and the value each cell hands over.
   [the fix in ux-fixes.md](../../ux-fixes.md#9-a-channel-with-threads-said-it-had-none) the
   sheet filtered the last two out and told the person the channel had none.
 - `channel-threads.png` -- the channel column from `ChannelThreadsTest`, drawn offline against
-  `FixtureInstance`: the open thread of one channel nested under it, behind a rail, with the
-  channels on either side at their own inset. Before
+  `FixtureInstance`: a channel's open threads indented under it the way Discord draws them -- no
+  glyph of their own, their names in the channel's own name column, a hairline branch from the
+  channel's glyph turning into each row (`├` for the first, `└` for the last), and no reply count.
+  Before
   [the fix in ux-fixes.md](../../ux-fixes.md#12-a-thread-being-read-had-no-row-in-the-channel-column)
-  the thread was only in the column when the Threads sheet had happened to read it.
+  the thread was only in the column when the Threads sheet had happened to read it; before
+  [the restyle in §13](../../ux-fixes.md#13-a-thread-in-the-channel-column-was-not-drawn-the-way-discord-draws-one)
+  it was there 56dp in behind a rail and a reply count, and an intermediate attempt drew it flat,
+  at the channel's own inset, which lost the nesting altogether.
 - `emoji-picker-dark.png`, `emoji-picker-light.png` -- the emoji picker, which
   replaced a row of five hardcoded faces: the search box, the account's recents,
   the skin-tone row, the category tabs, the server's custom emoji and the whole

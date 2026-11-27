@@ -608,14 +608,14 @@ that decides whether it belongs in the column is applied there.
 - `ChannelList` reads a channel's threads in an effect of its own, keyed on the tree it is
   drawing, so a cached column reads them too. The server tree stays cached; only the threads are
   re-read, because they are the part that changes while a person is in the app.
-- The nesting is drawn as a group: the threads start at the channel's own icon inset and a
-  hairline runs down their start edge. An indent alone reads as a narrower row -- which is what a
-  second channel looks like -- and the rail is what says these belong to the row above.
+- The nesting is the list's own order: the thread's row follows its channel's row. How it is
+  drawn was reported separately and settled in
+  [§13](#13-a-thread-in-the-channel-column-was-not-drawn-the-way-discord-draws-one).
 
 ```
 Text channels
   # general        Everything and nothing
-  │  ▣ Release planning            4 replies
+    └ Release planning
   # design         Type, colour and motion
 ```
 
@@ -625,6 +625,62 @@ which is what made navigation slow before the cache. Re-reading every channel's 
 room would be one request per channel per reply. Drawing the threads flat, with the channel's name
 in their supporting line, would list a thread under no channel at all, which is the opposite of
 what was asked.
+
+## 13. A thread in the channel column was not drawn the way Discord draws one
+
+**The report, twice.** First: "the indented threads look horrible in the channel list. it should be
+like Discord where a thread indented under a channel is presented just like a channel. no special
+ui." That was answered by drawing a thread as a flat copy of a channel's row, at the channel's own
+inset with a `Forum` glyph and no indent at all. The second report is what that got wrong: "nope
+not what I wanted. it should be indented still. and the style looks slightly off. Find what the
+channel list looks like on discord when a thread is there."
+
+**What Discord actually draws**, measured from its own sidebar rather than remembered. A channel
+is a glyph in the gutter and a name in the name column. A thread under it is a row with **no glyph
+of its own** and its name in the channel's **name column** -- indented by exactly the width of the
+channel's glyph and its gap -- and the two are joined by a **branch** in the gutter: a hairline
+hanging from the channel's glyph, turning at a rounded corner into each thread's row at that row's
+vertical middle, and running on to the next thread when there is one. The last thread's branch is
+a `└` with nothing below it, so the group ends where it ends. The thread's name is the channel's
+name: same type, same weight, same colour. Discord's line is a solid 2px token; the arm stops
+short of the name.
+
+**Cause of the second report.** The first fix read "no special ui" as "no nesting drawn at all",
+so it deleted the indent along with the rail. That left a thread looking like a channel that had
+lost its glyph, with nothing saying which channel it belonged to but its position in the list --
+which is a different row from a channel's, not the same one, and it is not what Discord does.
+
+**Fix.** Two row composables, and the difference between them is the one Discord draws:
+
+- `ChannelRow` is a channel: a glyph in the gutter, its name in the name column, its description
+  and its badge.
+- `ThreadRow` is the same Material `ListItem`, so the container colour, the paddings, the headline
+  type, the row height and the ripple are the channel's own -- that is what "the style looks off"
+  was about in the first attempt, which drew the thread in a bare `Row`. Its leading slot holds an
+  empty 24dp spacer, so its name lands exactly where the channel's name does: 56dp in. It has no
+  supporting line and no glyph.
+- The branch is painted over the thread's row (`drawThreadBranch`, in `drawWithContent`, because a
+  `ListItem` paints its own container colour inside `drawBehind`): a spine at the glyph's centre,
+  a quarter-circle turn of 5dp into the row's middle, an arm that stops 46dp in, and the spine
+  continued to the row's bottom for every thread but the last. The colour is `borderStrong`, so it
+  reads as a hairline in the dark and in the light theme alike.
+
+```
+Text channels
+  # general          Everything and nothing
+    ├ Release planning
+    └ Copy review
+  # design           Type, colour and motion
+```
+
+The reply count is not lost: the room's own **Threads** sheet lists every thread of the channel
+with its message count, and the room's header names the thread and the channel it is in. It was
+not doing any work in the column, where the only question is which threads are open.
+
+**Alternatives rejected.** No indent at all -- the first attempt, and the report that sent it back.
+An indent with no branch reads as a narrower row and does not say which channel it belongs to;
+that is why Discord draws the branch, and why this does. A `Forum` glyph on the thread row is a
+second glyph in a column that already has the channel's, and Discord's thread row has none.
 
 ## How this is verified, and what is not
 
@@ -690,18 +746,21 @@ what was asked.
 - **The branding test fetches over HTTP** from a local server that 404s the hyphenated bucket
   names, so a wrong bucket is a missing picture rather than a passing string comparison.
 - **A thread being read is pinned where the screen is**, by `ChannelThreadsTest`: it draws the
-  real `ChannelList` against `FixtureInstance` and measures the thread's own title starting
-  further in than its channel's name and sitting between that channel and the next one, so a
-  list that nests the wrong thread, nests it under the wrong channel, or drops it fails. A
-  second case drives the room: the thread's id is put where a notification puts it, the real
-  `RoomScreen` opens it, and the column's state has to gain the row. Mutation-checked by
-  removing the room's report, which fails it with "the thread being read is not nested under its
-  channel"; `AppStateCacheTest.aClosedThreadIsNotNestedUnderItsChannel` fails when
-  `rememberThread`'s filter is dropped, and `replyingToAThreadKeepsItInTheColumn` covers the
-  reply's clock. `docs/evidence/render/channel-threads.png` is the capture.
+  real `ChannelList` against `FixtureInstance` and measures the thread's row against its
+  channel's -- the full width, its name at the channel's own name's x, one level in from the row's
+  edge, the row between that channel and the next one, no reply count beside it -- and then reads
+  the paint: every pixel the thread's row draws in the gutter is on the branch's spine or on its
+  arm, and the arm is there at the row's middle. So a list that nests the wrong thread, nests it
+  under the wrong channel, drops the indent, gives the row a glyph of its own, draws no branch or
+  drops it altogether fails. A second case drives the room: the thread's id is put where a
+  notification puts it, the real `RoomScreen` opens it, and the column's state has to gain the
+  row. Mutation-checked by removing the room's report, which fails it with "the thread being read
+  is not nested under its channel"; `AppStateCacheTest.aClosedThreadIsNotNestedUnderItsChannel`
+  fails when `rememberThread`'s filter is dropped, and `replyingToAThreadKeepsItInTheColumn`
+  covers the reply's clock. `docs/evidence/render/channel-threads.png` is the capture.
 - **The Threads sheet** is pinned offline, so the check runs in CI rather than skipping without an
   instance: `ThreadsSheetTest` drives the real `RoomScreen` against `FixtureInstance`, whose
-  `threads` read answers with one thread in each state, and requires all three on screen with the
+  `threads` read answers with threads in three states, and requires every one on screen with the
   closed ones marked and the empty sentence gone. It was mutation-checked: restoring the
   `filter { it.isActive() }` the sheet used to apply fails two of its three tests, the first with
   "the sheet dropped the thread \"Frame sketches\"". `VoiceAndRoutingTest` pins the three states

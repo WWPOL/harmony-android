@@ -3,7 +3,6 @@
 package lol.mony.harmony.ui.screens.chat
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,6 +10,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,8 +68,113 @@ fun ChatWorkspace(state: AppState, appearance: VisualThemeSettings) {
     }
 }
 
-/** How far in a channel's open threads start, in the column. */
-private val ThreadIndent = 56.dp
+/**
+ * One row of the channel column: a channel.
+ *
+ * A channel is a glyph in the column's icon gutter and its name in the name column, which is the
+ * shape every row in the column has -- a thread's too ([ThreadRow]).
+ */
+@Composable
+private fun ChannelRow(
+    name: String,
+    icon: ImageVector,
+    testTag: String,
+    onClick: () -> Unit,
+    description: String? = null,
+    unread: Int = 0,
+) {
+    ListItem(
+        headlineContent = {
+            Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Normal)
+        },
+        leadingContent = { Icon(icon, null) },
+        supportingContent = description?.let { text -> ({ Text(text, maxLines = 2) }) },
+        trailingContent = if (unread > 0) ({ Badge { Text("" + unread) } }) else null,
+        modifier = Modifier.testTag(testTag).clickable(onClick = onClick),
+    )
+}
+
+/**
+ * The x of the branch: the middle of the channel's 24dp glyph in its 16dp of row padding, which is
+ * where Discord hangs a channel's threads.
+ */
+private val ThreadBranchX = 28.dp
+
+/**
+ * Where the branch's arm stops: short of the name.
+ *
+ * The name starts at 56dp -- 16dp of row padding, the glyph's 24dp slot and its 16dp gap -- so the
+ * arm stops at 46dp, clear of the first letter and inside the name's own indent.
+ */
+private val ThreadBranchArm = 46.dp
+
+/** How far the branch turns from the spine into the arm, and how thick its hairline is. */
+private val ThreadBranchTurn = 5.dp
+private val ThreadBranchStroke = 1.5.dp
+
+/**
+ * A thread nested under its channel, drawn the way Discord draws one.
+ *
+ * The row is a channel's row, drawn by the same Material `ListItem`: the same container colour,
+ * the same paddings, the same headline type, the same height and the same ripple. Two things
+ * differ, and they are the two things Discord changes. Its name starts one level in -- a 24dp
+ * leading slot with nothing in it, which is the channel's glyph and its gap, so the name lands in
+ * the channel's own name column -- and a hairline branch is drawn in the gutter: down from the
+ * channel's glyph, turning into this row's middle, and on to the next thread when there is one
+ * (`├` for every thread but the last, `└` for the last).
+ *
+ * The branch is what says the row belongs to the channel above it. An indent alone reads as a
+ * narrower row, which is what a channel that lost its glyph looks like; a glyph of its own would
+ * be a second glyph under a column that already has one.
+ */
+@Composable
+private fun ThreadRow(
+    name: String,
+    testTag: String,
+    last: Boolean,
+    onClick: () -> Unit,
+) {
+    val branch = LocalHarmonyColors.current.borderStrong
+    ListItem(
+        headlineContent = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        // The channel's glyph's slot, empty: the name lands where a channel's name does.
+        leadingContent = { Spacer(Modifier.size(24.dp)) },
+        modifier = Modifier.testTag(testTag)
+            // Over the row's own fill, not behind it: a ListItem paints its container colour
+            // inside this modifier, so a branch drawn behind would be covered by it.
+            .drawWithContent { drawContent(); drawThreadBranch(branch, last) }
+            .clickable(onClick = onClick),
+    )
+}
+
+/**
+ * The branch in the gutter: a spine down from the channel's glyph, turning into the row's middle,
+ * and running on to the next thread unless this is the last one.
+ *
+ * Measured from Discord's own sidebar: a hairline hanging from the glyph's centre, a rounded
+ * quarter turn into the row at its vertical middle, and the arm stopping short of the name. The
+ * last thread's branch is `└` -- the turn with nothing below it -- so the group ends where it ends
+ * rather than running into the next channel.
+ */
+private fun DrawScope.drawThreadBranch(color: Color, last: Boolean) {
+    val spine = ThreadBranchX.toPx()
+    val arm = ThreadBranchArm.toPx()
+    val turn = ThreadBranchTurn.toPx()
+    val stroke = ThreadBranchStroke.toPx()
+    val middle = size.height / 2
+    val branch = Path().apply {
+        moveTo(spine, 0f)
+        lineTo(spine, middle - turn)
+        // The corner is tangent to both the spine and the arm: a quarter of a circle of [turn].
+        arcTo(Rect(spine, middle - 2 * turn, spine + 2 * turn, middle),
+            startAngleDegrees = 180f, sweepAngleDegrees = -90f, forceMoveTo = false)
+        lineTo(arm, middle)
+    }
+    drawPath(branch, color, style = Stroke(width = stroke, cap = StrokeCap.Round))
+    if (!last) drawLine(color, Offset(spine, middle), Offset(spine, size.height),
+        strokeWidth = stroke, cap = StrokeCap.Round)
+}
 
 @Composable
 internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) {
@@ -173,56 +286,32 @@ internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) 
                                 style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         items(channels, key = { it.id }) { channel ->
-                            Column {
-                                ListItem(headlineContent = { Text(channel.name,
-                                    fontWeight = if (unread.channel(channel.id) > 0) FontWeight.SemiBold else FontWeight.Normal) },
-                                    leadingContent = { Icon(if (channel.channelType.isVoice) Icons.Default.VolumeUp else Icons.Default.Tag, null) },
-                                    supportingContent = channel.description?.let { description -> ({ Text(description, maxLines = 2) }) },
-                                    trailingContent = if (unread.channel(channel.id) > 0) ({ Badge { Text("" + unread.channel(channel.id)) } }) else null,
-                                    modifier = Modifier.testTag("channel-" + channel.name).clickable {
-                                        if (channel.channelType.isVoice) voice = channel else state.openChannelId.value = channel.id
-                                    })
-                                // The open threads nest under their channel, as the web client's
-                                // sidebar draws them. A hairline down their start edge is what
-                                // says they belong to the row above rather than to the list:
-                                // an indent alone reads as a narrower row, which is what a
-                                // second channel looks like.
-                                val openThreads = threads[channel.id].orEmpty()
-                                if (openThreads.isNotEmpty()) {
-                                    Row(Modifier.padding(start = ThreadIndent).height(IntrinsicSize.Min)) {
-                                        Box(
-                                            Modifier
-                                                .width(2.dp)
-                                                .fillMaxHeight()
-                                                .background(LocalHarmonyColors.current.borderStrong),
-                                        )
-                                        Column {
-                                            for (openThread in openThreads) {
-                                                ListItem(
-                                                    headlineContent = {
-                                                        Text(openThread.name ?: "Thread", maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis,
-                                                            style = MaterialTheme.typography.bodyLarge)
-                                                    },
-                                                    leadingContent = {
-                                                        Icon(Icons.Default.Forum, null, Modifier.size(16.dp),
-                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                    },
-                                                    supportingContent = {
-                                                        Text(countLabel(openThread.messageCount, "reply"),
-                                                            style = MaterialTheme.typography.bodySmall)
-                                                    },
-                                                    modifier = Modifier
-                                                        .testTag("thread-" + openThread.id)
-                                                        .clickable {
-                                                            state.openChannelId.value = channel.id
-                                                            state.openThreadId.value = openThread.id
-                                                        },
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
+                            val openThreads = threads[channel.id].orEmpty()
+                            ChannelRow(
+                                name = channel.name,
+                                icon = if (channel.channelType.isVoice) Icons.Default.VolumeUp else Icons.Default.Tag,
+                                testTag = "channel-" + channel.name,
+                                description = channel.description,
+                                unread = unread.channel(channel.id),
+                                onClick = {
+                                    if (channel.channelType.isVoice) voice = channel else state.openChannelId.value = channel.id
+                                },
+                            )
+                            // A channel's open threads follow it as the column's own rows, one
+                            // level in: the name in the channel's name column, the channel's
+                            // glyph as the thing above them, and a branch from that glyph into
+                            // each one. That is the shape Discord gives a thread, and the one
+                            // the report asked for -- indented, and not a second kind of row.
+                            for ((position, openThread) in openThreads.withIndex()) {
+                                ThreadRow(
+                                    name = openThread.name ?: "Thread",
+                                    testTag = "thread-" + openThread.id,
+                                    last = position == openThreads.lastIndex,
+                                    onClick = {
+                                        state.openChannelId.value = channel.id
+                                        state.openThreadId.value = openThread.id
+                                    },
+                                )
                             }
                         }
                     }
