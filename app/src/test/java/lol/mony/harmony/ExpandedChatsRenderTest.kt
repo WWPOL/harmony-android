@@ -177,8 +177,8 @@ class MediumChatsRenderTest {
 
 /** The spaces these captures draw: Home and three servers, one of them asking for attention. */
 private val railSpaces = listOf(
-    Space.Home.copy(badge = 2),
+    Space.Home.copy(unread = 2, pings = 2),
     Space("s1", "Design"),
-    Space("s2", "E2E Server", badge = 4, mentions = 2),
+    Space("s2", "E2E Server", unread = 4, pings = 2),
     Space("s3", "Book club"),
 )

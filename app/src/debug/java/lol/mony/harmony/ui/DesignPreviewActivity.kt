@@ -92,12 +92,16 @@ private fun PreviewChats() {
     // app's own navigation, not a drawing of it. The rows inside the content are fixtures
     // because the signed-in screens read an instance and this one may not be running.
     val current = remember { mutableStateOf<String?>(null) }
+    // Home has three unread direct messages, which are three pings: a direct message is somebody
+    // addressing this account. Design has nothing, E2E Server has one unread message nobody named
+    // us in (so its name is bright and no badge is drawn), and Homelab has twelve unread of which
+    // two are mentions -- the red badge, because those two want an answer.
     val spaces = listOf(
-        Space(null, "Home", badge = 3),
+        Space(null, "Home", unread = 3, pings = 3),
         Space("s1", "Design"),
-        Space("s2", "E2E Server", badge = 1),
+        Space("s2", "E2E Server", unread = 1),
         Space("s3", "Book club"),
-        Space("s4", "Homelab", badge = 12, mentions = 2),
+        Space("s4", "Homelab", unread = 12, pings = 2),
     )
     HarmonyShell(
         spaces = spaces,

@@ -63,9 +63,9 @@ class SpaceRailTest {
     private val notched = WindowInsets(left = 30.dp, top = 40.dp, right = 0.dp, bottom = 24.dp)
 
     private val spaces = listOf(
-        Space.Home.copy(badge = 4),
-        Space("s1", "Design", badge = 2),
-        Space("s2", "E2E Server", badge = 7, mentions = 1),
+        Space.Home.copy(unread = 4, pings = 4),
+        Space("s1", "Design", unread = 2),
+        Space("s2", "E2E Server", unread = 7, pings = 1),
         Space("s3", "Book club"),
     )
 
@@ -185,9 +185,9 @@ class SpaceRailTest {
      * mentions in it should not sit behind a server that was read this morning.
      */
     @Test fun theBarPutsTheServersThatNeedAttentionInIt() {
-        val quiet = Space("s1", "Quiet", badge = 0)
-        val busy = Space("s2", "Busy", badge = 12)
-        val mentioned = Space("s3", "Mentioned", badge = 3, mentions = 1)
+        val quiet = Space("s1", "Quiet", unread = 0)
+        val busy = Space("s2", "Busy", unread = 12)
+        val mentioned = Space("s3", "Mentioned", unread = 3, pings = 1)
         val alsoQuiet = Space("s4", "Also quiet")
         val bar = barSpaces(listOf(Space.Home, quiet, busy, mentioned, alsoQuiet))
         assertEquals("Home is always first", "Home", bar.first().name)
@@ -247,8 +247,8 @@ class SpaceRailTest {
 
     /** A badge is not a bare number: TalkBack has to say what it counts. */
     @Test fun aBadgeSaysWhatItCounts() {
-        assertEquals("Design, 5 unread, 2 mentioning you", Space("s", "Design", badge = 5, mentions = 2).spoken())
-        assertEquals("Design, 1 unread", Space("s", "Design", badge = 1).spoken())
+        assertEquals("Design, 5 unread, 2 pinging you", Space("s", "Design", unread = 5, pings = 2).spoken())
+        assertEquals("Design, 1 unread", Space("s", "Design", unread = 1).spoken())
         assertEquals("Design", Space("s", "Design").spoken())
     }
 

@@ -73,6 +73,11 @@ fun ChatWorkspace(state: AppState, appearance: VisualThemeSettings) {
  *
  * A channel is a glyph in the column's icon gutter and its name in the name column, which is the
  * shape every row in the column has -- a thread's too ([ThreadRow]).
+ *
+ * Unread is drawn as the name: a channel with messages waiting is bright and heavy, a channel
+ * with none is muted, and no number is drawn at all. The trailing badge is the *ping* badge and
+ * only appears when somebody named this account in the channel, which is the one case where a
+ * count is worth a colour.
  */
 @Composable
 private fun ChannelRow(
@@ -82,15 +87,17 @@ private fun ChannelRow(
     onClick: () -> Unit,
     description: String? = null,
     unread: Int = 0,
+    pings: Int = 0,
 ) {
     ListItem(
         headlineContent = {
             Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Normal)
+                fontWeight = unreadNameWeight(unread > 0),
+                color = unreadNameColor(unread > 0, MaterialTheme.colorScheme.onSurfaceVariant))
         },
         leadingContent = { Icon(icon, null) },
         supportingContent = description?.let { text -> ({ Text(text, maxLines = 2) }) },
-        trailingContent = if (unread > 0) ({ Badge { Text("" + unread) } }) else null,
+        trailingContent = if (pings > 0) ({ PingBadge(count = pings, minHeight = 16.dp) }) else null,
         modifier = Modifier.testTag(testTag).clickable(onClick = onClick),
     )
 }
@@ -293,6 +300,10 @@ internal fun ChannelList(state: AppState, serverId: String, modifier: Modifier) 
                                 testTag = "channel-" + channel.name,
                                 description = channel.description,
                                 unread = unread.channel(channel.id),
+                                // A ping in this channel is a mention of this account, which is
+                                // what the red badge counts; the unread count above only
+                                // brightens the name.
+                                pings = unread.mentions[channel.id] ?: 0,
                                 onClick = {
                                     if (channel.channelType.isVoice) voice = channel else state.openChannelId.value = channel.id
                                 },
@@ -398,11 +409,19 @@ internal fun DirectMessages(state: AppState, modifier: Modifier) {
             // given rather than re-reading the nullable state they came from.
             else -> LazyColumn(Modifier.fillMaxSize().testTag("conversation-list")) {
                 items(rows.orEmpty(), key = { it.conversation.id }) { row ->
-                    ListItem(headlineContent = { Text(row.title) },
+                    // An unread conversation is a *ping*: a direct message is one person
+                    // addressing this account, so it gets the red badge and its count rather
+                    // than the brighter-name treatment a channel of unread messages gets.
+                    val waiting = unread.conversation(row.conversation.id)
+                    ListItem(headlineContent = {
+                        Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            fontWeight = unreadNameWeight(waiting > 0),
+                            color = unreadNameColor(waiting > 0, MaterialTheme.colorScheme.onSurface))
+                    },
                         supportingContent = { Text(if (row.conversation.type == "group") "Group conversation" else "Direct message") },
                         leadingContent = { Avatar(row.title, row.participants.firstOrNull()?.avatarUrl,
                             baseUrl = baseUrl) },
-                        trailingContent = if (unread.conversation(row.conversation.id) > 0) ({ Badge { Text("${unread.conversation(row.conversation.id)}") } }) else null,
+                        trailingContent = if (waiting > 0) ({ PingBadge(count = waiting, minHeight = 16.dp) }) else null,
                         modifier = Modifier.clickable { state.openConversationId.value = row.conversation.id })
                 }
             }

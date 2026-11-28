@@ -200,3 +200,30 @@ app rendered it.
 That pair is the evidence for the requirement that the client respect Harmony's
 appearance settings: `AccountAppearanceRenderTest` captures both and asserts the
 pixels differ, so a screen that ignored the stored setting could not pass.
+
+## Unread and pings
+
+Five captures from `UnreadAttentionTest` and `UnreadAttentionWideTest`, the pictures behind the
+rule that unread is the bright name and the red badge is a ping. Every one is drawn with no
+instance: the spaces are passed in, and the two lists that read one use `FixtureInstance` and the
+same `UnreadCountRow`s the app fills its badges from. Each capture carries its own caption on the
+screen so the picture says which of the two things each row is.
+
+- `unread-space-bar.png` -- the phone's bar. Home carries the badge (4 unread direct messages,
+  which are four pings) and Pinged carries one (3 unread, 1 mention). **Busy has twelve unread
+  messages and no badge at all**: its name is the bright white one, which is the whole change.
+  Quiet, with nothing waiting, is grey.
+- `unread-wide-rail.png` -- the same four spaces in a tablet's rail, where a count used to be
+  easiest to misread as a column of numbers. Busy is bright with no badge; Quiet is muted; Home
+  and Pinged have the red pill at the row's end.
+- `unread-more-sheet.png` -- the "More" sheet, the one place a count stays in words: "Busy --
+  12 unread" with no badge, "Pinged -- 1 pinging you, 3 unread" with one. It is where somebody
+  decides *which* server to open, so the count in a sentence is the useful form of it.
+- `unread-channel-column.png` -- the real `ChannelList`: `general` has six unread of which two
+  mention this account, so it is bright **and** badged with the 2; `design` has three unread and
+  no mention, so it is bright and unbadged; `welcome` is read and muted.
+- `unread-direct-messages.png` -- the real `DirectMessages` list: an unread conversation keeps
+  its badge, because a direct message is one person addressing this account.
+
+What they cannot prove: how the two greys read on a cheap panel in sunlight, or how the badge
+animates when a count changes. Those need the APK on an emulator.

@@ -141,9 +141,9 @@ class DesignSystemRenderTest {
 
     /** Three servers and Home, as the frame's navigation: what the captures draw. */
     private val previewSpaces = listOf(
-        Space.Home.copy(badge = 3),
+        Space.Home.copy(unread = 3, pings = 3),
         Space("s1", "Design"),
-        Space("s2", "E2E Server", badge = 1),
-        Space("s3", "Book club", badge = 12, mentions = 1),
+        Space("s2", "E2E Server", unread = 1),
+        Space("s3", "Book club", unread = 12, pings = 1),
     )
 }

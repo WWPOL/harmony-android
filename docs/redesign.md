@@ -51,16 +51,34 @@ list, and finding the strip; it is now the same single tap as changing channel.
 | 600dp and wider | a rail at the side | a pointer and a two-handed grip both find it, and a wide window has the width to list every server *by name* |
 
 **The phone's bar** (`SpaceBar`) holds Home, the three servers most worth reaching, and a "More"
-control. It is ordered by *attention*, not recency: unread mentions first, then any unread, then
-the rest (`barSpaces`). A server with six unread messages should not sit behind one that was read
-this morning. The bar scrolls rather than compressing, so every item keeps its real size and its
+control. It is ordered by *attention*, not recency: pings first, then any unread, then the rest
+(`barSpaces`). A server with six unread messages should not sit behind one that was read this
+morning. The bar scrolls rather than compressing, so every item keeps its real size and its
 name; a bar of eight squeezed monograms is a memory test, and there is room for one short line
 under each face.
 
-**The wide rail** (`SpaceColumn`) lists *every* server, by name, with its unread count, plus
-"Add a server" and "More". The names are the point: a 76dp column of monograms is a phone pattern
-a tablet does not need to repeat, and with the width to spell them a server is found by reading
-rather than by remembering which initials were which.
+**The wide rail** (`SpaceColumn`) lists *every* server, by name, plus "Add a server" and "More".
+The names are the point: a 76dp column of monograms is a phone pattern a tablet does not need to
+repeat, and with the width to spell them a server is found by reading rather than by remembering
+which initials were which.
+
+### Two kinds of attention, two pictures
+
+Unread and a ping are not the same news and are not drawn the same way (`ui/components/UnreadAttention.kt`):
+
+- **Unread** is the **name**, brighter and heavier than a name with nothing behind it: in the dark
+  look the near-white `onSurface` against the dim `onSurfaceVariant`. No number, no badge, no
+  colour. A count of unread messages is a quantity nobody acts on, and a rail of red counts is a
+  rail with no signal left in it.
+- **A ping** is the **red badge** and its count: somebody named this account in a channel, or sent
+  it a direct message. That is one person asking one person for an answer, and red is spent on
+  nothing else -- which is what makes it worth looking at. A direct message *is* a ping, so an
+  unread conversation keeps the badge.
+
+The same two rules are what the channel column and the direct-message list draw, so a space, a
+channel and a conversation never disagree about what red means. The "More" sheet keeps a sentence
+("6 unread", "2 pinging you") because it is where somebody decides *which* server to open, and a
+count in words is the useful form of that; the badge there is still the ping's.
 
 **The selection is a shape, not a highlight.** A space's face morphs its corner radius as it
 becomes current (Material 3 Expressive's selected-item language), and the label goes bold. There
@@ -70,7 +88,8 @@ is no second colour band and no tick, because the shape and the weight already s
 
 The four rare destinations -- Social, Files, Alerts, You -- live behind the rail's "More"
 control, in `MoreSheet.kt`. It is deliberately **not** an overflow menu: it lists every server
-with its name and unread count, then the four places with a line saying what is inside each one.
+with its name and what is waiting in it, then the four places with a line saying what is inside
+each one.
 It is the only place a person can find a server they are not thinking about, which is what makes
 a bar of three safe, and it is one tap from anywhere.
 
@@ -328,7 +347,7 @@ The redesign's own tests:
 
 - `SpaceRailTest` — the frame's width rule; every space inside the status bar and the cutout and
   at least 48dp tall; a tap on a server reaching the caller and the frame following it; a badge's
-  spoken wording; the bar's *capacity* rule, that Home, the servers and "More" all fit at every
+  spoken wording (unread and pings are spoken apart, `UnreadAttentionTest`); the bar's *capacity* rule, that Home, the servers and "More" all fit at every
   phone width (this is a bug that shipped in this change: the item width was the bar divided by
   the spaces, which pushed "More" off the screen); the order of attention; and the pane-count
   rule, that a list gets a room beside it from 600dp.

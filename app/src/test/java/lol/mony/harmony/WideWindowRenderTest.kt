@@ -69,8 +69,8 @@ class WideWindowRenderTest {
 
 /** The spaces the wide frame draws: Home and three servers, one asking for attention. */
 private val wideSpaces = listOf(
-    Space.Home.copy(badge = 3),
+    Space.Home.copy(unread = 3, pings = 3),
     Space("s1", "Design"),
-    Space("s2", "E2E Server", badge = 1, mentions = 1),
+    Space("s2", "E2E Server", unread = 1, pings = 1),
     Space("s3", "Book club"),
 )

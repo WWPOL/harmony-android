@@ -55,24 +55,46 @@ enum class Destination(
  * room they are in to get there.
  *
  * [id] is the server's id, or null for Home (the direct messages). A server's icon may be null,
- * in which case the space draws its monogram; [badge] is its unread count and [mentions] how
- * many of those name the person, which is what colours the badge.
+ * in which case the space draws its monogram.
+ *
+ * The two counts are the two kinds of attention, and they are drawn differently on purpose:
+ *
+ * - [unread] is how many messages in this space are unread. It is drawn as the space's **name,
+ *   brighter** -- see [lol.mony.harmony.ui.components.unreadNameColor] -- and never as a number.
+ * - [pings] is how many of those are direct pings: a mention of this account in a channel, or an
+ *   unread direct message in Home. That is the only thing the red badge is spent on.
  */
 data class Space(
     val id: String?,
     val name: String,
     val icon: String? = null,
-    val badge: Int = 0,
-    val mentions: Int = 0,
+    val unread: Int = 0,
+    val pings: Int = 0,
 ) {
     val isHome: Boolean get() = id == null
 
+    /** Whether anything at all is waiting here, which is what brightens the name. */
+    val hasUnread: Boolean get() = unread > 0
+
+    /**
+     * What the red badge says a screen reader, which is not just its number.
+     *
+     * A badge is a count of *people waiting*, and what a person is waiting for differs by space:
+     * a mention in a server's channel, or an unread direct message in Home. The number alone
+     * would make TalkBack read "3" beside "Design" and leave the reason out.
+     */
+    fun pingDescription(): String = if (isHome) {
+        if (pings == 1) "1 unread direct message" else "$pings unread direct messages"
+    } else {
+        if (pings == 1) "1 mention" else "$pings mentions"
+    }
+
     /** What TalkBack says instead of a bare number. */
     fun spoken(): String = when {
-        mentions > 0 && badge > mentions -> "$name, $badge unread, $mentions mentioning you"
-        mentions > 0 -> "$name, $mentions mentioning you"
-        badge == 1 -> "$name, 1 unread"
-        badge > 1 -> "$name, $badge unread"
+        pings > 0 && unread > pings -> "$name, $unread unread, $pings pinging you"
+        pings > 0 -> "$name, $pings pinging you"
+        unread == 1 -> "$name, 1 unread"
+        unread > 1 -> "$name, $unread unread"
         else -> name
     }
 
@@ -165,8 +187,8 @@ const val MAX_BAR_ITEM_DP = 88
  * Ordering is the interesting part. Recency alone puts a server the person read once this
  * morning above the one with six unread messages, which is backwards: a space that is asking
  * for attention should be reachable without hunting for it. So the bar is ordered by
- * *attention* first -- unread mentions, then any unread, then recency -- and the rest of the
- * person's servers are one tap away in the sheet.
+ * *attention* first -- pings, then any unread, then recency -- and the rest of the person's
+ * servers are one tap away in the sheet.
  *
  * Home is always first and always present: it is where direct messages live, and it is the one
  * space whose absence would be surprising.
@@ -175,7 +197,7 @@ fun barSpaces(spaces: List<Space>, limit: Int = SPACES_IN_BAR): List<Space> {
     val home = spaces.firstOrNull { it.isHome } ?: Space.Home
     val rest = spaces.filterNot { it.isHome }
         // `sortedByDescending` is stable, so spaces that tie keep the recency order they came in.
-        .sortedByDescending { it.mentions * 1_000_000 + it.badge * 1_000 }
+        .sortedByDescending { it.pings * 1_000_000 + it.unread * 1_000 }
     return listOf(home) + rest.take(limit.coerceAtLeast(0))
 }
 
@@ -186,7 +208,7 @@ fun barSpaces(spaces: List<Space>, limit: Int = SPACES_IN_BAR): List<Space> {
  * the server they are *not* thinking about.
  */
 fun sheetSpaces(spaces: List<Space>): List<Space> =
-    spaces.filterNot { it.isHome }.sortedByDescending { it.mentions * 1_000_000 + it.badge * 1_000 }
+    spaces.filterNot { it.isHome }.sortedByDescending { it.pings * 1_000_000 + it.unread * 1_000 }
 
 /**
  * Whether a space is the one being shown.

@@ -67,12 +67,19 @@ fun SignedInShell(
 
     // The spaces are the server list, with the counts the rail draws. Home is first and always
     // present: it is where the direct messages live, and its absence would be surprising.
+    //
+    // The two counts are not the same thing and are not drawn the same way. `unread` brightens a
+    // space's name; `pings` is what the red badge counts. For a server a ping is a mention of this
+    // account in one of its channels. For Home it is an unread direct message, because a direct
+    // message *is* somebody addressing this account: there is no reading one "later" in a list of
+    // a hundred; the person who sent it is waiting on an answer.
+    val homeUnread = unread.conversations.values.sum()
     val spaces = listOf(
         Space(
             id = null,
             name = "Home",
-            badge = unread.conversations.values.sum(),
-            mentions = 0,
+            unread = homeUnread,
+            pings = homeUnread,
         ),
     ) + servers.map { entry ->
         val channelIds = channelsByServer[entry.server.id].orEmpty().map { it.id }
@@ -80,8 +87,8 @@ fun SignedInShell(
             id = entry.server.id,
             name = entry.server.name,
             icon = entry.server.icon,
-            badge = unread.serverTotal(channelIds),
-            mentions = unread.mentionsIn(channelIds),
+            unread = unread.serverTotal(channelIds),
+            pings = unread.mentionsIn(channelIds),
         )
     }
     val currentSpace = spaces.firstOrNull { isCurrentSpace(it, selectedServerId, showingDms) }

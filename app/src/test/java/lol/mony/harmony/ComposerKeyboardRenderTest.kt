@@ -87,7 +87,7 @@ class ComposerKeyboardRenderTest {
 
     private val noInsets = WindowInsets(0, 0, 0, 0)
 
-    private val spaces = listOf(Space.Home, Space("s1", "Brapcord", badge = 84))
+    private val spaces = listOf(Space.Home, Space("s1", "Brapcord", unread = 84, pings = 3))
 
     private val messages = listOf(
         "phat" to "if consumers are not receiving go…",

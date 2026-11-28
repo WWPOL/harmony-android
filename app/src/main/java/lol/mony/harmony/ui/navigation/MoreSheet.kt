@@ -13,7 +13,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -30,14 +29,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import lol.mony.harmony.ui.components.HarmonyDivider
+import lol.mony.harmony.ui.components.PingBadge
 import lol.mony.harmony.ui.components.ServerAvatar
+import lol.mony.harmony.ui.components.unreadNameColor
+import lol.mony.harmony.ui.components.unreadNameWeight
 import lol.mony.harmony.ui.theme.HarmonySize
-import lol.mony.harmony.ui.theme.LocalHarmonyColors
 
 /**
  * The app's map: every space, and the four places that are not the conversation.
@@ -92,13 +92,20 @@ fun MoreSheet(
                     SheetRow(
                         title = space.name,
                         supporting = when {
-                            space.mentions > 0 -> "${space.mentions} mentioning you"
-                            space.badge > 0 -> "${space.badge} unread"
+                            // Home's pings are its unread direct messages, so a count of
+                            // "pinging you" would be a count of the same messages twice.
+                            space.isHome && space.unread == 1 -> "1 unread direct message"
+                            space.isHome && space.unread > 1 -> "${space.unread} unread direct messages"
                             space.isHome -> "Your direct messages"
+                            space.pings > 0 && space.unread > space.pings ->
+                                "${space.pings} pinging you, ${space.unread} unread"
+                            space.pings == 1 -> "1 pinging you"
+                            space.pings > 1 -> "${space.pings} pinging you"
+                            space.unread > 0 -> "${space.unread} unread"
                             else -> null
                         },
-                        badge = space.badge,
-                        badgeUrgent = space.mentions > 0,
+                        pings = space.pings,
+                        unread = space.hasUnread,
                         current = current,
                         tag = "sheet-" + spaceTag(space),
                         leading = {
@@ -173,7 +180,13 @@ private fun HomeGlyph(current: Boolean) {
 }
 
 /**
- * One row of the map: what it is, what is inside, and how much of it is asking for attention.
+ * One row of the map: what it is, what is inside, and what is asking for attention.
+ *
+ * Attention is drawn the way every other list in the app draws it: a row with unread messages is
+ * written in the bright foreground, and the red badge is reserved for a ping. The supporting line
+ * still says "6 unread" in words, because this sheet is where somebody decides *which* server to
+ * open and a count in a sentence is the useful form of that -- it is the badge that is not a
+ * count of messages.
  *
  * The current place is a tinted row rather than a tick, because the row is also the thing that
  * closes the sheet -- a tick would say "this is chosen" and a person would still wonder whether
@@ -185,8 +198,8 @@ private fun SheetRow(
     supporting: String?,
     current: Boolean,
     tag: String,
-    badge: Int = 0,
-    badgeUrgent: Boolean = false,
+    pings: Int = 0,
+    unread: Boolean = false,
     leading: @Composable () -> Unit,
     onClick: () -> Unit,
 ) {
@@ -217,7 +230,9 @@ private fun SheetRow(
                 Text(
                     title,
                     style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = if (current || badge > 0) FontWeight.SemiBold else FontWeight.Normal,
+                    fontWeight = unreadNameWeight(unread || current),
+                    color = if (current) MaterialTheme.colorScheme.onSecondaryContainer
+                    else unreadNameColor(unread, MaterialTheme.colorScheme.onSurface),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -231,12 +246,7 @@ private fun SheetRow(
                     )
                 }
             }
-            if (badge > 0) {
-                Badge(
-                    containerColor = if (badgeUrgent) LocalHarmonyColors.current.badge
-                    else MaterialTheme.colorScheme.primary,
-                ) { Text(if (badge > 99) "99+" else "$badge") }
-            }
+            if (pings > 0) PingBadge(count = pings)
         }
     }
 }

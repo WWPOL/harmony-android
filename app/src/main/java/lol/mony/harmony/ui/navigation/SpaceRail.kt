@@ -31,7 +31,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.outlined.Apps
-import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -49,8 +48,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import lol.mony.harmony.ui.components.PingBadge
 import lol.mony.harmony.ui.components.ServerAvatar
-import lol.mony.harmony.ui.theme.HarmonyShape
+import lol.mony.harmony.ui.components.unreadNameColor
 import lol.mony.harmony.ui.theme.HarmonySize
 import lol.mony.harmony.ui.theme.LocalHarmonyColors
 import lol.mony.harmony.ui.theme.LocalMotion
@@ -174,9 +174,11 @@ private fun SpaceBar(
                 ) {
                     // Home is pinned rather than scrolled: it is the one space whose absence would
                     // be surprising, and it is the space a person returns to when nothing else is
-                    // asking.
+                    // asking. It is the *caller's* Home, not the bare constant, because Home
+                    // carries counts like any other space -- its unread direct messages, which
+                    // are pings -- and pinning the constant silently dropped them.
                     SpaceTab(
-                        space = Space.Home,
+                        space = spaces.firstOrNull { it.isHome } ?: Space.Home,
                         current = currentSpace?.isHome == true,
                         baseUrl = baseUrl,
                         width = perItem,
@@ -205,12 +207,17 @@ private fun SpaceBar(
 }
 
 /**
- * One space in the phone's bar: a face, its name under it, and its unread count on the face.
+ * One space in the phone's bar: a face, its name under it, and a ping on the face if one is
+ * waiting.
  *
- * The name is the point. A bar of bare monograms is a memory test -- a person has to remember
- * that "ES" is the server they are looking for -- and there is room for one short line. The
- * name is truncated with an ellipsis rather than wrapped, so every item in the bar is the same
- * height and the bar does not reflow when a server is renamed.
+ * The name is the point, and it is also how an *unread* space is drawn: a space with messages
+ * waiting gets a brighter, heavier name, and a space with nothing waiting keeps the dim one. No
+ * number sits on the face for unread messages -- that is what the red badge is *not* for. A ping
+ * -- somebody naming this account, or an unread direct message in Home -- is the one thing the
+ * badge is spent on, because it is the one thing that needs an answer rather than a read.
+ *
+ * The name is truncated with an ellipsis rather than wrapped, so every item in the bar is the
+ * same height and the bar does not reflow when a server is renamed.
  *
  * The selected item is drawn as Material 3 Expressive draws one: the face's corners morph to a
  * fuller, rounder square and the label goes bold, with no second colour band. A person who has
@@ -243,20 +250,22 @@ private fun SpaceTab(
         ) {
             Box {
                 SpaceFace(space = space, baseUrl = baseUrl, shape = shape, size = 26.dp, current = current)
-                if (space.badge > 0) {
-                    CountBadge(
-                        count = space.badge,
-                        urgent = space.mentions > 0,
+                if (space.pings > 0) {
+                    PingBadge(
+                        count = space.pings,
                         modifier = Modifier.align(Alignment.TopEnd).offset(x = 5.dp, y = (-5).dp),
+                        description = space.pingDescription(),
                     )
                 }
             }
             Text(
                 space.name,
                 style = MaterialTheme.typography.labelSmall,
-                fontWeight = if (current || space.badge > 0) FontWeight.SemiBold else FontWeight.Medium,
-                color = if (current) MaterialTheme.colorScheme.onSecondaryContainer
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = if (current || space.hasUnread) FontWeight.SemiBold else FontWeight.Medium,
+                color = when {
+                    current -> MaterialTheme.colorScheme.onSecondaryContainer
+                    else -> unreadNameColor(space.hasUnread, MaterialTheme.colorScheme.onSurfaceVariant)
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -326,38 +335,18 @@ private fun SpaceColumn(
     }
 }
 
-/**
- * An unread count, as the rail and the bar draw it.
- *
- * Smaller than Material's [Badge] on purpose: a badge sits on a 26dp face, and the stock badge's
- * 16dp floor is most of the face. The count is still a count -- it is not a dot -- because "how
- * much is waiting" is the thing a person compares across spaces.
- */
-@Composable
-private fun CountBadge(count: Int, urgent: Boolean, modifier: Modifier = Modifier) {
-    Surface(
-        color = if (urgent) LocalHarmonyColors.current.badge else MaterialTheme.colorScheme.primary,
-        contentColor = if (urgent) LocalHarmonyColors.current.onBadge else MaterialTheme.colorScheme.onPrimary,
-        shape = HarmonyShape.pill,
-        modifier = modifier.heightIn(min = 15.dp),
-    ) {
-        Text(
-            if (count > 99) "99+" else "$count",
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-        )
-    }
-}
-
 /** The width the wide rail takes: enough for a name and a badge, not a pane. */
 val spaceRailWidth: Dp = 248.dp
 
 /**
- * One space as a row in the wide rail: face, name, unread.
+ * One space as a row in the wide rail: face, name, and a ping if one is waiting.
  *
  * A row rather than a tile because there is width to use: a person scanning a tablet's rail is
- * looking for a *name*, and an unread count is a number they compare across rows.
+ * looking for a *name*. The name is also the unread signal here, exactly as it is in the bar: a
+ * space with messages waiting is drawn in the bright foreground and a space with none is drawn
+ * muted, so the eye finds what is new without reading a single number. Only a ping -- a mention,
+ * or an unread direct message -- gets the red badge, at the row's trailing edge where a count is
+ * easy to compare across rows.
  */
 @Composable
 private fun SpaceRow(
@@ -375,6 +364,8 @@ private fun SpaceRow(
     )
     val content = if (current) MaterialTheme.colorScheme.onSecondaryContainer
     else MaterialTheme.colorScheme.onSurface
+    val muted = if (current) MaterialTheme.colorScheme.onSecondaryContainer
+    else MaterialTheme.colorScheme.onSurfaceVariant
     Surface(
         onClick = onClick,
         shape = MaterialTheme.shapes.large,
@@ -395,13 +386,18 @@ private fun SpaceRow(
             Text(
                 space.name,
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = if (current || space.badge > 0) FontWeight.SemiBold else FontWeight.Normal,
-                color = content,
+                // A current row is already bold, so it keeps the weight it has; a quiet one is
+                // Normal and an unread one is SemiBold, which is the second half of the signal
+                // beside the brighter colour.
+                fontWeight = if (current || space.hasUnread) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (current) content else unreadNameColor(space.hasUnread, muted),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            if (space.badge > 0) CountBadge(count = space.badge, urgent = space.mentions > 0)
+            if (space.pings > 0) {
+                PingBadge(count = space.pings, description = space.pingDescription())
+            }
         }
     }
 }

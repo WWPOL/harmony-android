@@ -7,7 +7,9 @@ next two were found by using that same build: a preferences file that bricked th
 notification the tray would not stop repeating. The last four are the same kind of report from
 the same habit: a keyboard-sized deadspace under the composer, a message body that selected itself
 whenever it was pressed, a channel that had threads told it had none, and a reactor list that named
-nobody.
+nobody. Three more came after them: a thread that was not drawn the way Discord draws one, a thread
+being read that had no row in the column at all, and a red count badge on every unread message that
+left nothing for a ping.
 
 ## 1. The rail sat under the status bar and the cutout
 
@@ -681,6 +683,90 @@ not doing any work in the column, where the only question is which threads are o
 An indent with no branch reads as a narrower row and does not say which channel it belongs to;
 that is why Discord draws the branch, and why this does. A `Forum` glyph on the thread row is a
 second glyph in a column that already has the channel's, and Discord's thread row has none.
+
+## 14. A red count on every unread message, and nothing left for a ping
+
+**The report.** *"Don't use the red badge w number ux to indicate unread messages. you can just use
+the brighter white text for that. the red badge ux is for direct pings."*
+
+**What it was.** Every surface that knew a count drew it. The phone's bar put a badge on the
+space's face, the wide rail put one at the row's end, the "More" sheet put one after the name, the
+channel column put one on the channel's row, and the direct-message list put one on the
+conversation's row. The colour carried one distinction -- red when the space had *mentions*, the
+theme's primary blue otherwise -- so the rail was a column of counts in which six unread messages
+in a quiet server shouted as loudly as the one message that named you. Red meant "unread, unless
+some of it was a mention", which is the opposite of the rule the report asks for: red is for the
+ping, and everything else has a quieter way to be said.
+
+**The rule, and where it lives.** `ui/components/UnreadAttention.kt` is the one place both halves
+are defined, so a list cannot invent a third way of drawing a count:
+
+- `unreadNameColor(unread, muted)` / `unreadNameWeight(unread)` -- **unread is the name**: the
+  bright `onSurface` against the muted role the row would otherwise use, and SemiBold against the
+  row's own quiet weight. No number, no badge, no colour.
+- `PingBadge(count)` -- **a ping is the red badge**, `HarmonyColors.badge`, capped at `99+`, with a
+  spoken description ("2 mentions", "3 unread direct messages").
+
+`Space` was renamed with it: `badge`/`mentions` became `unread`/`pings`. The old names were the
+confusion in code form -- a "badge" that was sometimes not a badge, and a "mention" that was
+really "the red subset" -- and every call site now has to say which of the two it means.
+
+What each surface draws:
+
+| Surface | Unread | A ping |
+|---|---|---|
+| Phone bar tile (`SpaceTab`) | bright, heavy name under the face | red badge on the face |
+| Wide rail row (`SpaceRow`) | bright, heavy name | red badge at the row's end |
+| "More" sheet (`SheetRow`) | bright name, "6 unread" in words | red badge, "2 pinging you" in words |
+| Channel column (`ChannelRow`) | bright, heavy name | red badge when the channel has mentions |
+| Direct messages (a row) | bright, heavy name | red badge -- a direct message *is* a ping |
+
+Home's counts are the direct messages: its `unread` is how many unread conversations it holds and
+its `pings` is the same number, because a direct message is one person addressing this account and
+there is no reading it "later" in a list of a hundred. A server's `pings` is its channels'
+`unread_mentions`, which is the column `get_unread_counts` already returned and the app already
+stored -- nothing new is read from the instance for this.
+
+**A bug this found.** The phone's bar pinned the literal `Space.Home` rather than the caller's Home,
+so Home's counts never reached the bar at all: on a phone, four unread direct messages drew
+nothing. The new test's badge count is what caught it (`expected:<2> but was:<1>`), and the fix is
+the bar drawing the Home it was given.
+
+**Alternatives rejected.** Keeping the count badge and colouring it grey when nothing pinged: a
+grey count is still a number to read on every row, and the report is about the number, not the
+colour. A dot instead of a count for unread: a dot says "something" where the brighter name already
+says it, and it costs the same corner of the face the badge needs for the case that matters. Making
+the channel column's mention badge a different shape from the rail's: one picture for one meaning is
+the point of the shared composable.
+
+**What it is verified by.** `UnreadAttentionTest` (six cases, no instance needed for the four that
+draw):
+
+- `onlyAPingingSpaceGetsABadge` -- the bar draws exactly the two badges of the four spaces that
+  ping, and no unread count is drawn as text. Mutation-checked: drawing a badge for every unread
+  space again fails it with `expected:<2> but was:<3>`.
+- `anUnreadNameIsBrighterThanAReadOne` -- the contrast of each name against its own row's
+  background, measured from each tile's own capture. Mutation-checked: making `unreadNameColor`
+  return the muted role fails it with `an unread name (0.672) is not brighter than a read one
+  (0.665)`; the real rule reads `0.901` against `0.665`.
+- `theBadgeIsThePingRed` -- the pill's own fill, sampled above and beside the digit. Mutation-checked:
+  drawing it in `MaterialTheme.colorScheme.primary` -- the colour the old unread badge used --
+  fails it with `the ping badge's fill is rgb(14,165,233), not red`.
+- `anUnreadChannelIsBrightAndOnlyAMentionGetsABadge` -- the real `ChannelList` against
+  `FixtureInstance`, fed the same `UnreadCountRow`s the app fills its badges from: one badge for the
+  channel with mentions, none for the channel with only unread, and the unread channel's name
+  brighter than the read one's, each measured on its own row's capture.
+- `anUnreadDirectMessageIsAPing` -- the real `DirectMessages` list: an unread conversation keeps its
+  badge.
+- `spokenSaysUnreadAndPingsApart` -- "Busy, 12 unread" and "Pinged, 3 unread, 1 pinging you" are
+  different sentences, so a screen reader says which is which.
+
+The captures are `unread-space-bar.png`, `unread-channel-column.png` and
+`unread-direct-messages.png` in [evidence/render](evidence/render/README.md).
+
+**What these cannot prove.** A Robolectric capture is a drawing of the composables, not a device:
+it cannot prove how the two greys read on a cheap panel in sunlight, and it says nothing about the
+badge's animation when a count changes. That needs the APK on an emulator, and is not claimed here.
 
 ## How this is verified, and what is not
 
